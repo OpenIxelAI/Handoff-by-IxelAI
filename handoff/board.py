@@ -520,6 +520,7 @@ class Board:
         self.clock = clock
         self.read_only = read_only
         self.expired: list[Task] = []  # what opening the board removed because of its keep setting
+        self.expired_left: list[str] = []  # what of those it couldn't remove (results in use), in words
 
     # ── Opening ──
 
@@ -1638,7 +1639,7 @@ class Board:
                     f"SELECT EXISTS (SELECT 1 FROM tasks WHERE status IN ({', '.join('?' for _ in finished)}) "
                     "AND updated_at <= ?)", [*finished, self._cutoff(days)]).fetchone()[0]
             if due:
-                self.expired = self._remove_finished(self._cutoff(days), wait_ms=0)[0]
+                self.expired, self.expired_left = self._remove_finished(self._cutoff(days), wait_ms=0)
                 if self.expired:
                     return  # (and that cleared the files, as far as it could)
             if meta.get("deletions_cleared") != meta.get("deletions", "0"):

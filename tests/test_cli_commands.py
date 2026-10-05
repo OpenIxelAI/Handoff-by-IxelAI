@@ -277,6 +277,21 @@ def test_json_output_stays_json_when_opening_the_board_removes_tasks(project, ca
     assert _refs(project) == []
 
 
+def test_results_an_expiry_couldnt_remove_are_said(project, capsys, monkeypatch):
+    from handoff import board as board_module
+    run(capsys, "add", "Old")
+    run(capsys, "done", "T-1")
+    assert run(capsys, "keep", "30", "--yes")[0] == 0
+    results = project / ".handoff" / "outputs" / "T-1"
+    results.mkdir(parents=True)
+    (results / "answer.md").write_text("the answer", encoding="utf-8")
+    _age(project, 1)
+    monkeypatch.setattr(board_module.shutil, "rmtree", lambda *args, **kwargs: None)  # a file open on Windows
+    out = run(capsys, "board")[1]
+    assert "Removed T-1" in out and "Some of .handoff/outputs/T-1 couldn't be removed" in out
+    assert _refs(project) == [] and (results / "answer.md").is_file()
+
+
 def test_changing_keep_never_removes_by_the_old_setting(project, capsys):
     for title in ("Done 40 days ago", "Done 100 days ago"):
         run(capsys, "add", title)

@@ -410,6 +410,8 @@ def _say_expired(board, out: Console | None = None) -> None:
         message = (f"Removed {_and([t.ref for t in board.expired], most=10)}: this board removes finished tasks "
                    f"{how_long} (handoff keep).")
         (out or console).print(f"  [{C['dim']}]{escape(message)}[/]", soft_wrap=True)
+        for left in board.expired_left:  # their results, still on disk
+            (out or console).print(f"  [{C['gold']}]{escape(left)}[/]", soft_wrap=True)
 
 
 def _interactive() -> bool:
