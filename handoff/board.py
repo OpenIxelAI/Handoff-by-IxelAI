@@ -71,6 +71,7 @@ MAX_FILES = 200
 MAX_PATHS = 50
 MAX_BRANCH_CHARS = 200
 MAX_NAME_CHARS = 32
+MAX_JSON_DEPTH = 32  # lists and objects inside each other; what Handoff stores is a few deep at most
 
 # When may an assignee mark a task done?
 DONE_RULES = {
@@ -400,9 +401,22 @@ def safe_name(value: object) -> str | None:
 def _json(value: object, kind: type):
     try:
         data = json.loads(value) if isinstance(value, str) else None
-    except (ValueError, RecursionError):  # (nested thousands deep: json gives up)
+    except (ValueError, RecursionError):  # (nested thousands deep, json may give up)
         data = None
-    return data if isinstance(data, kind) else kind()
+    return data if isinstance(data, kind) and not _too_deep(data) else kind()
+
+
+def _too_deep(data: object) -> bool:
+    """Nested past MAX_JSON_DEPTH. Python 3.14 parses thousands deep when the stack has room, where older ones
+    always gave up, and printing or sending a field like that would then hit the limit instead."""
+    stack = [(data, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, (dict, list)):
+            if depth >= MAX_JSON_DEPTH:
+                return True
+            stack.extend((item, depth + 1) for item in (value.values() if isinstance(value, dict) else value))
+    return False
 
 
 def _int_or_none(value: object) -> int | None:
