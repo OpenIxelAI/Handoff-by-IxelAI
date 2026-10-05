@@ -21,14 +21,10 @@ def test_readme_lists_every_tool(tmp_path):
         assert f"`{name}`" in README, name
 
 
-# New commands the README rewrite adds (it's being rewritten separately); take each out once the README has it
-NOT_IN_README_YET = ("handoff clean", "handoff keep")
-
-
 def test_readme_lists_every_command():
     for usage, _ in cli.COMMANDS:
         command = " ".join(usage.split()[:2])
-        if command not in ("handoff mcp", "handoff version", "handoff help", *NOT_IN_README_YET):
+        if command not in ("handoff mcp", "handoff version", "handoff help"):
             assert f"`{command}" in README, command
 
 
