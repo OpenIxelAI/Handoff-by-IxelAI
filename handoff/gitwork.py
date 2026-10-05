@@ -17,7 +17,9 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
+from handoff.board import task_of_name
 from handoff.proc import find_on_path
 from handoff.sanitize import clean_line, find_secret, find_token
 
@@ -114,6 +116,34 @@ def _registered_git_dir(root: Path, path: Path) -> Path | None:
 
 def _branch_exists(root: Path, branch: str) -> bool:
     return _git(root, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], check=False).returncode == 0
+
+
+def task_branches(root: Path) -> set[str]:
+    """The tasks (T-N) that have a worker branch, handoff/T-N, in this repository. Only looks; none if git can't
+    read it."""
+    prefix = "refs/heads/handoff/"
+    out = _git(root, ["for-each-ref", "--format=%(refname)", prefix], check=False).stdout
+    return {line[len(prefix):] for line in out.splitlines() if line.startswith(prefix)}
+
+
+def work_left(root: Path, gone: Callable[[str], bool]) -> list[tuple[str, bool, bool]]:
+    """What the worker made for tasks that are gone (`gone` is given each T-N), oldest task first: the task's T-N,
+    whether its worktree (.handoff/worktrees/T-N) is still there, and whether its branch (handoff/T-N) is.
+    Removing a task leaves both, since they hold an agent's work. Only looks."""
+    try:
+        folders = {p.name for p in (root / WORKTREES).iterdir() if p.is_dir()}
+    except OSError:
+        folders = set()
+    try:
+        branches = task_branches(root)
+    except GitError:
+        branches = set()
+    found = {}
+    for ref in folders | branches:
+        task_id = task_of_name(ref)
+        if task_id is not None and gone(ref):
+            found[task_id] = (ref, ref in folders, ref in branches)
+    return [found[task_id] for task_id in sorted(found)]
 
 
 def ensure_worktree(root: Path, task_id: int, base: str | None = None, start: str | None = None) -> Worktree:

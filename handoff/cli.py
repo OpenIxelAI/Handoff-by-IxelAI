@@ -3,8 +3,8 @@
 The agents talk to the board through `handoff mcp`; everything else here is
 for you: see the board, add and assign tasks, and connect your apps. At the
 command line you are `human` on the board (shown as "you"), and the board lets
-you do what agents can't: reassign, cancel, delete, reopen, and close without
-a review.
+you do what agents can't: reassign, cancel, delete, clean, reopen, and close
+without a review.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 from rich import box
 from rich.console import Console, Group
@@ -53,7 +54,8 @@ COMMANDS = [
     ("handoff reopen T-12", "Open a done, cancelled or blocked task again"),
     ('handoff block T-12 "why" [--waiting-on NAME]', "Mark a task blocked, and say why"),
     ("handoff cancel T-12 [--reason R]", "Cancel a task"),
-    ("handoff delete T-12 [--yes]", "Delete a task and its history for good"),
+    ("handoff delete T-12 [--yes]", "Delete a task, its history and its results for good"),
+    ("handoff clean [--older-than DAYS] [--yes]", "Remove finished tasks that haven't changed in 30 days (or DAYS)"),
     ("handoff status T-12 open|blocked|done [--reason R]", "Set a task's status directly"),
     ('handoff review T-12 [approve|changes ["notes"]] [--check N=RESULT] [--panel]',
      "Review a task that's waiting for you (with no verdict, it walks you through it)"),
@@ -67,6 +69,7 @@ COMMANDS = [
                                                         "Handoff out of them)"),
     ("handoff doctor", "Check the board, the project and the apps"),
     ("handoff done-rule [review_or_reason|review|any]", "When agents may mark tasks done"),
+    ("handoff keep [DAYS|forever]", "How long this board keeps finished tasks"),
     ("handoff update [--check]", "Get the latest Handoff and reinstall it"),
     ("handoff version", "Show the version"),
     ("handoff help [COMMAND]", "Show this help, or one command's options and examples"),
@@ -75,10 +78,11 @@ COMMANDS = [
 
 GROUPS = [
     ("See what's happening", ("board", "show")),
-    ("Make and change tasks", ("add", "assign", "note", "done", "reopen", "block", "cancel", "delete", "status")),
+    ("Make and change tasks", ("add", "assign", "note", "done", "reopen", "block", "cancel", "delete", "clean",
+                               "status")),
     ("Review work", ("review",)),
     ("Hand work to agents", ("dispatch", "agents", "approve", "run", "worker")),
-    ("Set up", ("setup", "doctor", "done-rule", "update", "version", "help")),
+    ("Set up", ("setup", "doctor", "done-rule", "keep", "update", "version", "help")),
     ("For apps", ("mcp",)),
 ]
 
@@ -108,6 +112,7 @@ EXAMPLES = {
               'handoff block T-3 "Needs a decision on the design" --waiting-on me'],
     "cancel": ["handoff cancel T-3", 'handoff cancel T-3 --reason "Not needed any more"'],
     "delete": ["handoff delete T-3", "handoff delete T-3 --yes"],
+    "clean": ["handoff clean", "handoff clean --older-than 90", "handoff clean --older-than 7 --yes"],
     "status": ["handoff status T-3 open", 'handoff status T-3 blocked --reason "Waiting for the API keys"'],
     "review": ["handoff review T-3", "handoff review T-3 approve",
                'handoff review T-3 changes "Handle an empty cart" --check 2=not_met'],
@@ -121,6 +126,7 @@ EXAMPLES = {
     "setup": ["handoff setup", "handoff setup --write", "handoff setup --remove"],
     "doctor": ["handoff doctor"],
     "done-rule": ["handoff done-rule", "handoff done-rule review"],
+    "keep": ["handoff keep 30", "handoff keep forever", "handoff keep"],
     "update": ["handoff update --check", "handoff update"],
     "version": ["handoff version"],
     "help": ["handoff help", "handoff help show"],
@@ -143,6 +149,7 @@ START = [
     ("handoff setup", "Connect Claude Code, Codex and Claude Desktop"),
 ]
 
+CLEAN_DAYS = 30  # handoff clean removes finished tasks older than this, unless told otherwise
 PROJECT_HELP = "the project folder (default: the git repository containing this folder)"
 YOU = ("me", "you", "myself")  # names for the person, wherever they type a name
 NOBODY = ("nobody", "anyone", "none", "-")  # no assignee: anyone can claim it
@@ -174,6 +181,14 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
 def _or(items) -> str:
     items = [str(i) for i in items]
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} or {items[-1]}"
+
+
+def _and(items, most: int | None = None) -> str:
+    """T-1, T-2 and T-3; past `most` of them, the rest as a count."""
+    items = [str(i) for i in items]
+    if most is not None and len(items) > most:
+        items = items[:most] + [f"{len(items) - most} more"]
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 class _Parser(argparse.ArgumentParser):
@@ -306,7 +321,8 @@ class _Parser(argparse.ArgumentParser):
         return None
 
     def _some_tasks(self) -> list:
-        """Up to five tasks from this project's board, if it already has one (this never makes one)."""
+        """Up to five tasks from this project's board, if it already has one (this never makes one, and removes
+        nothing its keep setting would: it's only for a message)."""
         from handoff.board import ACTIVE, Board, BoardError
         from handoff.project import ProjectError, board_path, resolve_project
 
@@ -314,7 +330,8 @@ class _Parser(argparse.ArgumentParser):
             root = resolve_project(self._value_of("--project"))
             if not board_path(root).exists():
                 return []
-            tasks = Board.open(root, create=False).tasks(statuses=self.task_statuses or sorted(ACTIVE), limit=5)
+            board = Board.open(root, create=False, expire=False)
+            tasks = board.tasks(statuses=self.task_statuses or sorted(ACTIVE), limit=5)
         except (BoardError, ProjectError, OSError):
             return []
         return sorted(tasks, key=lambda t: t.id)
@@ -372,13 +389,29 @@ def _with_project(command: str, args: argparse.Namespace) -> str:
     return f'{command} --project "{path}"' if " " in path else f"{command} --project {path}"
 
 
-def _board(args: argparse.Namespace):
+def _board(args: argparse.Namespace, expire: bool = True):
+    """The project's board, made if it isn't there yet. With `expire`, opening it removes the finished tasks its
+    keep setting says have had their time, and this says which."""
     global _opened
     from handoff.board import Board
     root = _root(args)
-    board = _opened = Board.open(root)
+    board = _opened = Board.open(root, expire=expire)
+    # With --json, what's printed is the JSON alone: this goes to stderr
+    _say_expired(board, err_console if getattr(args, "json", False) else console)
     _maybe_ask_gitignore(board, root)
     return board
+
+
+def _say_expired(board, out: Console | None = None) -> None:
+    """Which finished tasks opening the board just removed, because of how long it keeps them (handoff keep)."""
+    if board.expired:
+        days = board.keep_days
+        how_long = f"{_plural(days, 'day')} after their last change" if days else "as its keep setting says"
+        message = (f"Removed {_and([t.ref for t in board.expired], most=10)}: this board removes finished tasks "
+                   f"{how_long} (handoff keep).")
+        (out or console).print(f"  [{C['dim']}]{escape(message)}[/]", soft_wrap=True)
+        for left in board.expired_left:  # their results, still on disk
+            (out or console).print(f"  [{C['gold']}]{escape(left)}[/]", soft_wrap=True)
 
 
 def _interactive() -> bool:
@@ -676,6 +709,7 @@ def cmd_home(argv: list[str]) -> int:
         root = None
     if root is not None and board_path(root).exists():
         board = _opened = Board.open(root, create=False)
+        _say_expired(board)
         _print_board(board, root, sorted(ACTIVE), None)
         _hint("Every command: handoff help · One task: handoff T-N")
         console.print()
@@ -1096,7 +1130,9 @@ def cmd_cancel(argv: list[str]) -> int:
 def cmd_delete(argv: list[str]) -> int:
     from handoff.board import HUMAN, task_ref
 
-    parser = _parser("delete", "Delete a task and its history for good. handoff cancel keeps the history.")
+    parser = _parser("delete", "Delete a task, its history and its results in .handoff/outputs for good. handoff "
+                               "cancel keeps the history. The worker's worktree and branch for it stay, since they "
+                               "hold the agent's work; it says how to remove them.")
     parser.add_argument("task", metavar="T-12")
     parser.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     args = parser.parse_args(argv)
@@ -1106,13 +1142,199 @@ def cmd_delete(argv: list[str]) -> int:
         if not _interactive():
             raise CommandError(f"Deleting {task.ref} can't be undone; pass --yes to confirm: "
                                f"handoff delete {task.ref} --yes")
-        answer = console.input(f"  Delete {task.ref} and its history for good? Type {task.ref} to confirm: ")
+        answer = console.input(f"  Delete {task.ref}, its history and its results for good? Type {task.ref} to "
+                               "confirm: ")
         if answer.strip().upper() != task.ref.upper():
             _hint(f"Kept {task.ref}.")
             return 1
-    board.delete(HUMAN, task.id)
+    left = board.delete(HUMAN, task.id)
     _ok(f"Deleted {task_ref(task.id)}.")
+    for problem in left:
+        _warn(problem)
+    _say_work_left(_root(args), lambda ref: ref == task.ref)
+    leftover = board.leftover_outputs()
+    if leftover:  # (from deletes before they took the results too)
+        _hint(f"The results of {_and(leftover, most=10)}, which are no longer on the board, are still in "
+              ".handoff/outputs. handoff clean lists them and asks before removing them.")
     return 0
+
+
+def _warn(message: str) -> None:
+    console.print(f"  [{C['gold']}]⚠[/] {escape(message)}", soft_wrap=True)
+
+
+def _say_work_left(root: Path, gone: Callable[[str], bool]) -> None:
+    """Removing a task leaves its worktree and branch from the worker alone, since they hold an agent's work: say
+    which are still there for the tasks that are gone (by `gone`), and how to remove them."""
+    from handoff import gitwork
+
+    found = gitwork.work_left(root, gone)
+    if not found:
+        return
+    refs = [ref for ref, _, _ in found]
+    worktree, branch = any(w for _, w, _ in found), any(b for _, _, b in found)
+    if len(refs) == 1:
+        things = " and ".join(word for word, have in (("worktree", worktree), ("branch", branch)) if have)
+        console.print(f"  {refs[0]}'s {things} {'are' if worktree and branch else 'is'} still there, with the agent's "
+                      f"work (its commits carry the task's title). If you don't need "
+                      f"{'them' if worktree and branch else 'it'} any more:", soft_wrap=True)
+    else:
+        things = " and ".join(word for word, have in (("worktrees", worktree), ("branches", branch)) if have)
+        console.print(f"  The {things} of {_and(refs)} are still there, with the agents' work (their commits carry "
+                      "the tasks' titles). If you don't need them any more:", soft_wrap=True)
+    for ref, has_worktree, has_branch in found[:3]:
+        if has_worktree:
+            _hint(f"  git worktree remove {(gitwork.WORKTREES / ref).as_posix()}")
+        if has_branch:
+            _hint(f"  git branch -D handoff/{ref}")
+    if len(refs) > 3:
+        _hint(f"  and the same for the other {len(refs) - 3}")
+
+
+def _gone_from(board) -> Callable[[str], bool]:
+    """Is a task (T-N) gone from the board? Every task that is: also ones deleted, or removed by the board's keep
+    setting, before."""
+    on_board = {t.ref for t in board.tasks(statuses=None)}
+    return lambda ref: ref not in on_board
+
+
+def _confirm_removal(going, waiting, heading: str, command: str, args, leftover=()) -> bool:
+    """Show the tasks, and the results of tasks already gone (`leftover`), about to be removed for good, and ask
+    (unless --yes). False if the person says no."""
+    from handoff.timefmt import ago
+
+    if going:
+        console.print(f"  {heading}", soft_wrap=True)
+        width = max(len(task.ref) for task in going)
+        for task in going:
+            console.print(Text.assemble(("    ", ""), (task.ref.ljust(width), C["blue"]), ("  ", ""),
+                                        (task.status.ljust(len("cancelled")), STATUS_STYLE[task.status]),
+                                        ("  " + task.title, ""), (f"  changed {ago(task.updated_at)}", C["dim"])),
+                          soft_wrap=True)
+    _say_waiting(waiting)
+    if leftover:
+        console.print(f"  Results in .handoff/outputs of tasks that are no longer on the board: {_and(leftover)}",
+                      soft_wrap=True)
+    if args.yes:
+        return True
+    if not _interactive():
+        raise CommandError(f"Removing them can't be undone; pass --yes to confirm: {_with_project(command, args)}")
+    if going and leftover:
+        question = "Remove all of this for good?"
+    elif going:
+        them, their = ("it", "its") if len(going) == 1 else (f"these {len(going)}", "their")
+        question = f"Remove {them}, with {their} history and results, for good?"
+    else:
+        question = f"Remove {'these results' if len(leftover) > 1 else 'them'} for good?"
+    return _ask(f"  {question} [y/N] ").lower() in ("y", "yes")
+
+
+def _say_waiting(waiting) -> None:
+    if waiting:
+        _hint(f"Staying for now, until their subtasks can go too: {', '.join(t.ref for t in waiting)}")
+
+
+def _say_removed(removed, left, shown: int) -> None:
+    _ok(f"Removed {_plural(len(removed), 'task')}.")
+    stayed = shown - len(removed)
+    if stayed:
+        _hint(f"{_plural(stayed, 'task')} changed since you were shown {'it' if stayed == 1 else 'them'}, so "
+              f"{'it' if stayed == 1 else 'they'} stayed.")
+    for problem in left:
+        _warn(problem)
+
+
+def cmd_clean(argv: list[str]) -> int:
+    from handoff.board import HUMAN, MAX_KEEP_DAYS
+
+    parser = _parser("clean", "Remove finished tasks (done or cancelled) that haven't changed for a while, with "
+                              "their history and their results in .handoff/outputs, for good. A task goes with its "
+                              "subtasks, once they can all go. It also removes the folders in .handoff/outputs "
+                              "whose task is no longer on the board, such as the results of tasks deleted with an "
+                              "older Handoff. It lists what it will remove and asks first. The worker's worktrees "
+                              "and branches stay, since they hold the agents' work; it says how to remove them.")
+    parser.add_argument("--older-than", type=int, default=CLEAN_DAYS, metavar="DAYS",
+                        help=f"tasks last changed more than DAYS days ago (default: {CLEAN_DAYS}; 0 for every "
+                             "finished task)")
+    parser.add_argument("--yes", action="store_true", help="don't ask for confirmation")
+    args = parser.parse_args(argv)
+    days = args.older_than
+    if not 0 <= days <= MAX_KEEP_DAYS:
+        parser.fail(f"--older-than needs a number of days from 0 to {MAX_KEEP_DAYS}.")
+    root, board = _root(args), _board(args)
+    going, waiting = board.cleanable(days)
+    leftover = board.leftover_outputs()
+    if not going and not leftover:
+        _hint(f"Nothing to clean: no finished task was last changed more than {_plural(days, 'day')} ago."
+              if days else "Nothing to clean: there are no finished tasks.")
+        _say_waiting(waiting)
+        _say_work_left(root, _gone_from(board))
+        return 0
+    heading = (f"Finished tasks last changed more than {_plural(days, 'day')} ago:" if days else
+               "Every finished task:")
+    if not _confirm_removal(going, waiting, heading, f"handoff clean --older-than {days} --yes", args, leftover):
+        _hint("Nothing was removed.")
+        return 1
+    if going:
+        _say_removed(*board.clean(HUMAN, days, [t.id for t in going]), len(going))
+    if leftover:
+        removed, left = board.clean_outputs(HUMAN, leftover)
+        if removed:
+            _ok(f"Removed the results of {_and(removed, most=10)}.")
+        for problem in left:
+            _warn(problem)
+    _say_work_left(root, _gone_from(board))
+    if going and days and board.keep_days is None:
+        _hint(f"To have this done by itself from now on: handoff keep {days}")
+    return 0
+
+
+def cmd_keep(argv: list[str]) -> int:
+    from handoff.board import HUMAN, MAX_KEEP_DAYS
+
+    parser = _parser("keep", "Show or set how long this board keeps finished tasks. With a number of days, a done or "
+                             "cancelled task is removed that long after its last change, with its history and its "
+                             "results in .handoff/outputs, whenever Handoff opens the board. With forever, finished "
+                             "tasks stay until you delete them or run handoff clean. Setting a number of days lists "
+                             "the tasks that go now and asks first. Showing the setting, or setting forever, removes "
+                             "nothing.")
+    parser.add_argument("days", nargs="?", metavar="DAYS",
+                        help="a number of days, or forever (leave it out to see the setting now)")
+    parser.add_argument("--yes", action="store_true", help="don't ask before removing tasks that are already older")
+    args = parser.parse_args(argv)
+    # Opened without removing what the setting now in place says has had its time: looking at the setting
+    # removes nothing, and changing it removes only what the new one says, after asking
+    if args.days is None:
+        board = _board(args, expire=False)
+        default = " (the default)" if board.setting("keep_days") is None else ""
+        console.print(f"  {_keeping(board.keep_days)}{default}.", soft_wrap=True)
+        _hint("To change it: handoff keep 30, or handoff keep forever")
+        return 0
+    word = args.days.strip().lower()
+    if word != "forever" and not (word.isascii() and word.isdigit() and 1 <= int(word) <= MAX_KEEP_DAYS):
+        parser.fail(f"{args.days[:40]!r} isn't how long to keep finished tasks; use a number of days from 1 to "
+                    f"{MAX_KEEP_DAYS}, or forever.")
+    days = None if word == "forever" else int(word)
+    root, board = _root(args), _board(args, expire=False)
+    going, waiting = board.cleanable(days) if days is not None else ([], [])
+    if going and not _confirm_removal(going, waiting, f"Keeping finished tasks {_plural(days, 'day')} removes these "
+                                      "now:", f"handoff keep {days} --yes", args):
+        _hint("Nothing changed.")
+        return 1
+    board.set_keep_days(HUMAN, days)
+    _ok(f"{_keeping(days)}.")
+    if going:
+        _say_removed(*board.clean(HUMAN, days, [t.id for t in going]), len(going))
+        _say_work_left(root, _gone_from(board))
+    if days is not None:
+        _hint("Handoff removes them whenever it opens the board. To keep them: handoff keep forever")
+    return 0
+
+
+def _keeping(days: int | None) -> str:
+    if days is None:
+        return "This board keeps finished tasks until you delete them or run handoff clean"
+    return f"This board removes each finished task {_plural(days, 'day')} after its last change"
 
 
 def cmd_done_rule(argv: list[str]) -> int:
@@ -1790,8 +2012,10 @@ def cmd_doctor(argv: list[str]) -> int:
             try:
                 board = Board.open(root, create=False)  # also tightens loose permissions it owns
                 counts = board.counts()
+                kept = "forever" if board.keep_days is None else _plural(board.keep_days, "day")
                 line("✓", "Board", f"{_shown_path(path)} · {_plural(sum(counts.values()), 'task')} · "
-                                   f"done rule: {board.done_rule}")
+                                   f"done rule: {board.done_rule} · finished tasks kept {kept}")
+                _say_expired(board)
                 unreadable = board.unreadable()
                 if unreadable:
                     line("⚠", f"{_plural(unreadable, 'task')} on the board can't be read",
@@ -1984,7 +2208,9 @@ HANDLERS = {
     "status": cmd_status,
     "cancel": cmd_cancel,
     "delete": cmd_delete,
+    "clean": cmd_clean,
     "done-rule": cmd_done_rule,
+    "keep": cmd_keep,
     "approve": cmd_approve,
     "dispatch": cmd_dispatch,
     "run": cmd_run,
@@ -2005,7 +2231,7 @@ HANDLERS = {
 # parsed options: _not_started_by_handoff). A guard against an agent doing it by accident, not a wall: a
 # shell can unset the variable, which is why SECURITY.md says to deny these in the agent's permissions too.
 PERSON_WRITES = {"add", "assign", "note", "done", "reopen", "block", "review", "status", "cancel", "delete",
-                 "done-rule", "approve"}
+                 "clean", "done-rule", "keep", "approve"}
 
 
 def _not_started_by_handoff() -> None:

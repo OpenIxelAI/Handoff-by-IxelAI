@@ -262,7 +262,9 @@ can't.
 | `handoff block T-12 "why" [--waiting-on NAME]` | Mark a task blocked, and say why |
 | `handoff review T-12 [approve\|changes ["notes"]] [--check N=RESULT]… [--panel]` | Review a task that's waiting for you. With no verdict, it shows what came back and its checks, then asks. `--check "2=not_met:fails when empty"` marks check 2 |
 | `handoff status T-12 open\|blocked\|done` | Set a status directly (`done`, `reopen` and `block` are the short ways) |
-| `handoff cancel T-12` · `handoff delete T-12` | Cancel (keeps the history), or delete for good (asks first) |
+| `handoff cancel T-12` · `handoff delete T-12` | Cancel (keeps the history), or delete for good with its results in `.handoff/outputs` (asks first) |
+| `handoff clean [--older-than DAYS] [--yes]` | Remove finished tasks that haven't changed in DAYS days (30 if you leave it out), with their history and results, after listing them and asking |
+| `handoff keep [DAYS\|forever]` | Show or set how long this board keeps finished tasks. It keeps them until you delete or clean them, unless you set a number of days |
 | `handoff done-rule [review_or_reason\|review\|any]` | When agents may mark tasks done |
 | `handoff dispatch "codex review my changes, gemini list …" [--yes] [--plan] [--no-run]` | Split one request across your agents and run the parts side by side ([dispatch](#hand-out-work-to-any-agent-dispatch)) |
 | `handoff agents` | Who can take tasks here, and what kind: change files, answer, review, make pictures |
@@ -302,7 +304,8 @@ The board checks these itself; it doesn't trust what an agent says about who it 
 - **History is append-only.** Agents can't delete tasks or edit the history through Handoff's tools; only
   you can cancel or delete, from the CLI. These rules bind the MCP tools. An agent that can run commands as
   you (Claude Code's Bash, Codex's shell) can also run the `handoff` CLI as you, so deny it `handoff approve`,
-  `handoff delete` and `handoff run` in its permission settings ([Security](../SECURITY.md#agents-with-a-shell)).
+  `handoff delete`, `handoff clean`, `handoff keep` and `handoff run` in its permission settings
+  ([Security](../SECURITY.md#agents-with-a-shell)).
   Anything Handoff started itself is refused the CLI's writes, as a guard against an agent doing it by
   accident. It isn't a wall (a shell can unset `HANDOFF_DEPTH`), so keep those commands denied.
 - **Paths are claimed, not locked.** When two active tasks claim overlapping files, both agents are warned:
@@ -326,6 +329,8 @@ Ixel's own `ixel_review` tool, once `ixel mcp --setup` has added Ixel's tools to
 - The board is `<project>/.handoff/board.db`. The project is the nearest folder with a `.git`, and a linked
   git worktree shares its main checkout's board. On macOS and Linux the folder is private to you (0700,
   and 0600 for the file).
+- Finished tasks stay on the board until you delete them, run `handoff clean`, or set `handoff keep DAYS`.
+  Deleting overwrites the task's text in the board file, so it isn't left behind in the file's free space.
 - `.handoff/` keeps itself out of git, with a `.gitignore` of its own. If that file goes missing or
   changes, the next `handoff` command offers to add `.handoff/` to your project's `.gitignore`.
 - Handoff has no config of its own and no commands in config, so nothing in a project folder can make

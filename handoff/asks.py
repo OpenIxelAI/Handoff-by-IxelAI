@@ -31,12 +31,12 @@ from handoff import approvals, gitwork
 from handoff.board import HUMAN, Board, BoardError, Event, Task, run_kind, safe_name
 from handoff.fence import numbered
 from handoff.ixel import child_env, find_ixel
-from handoff.project import BOARD_DIR
+from handoff.project import BOARD_DIR, OUTPUTS_DIR
 from handoff.proc import Stopped, run_tree, stopping
 from handoff.sanitize import clean_line, clean_text, find_secret
 
 VIA_IXEL = ("answer", "review", "image")
-OUTPUTS = Path(BOARD_DIR) / "outputs"
+OUTPUTS = Path(BOARD_DIR) / OUTPUTS_DIR
 TIMEOUT_SEC = {"answer": 900.0, "review": 900.0, "image": 600.0}
 LIST_TIMEOUT_SEC = 60.0
 MAX_QUESTION_CHARS = 45_000

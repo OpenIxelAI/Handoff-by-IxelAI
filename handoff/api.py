@@ -36,7 +36,7 @@ from handoff.board import (ACTIVE, HUMAN, RUN_KINDS, STATE_EVENTS, TERMINAL, Boa
                            Forbidden, NotFound, Task, check_name, content_of, parse_task_id, run_kind, safe_name,
                            task_ref)
 from handoff.ixel import DEPTH_VAR, depth
-from handoff.project import BOARD_DIR, ProjectError, board_path
+from handoff.project import BOARD_DIR, OUTPUTS_DIR, ProjectError, board_path
 from handoff.sanitize import clean_line
 
 SCHEMA = 1
@@ -255,7 +255,7 @@ def _is_link(path: Path) -> bool:
 def _outputs(root: Path, task: Task) -> list[dict]:
     """The files a run left in .handoff/outputs/T-N (answers, pictures): plain files only, never a link or a
     file with another name elsewhere (a hard link)."""
-    folder = root / BOARD_DIR / "outputs" / task.ref
+    folder = root / BOARD_DIR / OUTPUTS_DIR / task.ref
     found = []
     try:
         if any(_is_link(f) for f in (folder.parent.parent, folder.parent, folder)) or not folder.is_dir():
@@ -415,10 +415,30 @@ def op_status(request: dict) -> dict:
 
 
 def op_delete(request: dict) -> dict:
-    board = _board(_project(request))
+    """Delete a task for good, with its history and results. `left`: what of it is still there, in words for the
+    person (as a rule, nothing): results that couldn't be removed, or the worker's worktree and branch, which hold
+    the agent's work, so Handoff leaves them."""
+    root = _project(request)
+    board = _board(root)
     task_id = _task_arg(request.get("args", {}))
-    board.delete(HUMAN, task_id)
-    return {"deleted": task_ref(task_id)}
+    left = board.delete(HUMAN, task_id)
+    return {"deleted": task_ref(task_id), "left": left + _work_left(root, task_ref(task_id))}
+
+
+def _work_left(root: Path, ref: str) -> list[str]:
+    """The worker's worktree and branch for the deleted task `ref`, if they're still there, in words, with the git
+    commands that remove them (as `handoff delete` says it)."""
+    from handoff import gitwork
+    said = []
+    for _, worktree, branch in gitwork.work_left(root, lambda gone: gone == ref):
+        both = worktree and branch
+        things = " and ".join(word for word, have in (("worktree", worktree), ("branch", branch)) if have)
+        commands = [command for command, have in ((f"git worktree remove {(gitwork.WORKTREES / ref).as_posix()}",
+                                                   worktree), (f"git branch -D handoff/{ref}", branch)) if have]
+        said.append(f"{ref}'s {things} {'are' if both else 'is'} still there, with the agent's work (its commits "
+                    f"carry the task's title). If you don't need {'them' if both else 'it'} any more: "
+                    f"{', then '.join(commands)}")
+    return said
 
 
 def op_approve(request: dict) -> dict:
