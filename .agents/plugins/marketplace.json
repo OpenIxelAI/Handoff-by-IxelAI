@@ -1,0 +1,20 @@
+{
+  "name": "ixelai",
+  "interface": {
+    "displayName": "IxelAI"
+  },
+  "plugins": [
+    {
+      "name": "handoff",
+      "source": {
+        "source": "local",
+        "path": "./plugins/handoff"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

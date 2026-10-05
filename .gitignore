@@ -1,0 +1,21 @@
+# Handoff's own board, when you use Handoff on this repo
+.handoff/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor
+.vscode/
+.idea/
+
+# Build / install
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# scripts/check_windows.py
+windows-check-report.txt

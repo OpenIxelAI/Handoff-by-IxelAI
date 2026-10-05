@@ -1,0 +1,42 @@
+{
+  "name": "handoff",
+  "version": "0.5.0",
+  "description": "A task board Claude and Codex share, so they can pass work to each other and to you: take tasks, hand them on, ask for reviews. Needs the handoff program (install.sh or install.ps1).",
+  "author": {
+    "name": "IxelAI",
+    "url": "https://github.com/OpenIxelAI"
+  },
+  "homepage": "https://github.com/OpenIxelAI/Handoff-by-IxelAI",
+  "repository": "https://github.com/OpenIxelAI/Handoff-by-IxelAI",
+  "license": "MIT",
+  "keywords": [
+    "tasks",
+    "handoff",
+    "claude",
+    "review",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "handoff": {
+      "command": "handoff",
+      "args": [
+        "mcp",
+        "--as",
+        "codex"
+      ],
+      "tool_timeout_sec": 960
+    }
+  },
+  "interface": {
+    "displayName": "Handoff",
+    "shortDescription": "A task board you share with Claude: pass work back and forth, ask for reviews",
+    "developerName": "IxelAI",
+    "category": "Productivity",
+    "websiteURL": "https://github.com/OpenIxelAI/Handoff-by-IxelAI",
+    "defaultPrompt": [
+      "Check your handoffs",
+      "Show the Handoff board"
+    ]
+  }
+}

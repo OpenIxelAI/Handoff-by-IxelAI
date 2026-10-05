@@ -1,0 +1,19 @@
+{
+  "name": "ixelai",
+  "owner": {
+    "name": "IxelAI",
+    "url": "https://github.com/OpenIxelAI"
+  },
+  "metadata": {
+    "description": "Plugins from IxelAI"
+  },
+  "plugins": [
+    {
+      "name": "handoff",
+      "source": "./plugins/handoff",
+      "description": "A task board Claude and Codex share, so they can pass work to each other and to you: take tasks, hand them on, ask for reviews. Needs the handoff program (install.sh or install.ps1).",
+      "version": "0.5.0",
+      "category": "productivity"
+    }
+  ]
+}

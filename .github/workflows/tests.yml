@@ -1,0 +1,281 @@
+name: tests
+
+# Runs only when started by hand (Actions → tests → Run workflow), so pushes and pull
+# requests spend no Actions minutes. Test locally before pushing: `pytest`, and on
+# Windows scripts/check_windows.py. A run covers Linux, Windows and macOS (macOS minutes
+# count 10x), the installers, and the live worker tests.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.10" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: ubuntu-latest, python: "3.14" }
+          - { os: windows-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Test
+        run: python -m pytest -q
+
+  installer-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run install.sh
+        env:
+          HANDOFF_INSTALL_ROOT: ${{ runner.temp }}/handoff
+          HANDOFF_BIN_DIR: ${{ runner.temp }}/bin
+          HANDOFF_SKIP_PATH_UPDATE: "1"
+        run: ./install.sh
+      - name: Smoke test
+        run: |
+          "$RUNNER_TEMP/bin/handoff" version
+          "$RUNNER_TEMP/bin/handoff" help
+          "$RUNNER_TEMP/bin/handoff" setup
+
+  macos:
+    # One job for tests and the installer: macOS runner minutes are billed at 10x.
+    name: macOS (tests + install.sh)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Test
+        run: python -m pytest -q
+      - name: Run install.sh
+        env:
+          HANDOFF_INSTALL_ROOT: ${{ runner.temp }}/handoff
+          HANDOFF_BIN_DIR: ${{ runner.temp }}/bin
+          HANDOFF_SKIP_PATH_UPDATE: "1"
+        run: ./install.sh
+      - name: Smoke test
+        run: |
+          "$RUNNER_TEMP/bin/handoff" version
+          "$RUNNER_TEMP/bin/handoff" help
+          "$RUNNER_TEMP/bin/handoff" setup
+
+  installer-distros:
+    name: install.sh on ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:stable-slim
+            prepare: apt-get update -qq && apt-get install -y -qq python3 git ca-certificates >/dev/null
+            finish: apt-get install -y -qq python3-venv >/dev/null
+          - image: fedora:latest
+            prepare: dnf install -y -q python3 git
+            finish: "true"
+          - image: archlinux:latest
+            prepare: pacman -Sy --noconfirm --quiet python git >/dev/null
+            finish: "true"
+    env:
+      HANDOFF_INSTALL_ROOT: /opt/handoff
+      HANDOFF_BIN_DIR: /opt/handoff-bin
+      HANDOFF_SKIP_PATH_UPDATE: "1"
+    steps:
+      - name: Prepare
+        run: ${{ matrix.prepare }}
+      - uses: actions/checkout@v4
+      - name: Missing pieces are explained
+        shell: bash
+        run: |
+          # Stock Debian ships python3 without venv; the installer must say how to fix it
+          if [ "${{ matrix.finish }}" != "true" ]; then
+            if ./install.sh > out.txt 2>&1; then echo "expected failure"; exit 1; fi
+            cat out.txt
+            grep -q "apt install python3-venv" out.txt
+            ${{ matrix.finish }}
+          fi
+      - name: Run install.sh
+        shell: bash
+        run: ./install.sh
+      - name: Smoke test
+        shell: bash
+        run: |
+          /opt/handoff-bin/handoff version
+          /opt/handoff-bin/handoff help
+          /opt/handoff-bin/handoff setup
+          /opt/handoff/.venv/bin/python --version
+      - name: Test suite with the distro's Python
+        if: matrix.image == 'fedora:latest'
+        shell: bash
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/python -m pip install -q -e ".[dev]"
+          /tmp/venv/bin/python -m pytest -q
+
+  installer-windows:
+    # Both shells: Windows PowerShell 5.1 is what most people run, and it passes
+    # arguments to programs differently from PowerShell 7.
+    name: install.ps1 (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}  # a step's own shell: can't use expressions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run install.ps1
+        env:
+          HANDOFF_INSTALL_ROOT: ${{ runner.temp }}\handoff
+          HANDOFF_BIN_DIR: ${{ runner.temp }}\bin
+          HANDOFF_SKIP_PATH_UPDATE: "1"
+        run: ./install.ps1
+      - name: Smoke test
+        shell: cmd
+        run: |
+          "%RUNNER_TEMP%\bin\handoff.exe" version
+          "%RUNNER_TEMP%\bin\handoff.exe" help
+          "%RUNNER_TEMP%\bin\handoff.exe" setup
+      - name: Apps can start it by name, without a shell (as the plugin does)
+        shell: pwsh
+        run: |
+          $env:Path = "$env:RUNNER_TEMP\bin;" + $env:Path
+          python -c "import subprocess; subprocess.run(['handoff', 'version'], check=True)"
+      - name: Installing again while an app runs it (as its MCP server, which holds the .exe open)
+        env:
+          HANDOFF_INSTALL_ROOT: ${{ runner.temp }}\handoff
+          HANDOFF_BIN_DIR: ${{ runner.temp }}\bin
+          HANDOFF_SKIP_PATH_UPDATE: "1"
+        run: |
+          python -c "import subprocess, sys, time; server = subprocess.Popen([sys.argv[1], 'mcp', '--as', 'claude'], stdin=subprocess.PIPE); time.sleep(3); assert server.poll() is None, 'the MCP server stopped'; code = subprocess.run([sys.argv[2], '-ExecutionPolicy', 'Bypass', '-File', 'install.ps1']).returncode; server.kill(); sys.exit(code)" "$env:RUNNER_TEMP\bin\handoff.exe" "${{ matrix.shell }}"
+          & "$env:RUNNER_TEMP\bin\handoff.exe" version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  worker-live:
+    # Claude's attack tests with the latest Claude Code: inside the sandbox, where it runs
+    # commands, and edit-only, where the sandbox can't run. A release that weakens --restricted
+    # or its sandbox settings, or drops a flag the worker relies on, turns this red.
+    name: Claude worker stays in its sandbox (live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install bubblewrap, socat and Claude Code
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap socat
+          npm install -g @anthropic-ai/claude-code
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: The sandbox can start
+        # Ubuntu 24.04+ stops bubblewrap through AppArmor; apply the exact command Handoff's message gives
+        run: |
+          if ! python -c 'from handoff import sandbox; sandbox.check()'; then
+            python -c 'from handoff import sandbox; print(sandbox.apparmor_fix(sandbox.find_bwrap()))' | bash -ex
+            python -c 'from handoff import sandbox; sandbox.check()'
+          fi
+      - name: Versions
+        run: |
+          claude --version
+          bwrap --version
+      - name: Attack the worker
+        env:
+          HANDOFF_REQUIRE_CLIS: "1"
+        run: python -m pytest -q -rs tests/test_worker_claude_live.py tests/test_worker_live.py
+      - name: The plugin installs and works in Claude Code
+        env:
+          HANDOFF_REQUIRE_CLIS: "1"
+        run: |
+          claude plugin validate --strict plugins/handoff
+          claude plugin validate --strict .
+          python -m pytest -q -rs "tests/test_plugin.py::test_claude_code_uses_the_board_through_the_plugin"
+
+  worker-codex-live:
+    # The Codex worker's attack test: the latest Codex inside bubblewrap. A Codex
+    # release that changes what its sandbox or permission flags mean turns this red.
+    name: Codex worker stays in its sandbox (live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install bubblewrap and Codex
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          npm install -g @openai/codex
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: The sandbox can start
+        # Ubuntu 24.04+ stops bubblewrap through AppArmor. Apply the exact command Handoff's own
+        # message gives, so the fix people are told to run is the one tested here.
+        run: |
+          if ! python -c 'from handoff import sandbox; sandbox.check()'; then
+            python -c 'from handoff import sandbox; print(sandbox.apparmor_fix(sandbox.find_bwrap()))' | bash -ex
+            python -c 'from handoff import sandbox; sandbox.check()'
+          fi
+      - name: Versions
+        run: |
+          codex --version
+          bwrap --version
+      - name: Attack the Codex worker
+        env:
+          HANDOFF_REQUIRE_CLIS: "1"
+        run: python -m pytest -q -rs tests/test_worker_codex_live.py
+      - name: The plugin installs and works in Codex
+        env:
+          HANDOFF_REQUIRE_CLIS: "1"
+        run: python -m pytest -q -rs "tests/test_plugin.py::test_codex_uses_the_board_through_the_plugin"
+
+  macos-sandbox-probe:
+    # Temporary: measures what macOS's sandboxes allow, to design the worker's macOS sandbox.
+    # Always passes; read its log. Removed once the macOS sandbox has its attack tests.
+    name: macOS sandbox probe (temporary)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Codex and Claude Code
+        run: npm install -g @openai/codex @anthropic-ai/claude-code
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Probe
+        run: python scripts/probe_macos_sandbox.py
