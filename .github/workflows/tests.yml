@@ -1,7 +1,7 @@
 name: tests
 
-# Runs only when started by hand (Actions → tests → Run workflow), so pushes and pull
-# requests spend no Actions minutes. Test locally before pushing: `pytest`, and on
+# The full run, started by hand (Actions → tests → Run workflow). checks.yml runs the fast
+# tests on every pull request and push to main. Test locally before pushing: `pytest`, and on
 # Windows scripts/check_windows.py. A run covers Linux, Windows and macOS (macOS minutes
 # count 10x), the installers, and the live worker tests.
 
