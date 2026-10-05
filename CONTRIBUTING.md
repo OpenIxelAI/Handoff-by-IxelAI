@@ -53,3 +53,7 @@ prompt, it asks. It writes `windows-check-report.txt`; attach it to an issue.
 
 `tests/test_docs.py` checks that [docs/guide.md](docs/guide.md) names every tool, command, status and done rule,
 so update the guide with the code.
+
+On GitHub, every pull request and every push to `main` runs the tests on Linux and Windows (`checks`). The full
+run, with the installers, macOS and the live worker tests, starts only by hand (**Actions → tests → Run
+workflow**). Run `pytest` before you push either way.
