@@ -11,6 +11,7 @@ from pathlib import Path
 
 BOARD_DIR = ".handoff"
 BOARD_FILE = "board.db"
+OUTPUTS_DIR = "outputs"  # what runs through Ixel leave, a folder per task: .handoff/outputs/T-N
 GITIGNORE_LINE = ".handoff/"
 
 

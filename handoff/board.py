@@ -12,24 +12,32 @@ Rules are enforced here, not trusted from the caller:
   SQLite triggers refuse updates and deletes while the task exists.
 - Sizes are capped, control characters and bidi overrides are stripped, and
   obvious secrets are refused instead of being stored.
+- Deleting is for good. Every connection that writes overwrites deleted rows
+  with zeros and keeps SQLite's scratch copies in memory, and after a delete
+  the board is rebuilt and its -wal file emptied, so no file keeps the text
+  (_clear_deleted). A task's results in .handoff/outputs go with it. Only the
+  person deletes, or sets how long finished tasks stay (`handoff keep`), and
+  then any open for writing removes the ones past it.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Mapping
 
 from handoff import approvals
 from handoff.globs import PathError, normalize_path, overlaps
-from handoff.project import BOARD_DIR, BOARD_FILE
+from handoff.project import BOARD_DIR, BOARD_FILE, OUTPUTS_DIR
 from handoff.sanitize import clean_line, clean_text, find_secret
+from handoff.timefmt import parse as parse_time
 
 SCHEMA_VERSION = 1
 
@@ -71,6 +79,12 @@ DONE_RULES = {
     "any": "whenever the assignee says so",
 }
 DEFAULT_DONE_RULE = "review_or_reason"
+
+# How long a board keeps finished tasks unless the person sets it (handoff keep): None keeps them until they're
+# deleted or cleaned; a number of days removes each one that long after its last change
+DEFAULT_KEEP_DAYS: int | None = None
+MAX_KEEP_DAYS = 36_500  # a hundred years; past that, it's forever
+CLEAR_WAIT_MS = 2_000   # how long a delete waits for a busy board before leaving the clearing for later
 
 _NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_")
 
@@ -212,6 +226,17 @@ class Inbox:
 
 def task_ref(task_id: int) -> str:
     return f"T-{task_id}"
+
+
+def task_of_name(name: str) -> int | None:
+    """The task a folder or branch named T-N is for, when the name is exactly what Handoff writes (T-12; not
+    T-012, t-12 or T-١٢); else None."""
+    digits = name[2:]
+    if name.startswith("T-") and digits.isascii() and digits.isdigit() and len(digits) <= 12:
+        task_id = int(digits)
+        if task_id > 0 and task_ref(task_id) == name:
+            return task_id
+    return None
 
 
 def parse_task_id(value: object) -> int:
@@ -467,6 +492,22 @@ def _secure(path: Path, mode: int) -> None:
         pass  # not ours to change; `handoff doctor` reports it
 
 
+def _keep_days(value: str | None) -> int | None:
+    """A board's keep setting as stored: a number of days, or None for forever. Not set, or not one Handoff
+    wrote: the default."""
+    if value == "forever":
+        return None
+    if value and value.isascii() and value.isdigit() and 1 <= int(value) <= MAX_KEEP_DAYS:
+        return int(value)
+    return DEFAULT_KEEP_DAYS
+
+
+def _check_days(days: object, least: int = 0) -> int:
+    if isinstance(days, bool) or not isinstance(days, int) or not least <= days <= MAX_KEEP_DAYS:
+        raise BoardError(f"Say a number of days from {least} to {MAX_KEEP_DAYS}.")
+    return days
+
+
 # ── The board ─────────────────────────────────────────────────────────────────
 
 class Board:
@@ -478,12 +519,16 @@ class Board:
         self.path = Path(path)
         self.clock = clock
         self.read_only = read_only
+        self.expired: list[Task] = []  # what opening the board removed because of its keep setting
 
     # ── Opening ──
 
     @classmethod
-    def open(cls, root: Path, *, create: bool = True, clock: Callable[[], str] = utc_now) -> "Board":
-        """The board for project `root`, creating `.handoff/board.db` (0700 folder, 0600 file) if asked."""
+    def open(cls, root: Path, *, create: bool = True, clock: Callable[[], str] = utc_now,
+             expire: bool = True) -> "Board":
+        """The board for project `root`, creating `.handoff/board.db` (0700 folder, 0600 file) if asked. Opening
+        it also removes finished tasks it keeps no longer (_upkeep; they're in `expired`), unless `expire` is
+        False: for `handoff keep`, which is about to change how long that is."""
         folder = Path(root) / BOARD_DIR
         path = folder / BOARD_FILE
         problem = link_problem(root)
@@ -510,6 +555,7 @@ class Board:
         _secure(path, 0o600)
         board = cls(path, clock=clock)
         board._init_schema()
+        board._upkeep(expire)
         return board
 
     @classmethod
@@ -534,12 +580,20 @@ class Board:
                                    timeout=self.BUSY_TIMEOUT_MS / 1000, isolation_level=None)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
+            conn.execute("PRAGMA temp_store = MEMORY")  # (below)
             return conn
         conn = sqlite3.connect(self.path, timeout=self.BUSY_TIMEOUT_MS / 1000, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout = {self.BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA synchronous = NORMAL")
+        # A deleted row, and the old copy of a changed one, is overwritten with zeros, not just marked free (some
+        # SQLite builds do that anyway, but not all)
+        conn.execute("PRAGMA secure_delete = ON")
+        # What SQLite sets aside while it works stays in memory: the rows a delete takes out (in case it has to
+        # undo it), a big sort, VACUUM's copy of the board. In a temporary file, the text would stay on the disk,
+        # in the system's temp folder, after the board itself is clean.
+        conn.execute("PRAGMA temp_store = MEMORY")
         return conn
 
     def _init_schema(self) -> None:
@@ -552,6 +606,8 @@ class Board:
             if row is None:
                 conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
                              (str(SCHEMA_VERSION),))
+                # A new board has nothing deleted to clear (an older one is cleared once: _upkeep)
+                conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('deletions_cleared', '0')")
             else:
                 try:
                     version = int(row[0])
@@ -612,6 +668,19 @@ class Board:
         if rule not in DONE_RULES:
             raise BoardError(f"The done rule must be one of: {', '.join(DONE_RULES)}.")
         self.set_setting("done_rule", rule)
+
+    @property
+    def keep_days(self) -> int | None:
+        """How many days a finished task stays on this board after its last change; None: until it's deleted
+        or cleaned by hand."""
+        return _keep_days(self.setting("keep_days"))
+
+    def set_keep_days(self, actor: str, days: int | None) -> None:
+        """Keep finished tasks `days` days (None: forever). From the next time the board opens for writing, older
+        ones are removed with their history and outputs, as `clean` would. The person only."""
+        actor = check_name(actor, "actor")
+        self._require_human(actor, "set how long finished tasks stay")
+        self.set_setting("keep_days", "forever" if days is None else str(_check_days(days, least=1)))
 
     # ── Reading ──
 
@@ -1375,8 +1444,11 @@ class Board:
                         data={"from": before, "to": "blocked", "waiting_on": return_to})
             return task
 
-    def delete(self, actor: str, task_id: int) -> None:
-        """Remove a task and its history for good. The person only."""
+    # ── Removing tasks for good ──
+
+    def delete(self, actor: str, task_id: int) -> list[str]:
+        """Remove a task, its history and its results in .handoff/outputs for good. The person only. Returns what
+        of its outputs couldn't be removed, in words (as a rule, nothing)."""
         actor = check_name(actor, "actor")
         self._require_human(actor, "delete tasks")
         with self._write() as conn:
@@ -1385,6 +1457,191 @@ class Board:
             if children:
                 refs = ", ".join(task_ref(r[0]) for r in children)
                 raise BoardError(f"{task.ref} has subtasks ({refs}); delete those first.")
-            conn.execute("DELETE FROM claims WHERE task_id = ?", (task.id,))
-            conn.execute("DELETE FROM tasks WHERE id = ?", (task.id,))
-            conn.execute("DELETE FROM events WHERE task_id = ?", (task.id,))  # allowed once the task is gone
+            self._remove(conn, [task.id])
+        left = self._remove_outputs([task.ref])
+        self._clear_deleted()
+        return left
+
+    def cleanable(self, days: int) -> tuple[list[Task], list[Task]]:
+        """What clean(days) would remove now, oldest first: finished tasks whose last change is more than `days`
+        days ago. And the ones it would keep for now, because a subtask of theirs isn't finished, or is newer."""
+        with self._read() as conn:
+            return self._finished_before(conn, self._cutoff(_check_days(days)))
+
+    def clean(self, actor: str, days: int, only: Iterable[int] | None = None) -> tuple[list[Task], list[str]]:
+        """Remove finished tasks (done or cancelled) whose last change is more than `days` days ago, with their
+        history, claims and results in .handoff/outputs, for good. A task goes with its subtasks, once they can
+        all go. The person only. `only`: of these tasks (the ones the person was shown), so one that changed
+        since stays. Returns what was removed, and what of its outputs couldn't be, in words."""
+        actor = check_name(actor, "actor")
+        self._require_human(actor, "clean the board")
+        cutoff = self._cutoff(_check_days(days))
+        return self._remove_finished(cutoff, None if only is None else set(only))
+
+    def leftover_outputs(self) -> list[str]:
+        """The folders in .handoff/outputs whose task isn't on the board, oldest task first (T-N): the results of
+        tasks deleted with an older Handoff, which left them, or of a run that finished after its task was
+        deleted. Only folders named the way Handoff names them, and never a link."""
+        outputs = self.path.parent / OUTPUTS_DIR
+        found: dict[int, str] = {}
+        try:
+            if _is_link(outputs) or not outputs.is_dir():
+                return []
+            with os.scandir(outputs) as entries:
+                for entry in entries:
+                    task_id = task_of_name(entry.name)
+                    if task_id is not None and entry.is_dir(follow_symlinks=False) and not _is_link(Path(entry.path)):
+                        found[task_id] = entry.name
+        except OSError:
+            return []
+        if not found:
+            return []
+        with self._read() as conn:
+            on_board = {row[0] for row in conn.execute("SELECT id FROM tasks")}
+        return [found[i] for i in sorted(found) if i not in on_board]
+
+    def clean_outputs(self, actor: str, refs: Iterable[str]) -> tuple[list[str], list[str]]:
+        """Remove folders in .handoff/outputs whose task isn't on the board (leftover_outputs), of `refs`: the ones
+        the person was shown. The person only. Returns the ones removed, and what couldn't be, in words."""
+        actor = check_name(actor, "actor")
+        self._require_human(actor, "clean the board")
+        leftover = set(self.leftover_outputs())
+        chosen = [ref for ref in refs if ref in leftover]
+        left = self._remove_outputs(chosen)
+        outputs = self.path.parent / OUTPUTS_DIR
+        return [ref for ref in chosen if not os.path.lexists(outputs / ref)], left
+
+    def _cutoff(self, days: int) -> str:
+        """The time `days` days ago, as the board writes times: a task last changed by then is that old."""
+        now = parse_time(self.clock()) or datetime.now(timezone.utc)
+        return (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @staticmethod
+    def _finished_before(conn: sqlite3.Connection, cutoff: str,
+                         only: set[int] | None = None) -> tuple[list[Task], list[Task]]:
+        """Finished tasks last changed by `cutoff`: the ones that can go now, and the ones that wait for a
+        subtask that isn't finished, or changed since. A task only ever goes with all of its subtasks, so no
+        task is left pointing at one that's gone."""
+        finished = sorted(TERMINAL)
+        old = [t for t in _readable(conn.execute(
+                   f"SELECT * FROM tasks WHERE status IN ({', '.join('?' for _ in finished)}) AND updated_at <= ? "
+                   "ORDER BY id", [*finished, cutoff]))
+               if parse_time(t.updated_at) is not None and (only is None or t.id in only)]
+        children: dict[int, list[int]] = {}
+        for child, parent in conn.execute("SELECT id, parent_id FROM tasks WHERE parent_id IS NOT NULL"):
+            children.setdefault(parent, []).append(child)
+        going = {t.id for t in old}
+        while True:
+            waiting = {i for i in going if any(c not in going for c in children.get(i, ()))}
+            if not waiting:
+                break
+            going -= waiting
+        return [t for t in old if t.id in going], [t for t in old if t.id not in going]
+
+    def _remove_finished(self, cutoff: str, only: set[int] | None = None,
+                         wait_ms: int | None = None) -> tuple[list[Task], list[str]]:
+        """Remove the finished tasks that can go by `cutoff` (of `only`, if given) and their outputs, then clear
+        their text from the files."""
+        try:
+            with self._write() as conn:
+                going, _ = self._finished_before(conn, cutoff, only)
+                if going:
+                    self._remove(conn, [t.id for t in going])
+        except sqlite3.IntegrityError as exc:  # only a board Handoff didn't write: its subtasks don't add up
+            raise BoardError("Nothing was removed: the board has a subtask whose task isn't there. The file may be "
+                             "damaged or made by another tool.") from exc
+        if not going:
+            return [], []
+        left = self._remove_outputs(t.ref for t in going)
+        self._clear_deleted(wait_ms)
+        return going, left
+
+    @staticmethod
+    def _remove(conn: sqlite3.Connection, task_ids: Iterable[int]) -> None:
+        """Delete tasks with their claims and history. Subtasks go in the same transaction, so the check that no
+        task points at a removed one waits for the commit."""
+        conn.execute("PRAGMA defer_foreign_keys = ON")  # (back off at the commit)
+        for task_id in task_ids:
+            conn.execute("DELETE FROM claims WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            conn.execute("DELETE FROM events WHERE task_id = ?", (task_id,))  # allowed once the task is gone
+        # Counted, so that clearing the text from the files, if it has to wait, isn't forgotten (_upkeep)
+        conn.execute("INSERT INTO meta (key, value) VALUES ('deletions', '1') "
+                     "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1")
+
+    def _remove_outputs(self, refs: Iterable[str]) -> list[str]:
+        """Remove each task's folder in .handoff/outputs (an answer, a review, pictures). Never through a link: a
+        repository can ship one, and what it leads to isn't Handoff's to remove. Returns what's left, in words."""
+        outputs = self.path.parent / OUTPUTS_DIR
+        shown = f"{BOARD_DIR}/{OUTPUTS_DIR}"
+        if not os.path.lexists(outputs):
+            return []
+        if _is_link(outputs) or not outputs.is_dir():
+            return [f"{shown} isn't a folder Handoff made (it's a link or a file), so nothing in it was removed."]
+        left = []
+        for ref in refs:
+            folder = outputs / ref
+            try:
+                if not os.path.lexists(folder):
+                    continue
+                if _is_link(folder) or not folder.is_dir():
+                    left.append(f"{shown}/{ref} isn't a folder Handoff made (it's a link or a file), so it's still "
+                                "there.")
+                    continue
+                shutil.rmtree(folder, ignore_errors=True)  # (it removes a link inside, never what it leads to)
+                gone = not os.path.lexists(folder)
+            except OSError:
+                gone = False
+            if not gone:
+                left.append(f"Some of {shown}/{ref} couldn't be removed; a file in it may be open in another "
+                            "program. Delete the folder yourself.")
+        return left
+
+    def _clear_deleted(self, wait_ms: int | None = None) -> bool:
+        """Clear deleted tasks' text out of the board's files: board.db is rebuilt from what's still on it
+        (VACUUM), and the -wal file, which keeps earlier copies of changed pages, is copied in and emptied.
+        Best effort: while another program is reading the board, the -wal file can't be emptied, so it waits for
+        the next time the board opens for writing, and nothing fails over it. True when it's done. `wait_ms`: how
+        long to wait for a busy board (CLEAR_WAIT_MS unless said)."""
+        conn = self._connect()  # (VACUUM's copy of the board stays in memory: _connect)
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {int(CLEAR_WAIT_MS if wait_ms is None else wait_ms)}")
+            row = conn.execute("SELECT value FROM meta WHERE key = 'deletions'").fetchone()
+            deletions = row[0] if row else "0"
+            # Emptying the -wal file first is the cheap way to find out whether anyone is reading
+            if conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+                return False
+            conn.execute("VACUUM")
+            if conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+                return False
+            # (a delete since `deletions` was read counted one more, so that one is still to clear)
+            conn.execute("INSERT INTO meta (key, value) VALUES ('deletions_cleared', ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (deletions,))
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return True
+        except sqlite3.DatabaseError:  # busy, or another writer has it
+            return False
+        finally:
+            conn.close()
+
+    def _upkeep(self, expire: bool = True) -> None:
+        """What opening a board for writing also does, quietly and without waiting on a busy board: with `expire`,
+        remove the finished tasks its keep setting says have had their time, and clear deleted text that an older
+        Handoff, or a board that was busy at the time, left in its files. Neither stops the board opening."""
+        try:
+            with self._read() as conn:
+                meta = dict(conn.execute("SELECT key, value FROM meta WHERE key IN "
+                                         "('keep_days', 'deletions', 'deletions_cleared')").fetchall())
+                days = _keep_days(meta.get("keep_days"))
+                finished = sorted(TERMINAL)
+                due = expire and days is not None and conn.execute(
+                    f"SELECT EXISTS (SELECT 1 FROM tasks WHERE status IN ({', '.join('?' for _ in finished)}) "
+                    "AND updated_at <= ?)", [*finished, self._cutoff(days)]).fetchone()[0]
+            if due:
+                self.expired = self._remove_finished(self._cutoff(days), wait_ms=0)[0]
+                if self.expired:
+                    return  # (and that cleared the files, as far as it could)
+            if meta.get("deletions_cleared") != meta.get("deletions", "0"):
+                self._clear_deleted(wait_ms=0)
+        except (BoardError, sqlite3.DatabaseError, OSError):
+            pass  # the board still opens; handoff clean says what's wrong

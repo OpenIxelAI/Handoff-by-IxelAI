@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from handoff import cli, gitwork, sandbox
+from handoff import api, cli, gitwork, sandbox
 from handoff.board import HUMAN, Board, BoardError, Forbidden
 from handoff.fence import FRAME
 from handoff.worker import CLAUDE, CLAUDE_EDIT_ONLY, Worker, WorkerUnavailable, agent_env, parse_reply
@@ -230,6 +230,33 @@ def test_a_run_works_in_its_own_worktree_and_hands_back(board, repo):
     assert [r["state"] for r in runs] == ["started", "finished"]
     assert runs[1]["base"] == head and runs[1]["commit"] == result.commit
     assert board.pending_runs("claude") == []  # one approval, one run
+
+
+def test_removing_a_task_leaves_its_worktree_and_branch_and_says_so(board, repo, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "console", Console(width=200, highlight=False))
+    monkeypatch.delenv("HANDOFF_DEPTH", raising=False)
+    task = approved(board)
+    [result] = worker(board, repo, FakeAgent(write_hello)).run_pending()
+    assert result.ok and gitwork.task_branches(repo) == {"T-1"}
+    assert cli.main(["delete", "T-1", "--yes", "--project", str(repo)]) == 0
+    out = capsys.readouterr().out
+    assert "T-1's worktree and branch are still there, with the agent's work (its commits carry the task's title)" in out
+    assert "git worktree remove .handoff/worktrees/T-1" in out and "git branch -D handoff/T-1" in out
+    # and the Ixel window's delete, the same in its reply
+    assert api._work_left(repo, "T-1") == [
+        "T-1's worktree and branch are still there, with the agent's work (its commits carry the task's title). If "
+        "you don't need them any more: git worktree remove .handoff/worktrees/T-1, then git branch -D handoff/T-1"]
+    assert (repo / ".handoff" / "worktrees" / "T-1" / "src" / "hello.py").is_file()
+    assert git(repo, "show", "handoff/T-1:src/hello.py").stdout == "print('hi')\n"
+    with pytest.raises(BoardError):
+        board.get(task.id)
+    # handoff clean says so too, for any task that's gone (one the board's keep setting removed, say)
+    assert cli.main(["clean", "--project", str(repo)]) == 0
+    assert "git branch -D handoff/T-1" in capsys.readouterr().out
+    git(repo, "worktree", "remove", "--force", ".handoff/worktrees/T-1")
+    git(repo, "branch", "-D", "handoff/T-1")
+    assert cli.main(["clean", "--project", str(repo)]) == 0
+    assert "still there" not in capsys.readouterr().out
 
 
 def test_what_the_agent_is_given(board, repo, monkeypatch):

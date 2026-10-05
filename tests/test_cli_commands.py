@@ -1,8 +1,10 @@
 """The person's commands: board, show, add, assign, note, done, reopen, block, review, status, cancel, delete,
-done-rule, approve, doctor; and what makes them easy: task ids on their own, aliases, help, plain-words errors."""
+clean, done-rule, keep, approve, doctor; and what makes them easy: task ids on their own, aliases, help, plain-words
+errors."""
 import os
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -113,6 +115,179 @@ def test_delete_needs_confirmation(project, capsys, monkeypatch):
     assert code == 0 and "Deleted T-1" in out and Board.open(project).tasks() == []
 
 
+def _age(project, *task_ids, at="2000-01-01T00:00:00Z"):
+    """As if these tasks last changed long ago."""
+    conn = sqlite3.connect(project / ".handoff" / "board.db")
+    try:
+        conn.executemany("UPDATE tasks SET updated_at = ? WHERE id = ?", [(at, task_id) for task_id in task_ids])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _days_ago(days):
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _refs(project):
+    """The tasks on the board, as it is (looking removes nothing)."""
+    return sorted(t.ref for t in Board.open(project, expire=False).tasks(statuses=None))
+
+
+def test_delete_takes_the_results_and_says_what_work_is_left(project, capsys):
+    run(capsys, "add", "Task")
+    results = project / ".handoff" / "outputs" / "T-1"
+    results.mkdir(parents=True)
+    (results / "answer.md").write_text("The answer", encoding="utf-8")
+    worktree = project / ".handoff" / "worktrees" / "T-1"
+    worktree.mkdir(parents=True)  # what an edit run leaves
+    (project / ".handoff" / "outputs" / "T-5").mkdir()  # what deleting T-5 with an older Handoff left
+    code, out, _ = run(capsys, "delete", "T-1", "--yes")
+    assert code == 0 and "Deleted T-1." in out and not results.exists()
+    assert "T-1's worktree is still there, with the agent's work" in out
+    assert "git worktree remove .handoff/worktrees/T-1" in out and worktree.is_dir()
+    assert ("The results of T-5, which are no longer on the board, are still in .handoff/outputs. handoff clean "
+            "lists them and asks before removing them.") in out
+
+
+def test_clean_lists_asks_and_removes(project, capsys, monkeypatch):
+    for title in ("Old and done", "Old and cancelled", "Old but open", "Done today"):
+        run(capsys, "add", title)
+    run(capsys, "done", "T-1")
+    run(capsys, "cancel", "T-2")
+    run(capsys, "done", "T-4")
+    _age(project, 1, 2, 3)
+    results = project / ".handoff" / "outputs" / "T-1"
+    results.mkdir(parents=True)
+    (results / "answer.md").write_text("The answer", encoding="utf-8")
+
+    code, out, err = run(capsys, "clean")
+    assert code == 1 and "pass --yes to confirm: handoff clean --older-than 30 --yes" in err
+    assert "Finished tasks last changed more than 30 days ago:" in out
+    assert "T-1  done       Old and done" in out and "T-2  cancelled  Old and cancelled" in out
+    assert "T-3" not in out and "T-4" not in out
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli.console, "input", lambda prompt="": "n")
+    code, out, _ = run(capsys, "clean")
+    assert code == 1 and "Nothing was removed." in out and _refs(project) == ["T-1", "T-2", "T-3", "T-4"]
+    monkeypatch.setattr(cli.console, "input", lambda prompt="": "y")
+    code, out, _ = run(capsys, "clean")
+    assert code == 0 and "Removed 2 tasks." in out and "To have this done by itself from now on: handoff keep 30" in out
+    assert _refs(project) == ["T-3", "T-4"] and not results.exists()
+    assert "Nothing to clean: no finished task was last changed more than 30 days ago." in run(capsys, "clean")[1]
+    code, out, _ = run(capsys, "clean", "--older-than", "0", "--yes")
+    assert code == 0 and "Removed 1 task." in out and _refs(project) == ["T-3"]
+
+
+def test_clean_says_which_tasks_wait_for_their_subtasks(project, capsys):
+    run(capsys, "add", "Parent")
+    run(capsys, "add", "Child", "--parent", "T-1")
+    run(capsys, "done", "T-1")
+    _age(project, 1, 2)
+    out = run(capsys, "clean")[1]
+    assert "Nothing to clean" in out and "Staying for now, until their subtasks can go too: T-1" in out
+
+
+def test_clean_takes_results_left_by_tasks_that_are_gone(project, capsys, monkeypatch):
+    run(capsys, "add", "Still here")
+    outputs = project / ".handoff" / "outputs"
+    for ref in ("T-1", "T-7", "T-9"):  # T-7 and T-9 were deleted by an older Handoff, which left these
+        (outputs / ref).mkdir(parents=True)
+        (outputs / ref / "answer.md").write_text("The answer", encoding="utf-8")
+    code, out, err = run(capsys, "clean")
+    assert code == 1 and "pass --yes to confirm: handoff clean --older-than 30 --yes" in err
+    assert "Results in .handoff/outputs of tasks that are no longer on the board: T-7 and T-9" in out
+    assert "Finished tasks last changed" not in out
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    asked = []
+    monkeypatch.setattr(cli.console, "input", lambda prompt="": asked.append(str(prompt)) or "y")
+    code, out, _ = run(capsys, "clean")
+    assert code == 0 and asked == ["  Remove these results for good? [y/N] "]
+    assert "Removed the results of T-7 and T-9." in out and "Removed 0 tasks" not in out
+    assert (outputs / "T-1" / "answer.md").is_file() and sorted(p.name for p in outputs.iterdir()) == ["T-1"]
+    assert "Nothing to clean" in run(capsys, "clean")[1]
+
+    # With old tasks too, one question for all of it
+    run(capsys, "done", "T-1")
+    _age(project, 1)
+    (outputs / "T-8").mkdir()
+    asked.clear()
+    code, out, _ = run(capsys, "clean")
+    assert code == 0 and asked == ["  Remove all of this for good? [y/N] "]
+    assert "Removed 1 task." in out and "Removed the results of T-8." in out and not outputs.joinpath("T-1").exists()
+
+
+def test_clean_passes_over_folders_that_only_look_like_a_task(project, capsys):
+    run(capsys, "add", "Task")
+    run(capsys, "done", "T-1")
+    (project / ".handoff" / "worktrees" / "T-\u0663").mkdir(parents=True)  # not T-3: an Arabic-Indic 3
+    (project / ".handoff" / "outputs" / "T-01").mkdir(parents=True)
+    code, out, err = run(capsys, "clean", "--older-than", "0", "--yes")
+    assert code == 0 and "Removed 1 task." in out and err == ""
+    assert "T-\u0663" not in out and "T-01" not in out
+
+
+def test_clean_needs_a_number_of_days(project, capsys):
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["clean", "--older-than", "-1"])
+    assert exited.value.code == 2
+    assert "--older-than needs a number of days from 0 to 36500." in capsys.readouterr().err
+
+
+def test_keep(project, capsys):
+    out = run(capsys, "keep")[1]
+    assert "This board keeps finished tasks until you delete them or run handoff clean (the default)." in out
+    run(capsys, "add", "Old")
+    run(capsys, "done", "T-1")
+    run(capsys, "add", "New")
+    run(capsys, "done", "T-2")
+    _age(project, 1)
+    code, out, err = run(capsys, "keep", "30")
+    assert code == 1 and "Keeping finished tasks 30 days removes these now:" in out and "T-1  done" in out
+    assert "pass --yes to confirm: handoff keep 30 --yes" in err
+    assert Board.open(project).keep_days is None and _refs(project) == ["T-1", "T-2"]
+    code, out, _ = run(capsys, "keep", "30", "--yes")
+    assert code == 0 and "This board removes each finished task 30 days after its last change." in out
+    assert "Removed 1 task." in out and _refs(project) == ["T-2"]
+    out = run(capsys, "keep")[1]
+    assert "removes each finished task 30 days after its last change." in out and "(the default)" not in out
+    run(capsys, "add", "Third")
+    run(capsys, "done", "T-3")
+    _age(project, 3)
+    out = run(capsys, "board")[1]  # any command opens the board, and that removes it
+    assert "Removed T-3: this board removes finished tasks 30 days after their last change (handoff keep)." in out
+    assert _refs(project) == ["T-2"]
+    assert "keeps finished tasks until you delete them" in run(capsys, "keep", "forever")[1]
+    assert Board.open(project).keep_days is None
+    for value in ("soon", "0", "-5"):
+        with pytest.raises(SystemExit) as exited:
+            cli.main(["keep", value])
+        assert exited.value.code == 2
+        assert "a number of days from 1 to 36500, or forever" in capsys.readouterr().err
+
+
+def test_changing_keep_never_removes_by_the_old_setting(project, capsys):
+    for title in ("Done 40 days ago", "Done 100 days ago"):
+        run(capsys, "add", title)
+    run(capsys, "done", "T-1")
+    run(capsys, "done", "T-2")
+    assert run(capsys, "keep", "30", "--yes")[0] == 0  # (nothing that old yet)
+    _age(project, 1, at=_days_ago(40))
+    _age(project, 2, at=_days_ago(100))  # both past 30 days now: the next open would remove them
+    out = run(capsys, "keep")[1]  # looking removes nothing
+    assert "removes each finished task 30 days after its last change." in out and "Removed" not in out
+    assert _refs(project) == ["T-1", "T-2"]
+    code, out, _ = run(capsys, "keep", "90", "--yes")  # longer: only what's past 90 days goes
+    assert code == 0 and "Keeping finished tasks 90 days removes these now:" in out
+    assert "T-2  done" in out and "T-1  done" not in out and "Removed 1 task." in out
+    assert _refs(project) == ["T-1"]
+    code, out, _ = run(capsys, "keep", "forever")  # to stop removals: nothing goes on the way
+    assert code == 0 and "keeps finished tasks until you delete them" in out and "Removed" not in out
+    assert _refs(project) == ["T-1"]
+    run(capsys, "board")
+    assert _refs(project) == ["T-1"]
+
+
 def test_done_rule(project, capsys):
     assert "(review_or_reason)" in run(capsys, "done-rule")[1]
     assert "only after an approving review" in run(capsys, "done-rule", "review")[1]
@@ -195,6 +370,7 @@ def test_doctor(project, capsys, monkeypatch, tmp_path):
     code, out, _ = run(capsys, "doctor")
     assert code == 0, out
     assert "Project" in out and "1 task ·" in out and "done rule: review_or_reason" in out
+    assert "finished tasks kept forever" in out
     assert "The board stays out of git" in out
     if sys.platform != "win32":
         os.chmod(project / ".handoff" / "board.db", 0o644)
@@ -835,7 +1011,8 @@ def test_an_agent_handoff_started_can_t_act_as_you(project, capsys, monkeypatch)
     monkeypatch.setenv("APPDATA", str(fake / "AppData" / "Roaming"))
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("HANDOFF_DEPTH", "1")  # a shell inside something Handoff started runs as you
-    for args in (("delete", "T-1", "--yes"), ("note", "T-1", "posing as the person"), ("done", "T-1"),
+    for args in (("delete", "T-1", "--yes"), ("clean", "--older-than", "0", "--yes"), ("keep", "1", "--yes"),
+                 ("note", "T-1", "posing as the person"), ("done", "T-1"),
                  ("approve", "T-1", "codex", "--yes"), ("add", "Another"), ("setup", "--write"), ("update",),
                  # decided on the options as parsed: argparse takes --wri for --write
                  ("setup", "--wri"), ("setup", "--hook"), ("setup", "--remove-hook"), ("setup", "--remove"),

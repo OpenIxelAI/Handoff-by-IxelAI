@@ -14,7 +14,7 @@ through GitHub's **Report a vulnerability** button (Security tab) on this reposi
 | Asset | Where it lives |
 |---|---|
 | Each agent's judgment | What an agent reads from the board must not take it over |
-| The board and its history | `<project>/.handoff/board.db` (SQLite) |
+| The board and its history | `<project>/.handoff/board.db` (SQLite), and what runs leave in `.handoff/outputs` |
 | Your secrets | Nowhere on the board: text that looks like a key is refused |
 | Your files and your machine | Handoff edits no project files itself. It runs an agent only for a task you approve: an edit is confined to a worktree (and a sandbox, where one can run) |
 
@@ -46,7 +46,9 @@ commands as you is close to that: see [Agents with a shell](#agents-with-a-shell
     (`handoff doctor`, `handoff agents`, `handoff approve`, a dispatch plan, and before an edit run);
   - `ixel ask --list` and `ixel image --list`, to see which models Ixel MAT has (no model is asked);
   - `claude mcp add` and `claude mcp remove`, for `handoff setup --write` and `--remove`;
-  - git and bash (PowerShell on Windows), for `handoff update`; and git, for the worker's worktrees.
+  - git and bash (PowerShell on Windows), for `handoff update`; and git, for the worker's worktrees, and
+    to see which worker branches are left after `handoff delete`, `handoff clean` or a delete in the Ixel
+    window (`git for-each-ref`, which only reads).
 - The files it writes are the `.handoff` folder, and your `.gitignore` if you say yes. In your user
   folder: the key that seals approvals and the list of approvals already used (`approval.key` and
   `approvals-used`, below). With `handoff setup --write` (or `--remove`): each app's MCP config, and
@@ -106,7 +108,7 @@ commands as you is close to that: see [Agents with a shell](#agents-with-a-shell
   reviewer can review, and nobody can review their own work (an agent that claimed the task, handed it over
   or ran it through the worker can't be its reviewer, whoever asks; one that only reviewed it can). A review that marks an acceptance check not met
   can't be an approval. By default `done` needs an approving review or a stated reason. Only you can
-  reassign, cancel, delete or reopen.
+  reassign, cancel, delete, clean or reopen.
 - Every change is recorded in `events`. SQLite triggers refuse edits to the history, and refuse deletes
   while the task exists. Agents have no delete tool at all.
 
@@ -117,14 +119,14 @@ run commands as you (Claude Code's Bash tool, Codex's shell) can run the `handof
 is you: it could approve a task, run it, or delete one. Handoff can't tell it apart from you at a terminal.
 
 - Anything Handoff started (`HANDOFF_DEPTH` is set) is refused the CLI's writes (add, assign, note, status,
-  review, approve, delete and the like, plus `setup` when it would change an app's config or hook, and
-  `update` other than `--check`), `handoff api`'s writes, and `handoff run`, `dispatch` and `worker`. It can
-  still look. This is a guard against an agent doing it by accident, not a wall: a shell can unset the
-  variable (`env -u HANDOFF_DEPTH`, or `HANDOFF_DEPTH=0`), and Handoff can't stop that.
+  review, approve, delete, clean, keep and the like, plus `setup` when it would change an app's config or
+  hook, and `update` other than `--check`), `handoff api`'s writes, and `handoff run`, `dispatch` and
+  `worker`. It can still look. This is a guard against an agent doing it by accident, not a wall: a shell
+  can unset the variable (`env -u HANDOFF_DEPTH`, or `HANDOFF_DEPTH=0`), and Handoff can't stop that.
 - So for every agent with a shell, deny those commands in its app's permission settings too. In Claude
-  Code, add `Bash(handoff approve:*)`, `Bash(handoff delete:*)` and `Bash(handoff run:*)` to
-  `permissions.deny` in `~/.claude/settings.json`. Where an app can't deny single commands, have it ask
-  you before it runs any.
+  Code, add `Bash(handoff approve:*)`, `Bash(handoff delete:*)`, `Bash(handoff clean:*)`,
+  `Bash(handoff keep:*)` and `Bash(handoff run:*)` to `permissions.deny` in `~/.claude/settings.json`.
+  Where an app can't deny single commands, have it ask you before it runs any.
 
 ### No secrets on the board
 
@@ -144,6 +146,49 @@ as passwords, aren't detected, so never write them on the board.
   accident.
 - A `.handoff` that is a symbolic link is refused, so a cloned repository can't point the board somewhere
   else.
+
+### Deleting, and how long finished tasks stay
+
+- **Finished tasks stay until you remove them.** That's the default. `handoff delete T-N` removes one task.
+  `handoff clean` removes every finished task (done or cancelled) whose last change was more than 30 days
+  ago (`--older-than DAYS` for another age), after listing them and asking. `handoff keep DAYS` has the
+  board do that by itself: each time Handoff opens it for writing (any `handoff` command, a request from
+  the Ixel window, an app's agent first using the board), finished tasks older than DAYS are removed.
+  `handoff keep forever` turns that off, and `handoff doctor` shows the setting. A task goes only with all
+  of its subtasks, so one with a subtask that's still open, or newer, waits for it.
+- **Changing the setting never removes anything by the old one.** `handoff keep` on its own only shows it.
+  `handoff keep DAYS` lists the finished tasks the new setting removes now and asks first (`--yes` to
+  skip the question), and `handoff keep forever` removes nothing. When a command at the terminal opens the
+  board and the setting removes tasks, it says which.
+- **Removing a task takes everything the board has of it**: its title, text and checks, every note,
+  handoff and review, its history, its path claims, and its folder in `.handoff/outputs` (answers, reviews
+  and pictures from runs through Ixel). Only you can remove tasks: at the command line, or one task at a
+  time in the Ixel window. Agents have no tool for it.
+- **Deleted text is overwritten, not just marked free.** Every connection Handoff writes with turns on
+  SQLite's `secure_delete`, so a deleted row is overwritten with zeros. After a delete or a clean, Handoff
+  copies `board.db-wal` (SQLite's log, which keeps earlier copies of changed pages) into the board and
+  empties it, and rebuilds `board.db` from what's still on it (`VACUUM`). What SQLite sets aside while it
+  works stays in memory (`temp_store`): the rows a delete takes out, which it keeps in case it has to undo
+  the delete, and VACUUM's copy of the board. So none of it is written to a temporary file in the
+  system's temp folder. The tests check, byte by byte, that a deleted task's text is in neither file.
+- **A busy board is finished later.** If another program is reading the board at that moment, the task is
+  still deleted, but the old copies can stay in `board.db` and `board.db-wal` until the next time Handoff
+  opens the board for writing, which finishes the job. A board from an older Handoff, whose deletes left
+  text behind, is rebuilt the same way once, the first time this version opens it for writing (or the
+  next time, if it's busy then).
+- **Results an older Handoff left:** before this version, deleting a task (at the command line or in the
+  Ixel window) left its folder in `.handoff/outputs`. A run that finishes after its task was deleted can
+  leave one too. `handoff clean` lists every folder there whose task is no longer on the board and
+  removes them with the rest, after asking. `handoff delete` says when there are any. Nothing removes
+  them without asking.
+- **What stays:** an edit run's worktree (`.handoff/worktrees/T-N`) and branch (`handoff/T-N`) hold the
+  agent's work, so Handoff leaves them, and their commit messages carry the task's title. `handoff delete`
+  and `handoff clean` say which are left, with the git commands that remove them, and so does Handoff's
+  reply to a delete from the Ixel window.
+- **What Handoff can't reach:** copies outside its files. That's backups (Time Machine, File History), a
+  synced folder holding the project, the history of the app whose agent read the task, and the disk
+  itself, which can keep old blocks until it reuses them (SSDs and copy-on-write file systems such as
+  APFS in particular). Files in `.handoff/outputs` are deleted the ordinary way, not overwritten.
 
 ### Connecting apps
 
@@ -209,7 +254,7 @@ shell or network access of its own.
 
 | Test | What it proves |
 |---|---|
-| `tests/test_board.py` | Every state transition, legal and illegal; authorization; limits; secrets refused and never written; history can't be edited; file permissions; symlinked folder refused |
+| `tests/test_board.py` | Every state transition, legal and illegal; authorization; limits; secrets refused and never written; history can't be edited; file permissions; symlinked folder refused; a deleted, cleaned or expired task's text is in neither `board.db` nor `board.db-wal`, byte for byte, with or without SQLite overwriting by default, on a busy board once it's free, and on a board an older Handoff left; a delete writes no temporary file (on Linux, where the test can see one); its results go too, never through a link, and results whose task is gone are found |
 | `tests/test_board_concurrency.py` | Two processes racing on one board: every task claimed exactly once, no note or task lost |
 | `tests/test_sanitize.py`, `tests/test_globs.py` | Control codes and bidi stripped; secret detection; linear time on hostile input |
 | `tests/test_crafted_board.py` | A board crafted to inject text through names, event kinds, paths, review marks and malformed data reaches neither an agent nor the terminal unfiltered |
@@ -217,17 +262,17 @@ shell or network access of its own.
 | `tests/test_plugin.py` | The plugin's manifests start the server as the right agent, with no shared MCP config; the real Claude Code and Codex install it from a local marketplace (this checkout, not GitHub) and create a task through it, on the board of the project they were opened in |
 | `tests/test_setup.py` | Config merges keep everything else, are idempotent, and refuse what they can't edit safely |
 | `tests/test_hook.py` | The session hook: refs and counts only, never a title or note; silent with no board, nothing waiting, inside an agent Handoff started, or a broken board; `settings.json` keeps everything else, gets the hook once, and gets it back out; a Windows path that needs quotes skips the shell; the real Claude Code runs it, in both forms, and the model hears the refs but no task text |
-| `tests/test_api.py` | The window's JSON door: reading never makes a board; the board's rules still hold (an edit run is claude or codex only, secrets refused); approval seals never leave it; bad requests get an error, never a crash; stdout is one ASCII line whatever the code page; text comes back exactly as written |
+| `tests/test_api.py` | The window's JSON door: reading never makes a board; the board's rules still hold (an edit run is claude or codex only, secrets refused); approval seals never leave it; bad requests get an error, never a crash; stdout is one ASCII line whatever the code page; text comes back exactly as written; a delete takes the task's results too, and says what's left |
 | `tests/test_ixel.py` | Agent text reaches Ixel only on stdin; the loop guard; hostile panel output is sanitized and secrets withheld |
 | `tests/test_worker_claude_live.py` | **Claude's attack test**, with the real Claude Code CLI inside real bubblewrap (below) |
 | `tests/test_worker_codex_live.py` | **Codex's attack test**, with the real Codex CLI inside real bubblewrap (below) |
 | `tests/test_worker_live.py` | **The attack test for Claude's edit-only mode**, where the sandbox can't run (below) |
 | `tests/test_sandbox.py` | The sandbox's command line (what's hidden, what's shown, in what order); which folders can be shared and what's hidden inside them; Claude's sandbox settings; each agent's private login and when a refreshed one is copied back; which environment variables count as credentials |
-| `tests/test_worker.py` | Approvals (the person only; one run; lapse when the task moves; sealed to this computer and board, so a cloned or edited board carries none); the worktree, branch and commit; a rewritten `.git` file and the repository's own hooks can't make the worker's git run anything; links out of the worktree are refused; the agent's environment and command line |
+| `tests/test_worker.py` | Approvals (the person only; one run; lapse when the task moves; sealed to this computer and board, so a cloned or edited board carries none); the worktree, branch and commit; a rewritten `.git` file and the repository's own hooks can't make the worker's git run anything; links out of the worktree are refused; the agent's environment and command line; deleting or cleaning a task leaves its worktree and branch, and says so |
 | `tests/test_dispatch.py` | How a request splits and which kind of run each part gets; nothing is added before a yes; the runs really happen at once; the kind is sealed, so a run can't be turned into an edit; only claude and codex edit; the files a run reads stay inside the project; pictures saved anywhere else are refused; one failing part blocks only its own task; the loop guard |
 | `tests/test_update.py` | Update never overwrites local changes, and runs the installer again until the latest is installed; git, bash and PowerShell never come from the folder it's run in |
 | `tests/test_code_hygiene.py` | Every text file is opened with an explicit encoding; the installers stay ASCII for Windows PowerShell 5.1; no program is started by a bare name, and taskkill comes from System32 |
-| `tests/test_cli.py`, `tests/test_cli_commands.py` | Every command and its messages: what's refused and what to type instead; nothing an agent wrote is read as markup; an agent Handoff started can't act as you |
+| `tests/test_cli.py`, `tests/test_cli_commands.py` | Every command and its messages: what's refused and what to type instead; nothing an agent wrote is read as markup; an agent Handoff started can't act as you; `clean` and `keep` list what goes and ask first, and changing `keep` never removes anything by the old setting |
 | `tests/test_project.py` | Which folder is the project, for a subfolder, a linked worktree, a submodule or an empty `.git`; paths too long for the system |
 | `tests/test_docs.py` | The guide names every tool, command, status and done rule, and this page names every test file |
 

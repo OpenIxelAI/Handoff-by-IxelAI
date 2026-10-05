@@ -92,7 +92,7 @@ def test_the_person_runs_a_task_through_its_life(project):
     ok("status", project, task="T-1", to="open")
     ok("status", project, task="T-1", to="cancelled", reason="Not needed")
     assert ok("task", project, task="T-1")["task"]["status"] == "cancelled"
-    assert ok("delete", project, task="T-1") == {"deleted": "T-1"}
+    assert ok("delete", project, task="T-1") == {"deleted": "T-1", "left": []}
     assert ok("board", project)["tasks"] == []
 
 
@@ -221,6 +221,35 @@ def test_outputs_behind_a_linked_folder_are_not_listed(project, tmp_path):
     except OSError:
         pytest.skip("can't make symlinks here")
     assert ok("task", project, task="T-1")["outputs"] == []
+
+
+def test_delete_takes_the_tasks_results_too(project, tmp_path):
+    ok("init", project)
+    ok("add", project, title="Answer me", assignee="gemini")
+    outputs = project / ".handoff" / "outputs" / "T-1"
+    outputs.mkdir(parents=True)
+    (outputs / "answer.md").write_text("# hi", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("mine", encoding="utf-8")
+    try:
+        os.link(outside, outputs / "notes.txt")  # a second name for a file outside: only that name goes
+    except OSError:
+        pass
+    assert ok("delete", project, task="T-1") == {"deleted": "T-1", "left": []}
+    assert not outputs.exists() and outside.read_text(encoding="utf-8") == "mine"
+
+
+def test_delete_says_what_of_the_task_is_left(project, monkeypatch):
+    ok("init", project)
+    ok("add", project, title="Picture", assignee="gemini")
+    (project / ".handoff" / "outputs" / "T-1").mkdir(parents=True)
+    (project / ".handoff" / "worktrees" / "T-1").mkdir(parents=True)  # what an edit run leaves
+    monkeypatch.setattr("handoff.board.shutil.rmtree", lambda *args, **kwargs: None)  # a picture open in a viewer
+    assert ok("delete", project, task="T-1")["left"] == [
+        "Some of .handoff/outputs/T-1 couldn't be removed; a file in it may be open in another program. Delete the "
+        "folder yourself.",
+        "T-1's worktree is still there, with the agent's work (its commits carry the task's title). If you don't "
+        "need it any more: git worktree remove .handoff/worktrees/T-1"]
 
 
 def test_text_comes_back_exactly_as_written(project):
