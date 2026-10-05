@@ -266,6 +266,17 @@ def test_keep(project, capsys):
         assert "a number of days from 1 to 36500, or forever" in capsys.readouterr().err
 
 
+def test_json_output_stays_json_when_opening_the_board_removes_tasks(project, capsys):
+    import json
+    run(capsys, "add", "Old")
+    run(capsys, "done", "T-1")
+    assert run(capsys, "keep", "30", "--yes")[0] == 0
+    _age(project, 1)
+    code, out, err = run(capsys, "run", "--json")  # nothing approved: no results, and no agent started
+    assert json.loads(out) == {"results": []} and "Removed T-1" in err
+    assert _refs(project) == []
+
+
 def test_changing_keep_never_removes_by_the_old_setting(project, capsys):
     for title in ("Done 40 days ago", "Done 100 days ago"):
         run(capsys, "add", title)

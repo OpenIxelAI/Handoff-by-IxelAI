@@ -396,18 +396,20 @@ def _board(args: argparse.Namespace, expire: bool = True):
     from handoff.board import Board
     root = _root(args)
     board = _opened = Board.open(root, expire=expire)
-    _say_expired(board)
+    # With --json, what's printed is the JSON alone: this goes to stderr
+    _say_expired(board, err_console if getattr(args, "json", False) else console)
     _maybe_ask_gitignore(board, root)
     return board
 
 
-def _say_expired(board) -> None:
+def _say_expired(board, out: Console | None = None) -> None:
     """Which finished tasks opening the board just removed, because of how long it keeps them (handoff keep)."""
     if board.expired:
         days = board.keep_days
         how_long = f"{_plural(days, 'day')} after their last change" if days else "as its keep setting says"
-        _hint(f"Removed {_and([t.ref for t in board.expired], most=10)}: this board removes finished tasks "
-              f"{how_long} (handoff keep).")
+        message = (f"Removed {_and([t.ref for t in board.expired], most=10)}: this board removes finished tasks "
+                   f"{how_long} (handoff keep).")
+        (out or console).print(f"  [{C['dim']}]{escape(message)}[/]", soft_wrap=True)
 
 
 def _interactive() -> bool:

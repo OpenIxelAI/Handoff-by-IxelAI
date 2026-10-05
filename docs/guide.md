@@ -304,7 +304,8 @@ The board checks these itself; it doesn't trust what an agent says about who it 
 - **History is append-only.** Agents can't delete tasks or edit the history through Handoff's tools; only
   you can cancel or delete, from the CLI. These rules bind the MCP tools. An agent that can run commands as
   you (Claude Code's Bash, Codex's shell) can also run the `handoff` CLI as you, so deny it `handoff approve`,
-  `handoff delete` and `handoff run` in its permission settings ([Security](../SECURITY.md#agents-with-a-shell)).
+  `handoff delete`, `handoff clean`, `handoff keep` and `handoff run` in its permission settings
+  ([Security](../SECURITY.md#agents-with-a-shell)).
   Anything Handoff started itself is refused the CLI's writes, as a guard against an agent doing it by
   accident. It isn't a wall (a shell can unset `HANDOFF_DEPTH`), so keep those commands denied.
 - **Paths are claimed, not locked.** When two active tasks claim overlapping files, both agents are warned:
