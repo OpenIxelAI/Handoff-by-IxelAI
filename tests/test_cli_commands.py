@@ -915,9 +915,9 @@ def test_piped_output_keeps_paths_and_help_whole(tmp_path):
 
 def test_long_text_in_the_cli_has_no_long_lines_or_dashes():
     # The help reads well at 80 columns; new prose doesn't use em-dashes
-    for usage, what in cli.COMMANDS:
+    for _, what in cli.COMMANDS:
         assert len("        " + what) <= 88, what
-    for usage, what in cli.START:
+    for _, what in cli.START:
         assert len("        " + what) <= 80 and "—" not in what
     assert "—" not in cli._aliases_line()
 
@@ -1058,8 +1058,10 @@ def test_an_agent_handoff_started_can_t_act_as_you(project, capsys, monkeypatch)
 
 def test_a_missing_reason_or_review_text_says_what_to_type(project, capsys):
     run(capsys, "add", "Task")
-    for args, said in ((["status", "T-1", "blocked"], 'Say why it\'s blocked: handoff status T-1 blocked --reason "'),
-                       (["review", "T-1", "changes"], 'Say what to change: handoff review T-1 changes "what to change"')):
+    for args, said in ((["status", "T-1", "blocked"],
+                        'Say why it\'s blocked: handoff status T-1 blocked --reason "'),
+                       (["review", "T-1", "changes"],
+                        'Say what to change: handoff review T-1 changes "what to change"')):
         with pytest.raises(SystemExit) as stopped:
             cli.main(args)
         assert stopped.value.code == 2 and said in capsys.readouterr().err

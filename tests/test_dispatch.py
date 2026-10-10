@@ -14,10 +14,10 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
+from test_worker import _fake_claude, _no_sandbox, git
 
 from handoff import asks, cli, crew, sandbox, worker
 from handoff.board import HUMAN, Board, BoardError, run_kind
-from test_worker import _fake_claude, _no_sandbox, git
 
 REQUEST = ("/handoff all codex i need you to review, grok generate photos based on my work, claude finish the "
            "next step and gemini or whoever make me a list of projects to check out")
@@ -623,7 +623,8 @@ def test_an_answer_is_written_through_a_new_file(repo, tmp_path):
     folder.mkdir()
     _link(folder / "answer.md", victim)
     asks._replace(folder / "answer.md", "the answer\n")
-    assert not (folder / "answer.md").is_symlink() and (folder / "answer.md").read_text(encoding="utf-8") == "the answer\n"
+    assert not (folder / "answer.md").is_symlink()
+    assert (folder / "answer.md").read_text(encoding="utf-8") == "the answer\n"
     assert victim.read_text(encoding="utf-8") == "keep me\n" and [p.name for p in folder.iterdir()] == ["answer.md"]
 
 
@@ -675,7 +676,8 @@ def test_an_older_ixel_reviews_without_new_files_and_says_so(repo, fake_ixel, ru
     (repo / "till.py").write_text("x = 1\n", encoding="utf-8")
     code, out, _ = run_cli("dispatch", "--plan", "--json", "codex review my changes")
     [step] = json.loads(out)["steps"]
-    assert "the only changes are new files git doesn't track yet" in step["problem"] and "ixel update" in step["problem"]
+    assert "the only changes are new files git doesn't track yet" in step["problem"]
+    assert "ixel update" in step["problem"]
     (repo / "README.md").write_text("# Shop\nNow with receipts.\n", encoding="utf-8")
     review = _review_call(fake_ixel, run_cli)
     assert review["argv"] == ["ask", "--agent", "codex", "--json", "--diff", "-"]
@@ -769,7 +771,8 @@ def test_a_pull_request_is_reviewed_at_the_commits_approved(repo, fake_ixel, run
     board = Board.open(repo)
     task, _ = board.create(HUMAN, "Review pull request #7: Pay")
     board.approve(HUMAN, task.id, "codex", kind="review", target=target)
-    assert "approved it for codex, through Ixel MAT, to review pull request #7 (pr into main)" in run_cli("show", "T-1")[1]
+    shown = run_cli("show", "T-1")[1]
+    assert "approved it for codex, through Ixel MAT, to review pull request #7 (pr into main)" in shown
     code, out, _ = run_cli("run", "T-1")
     assert code == 0, out
     [review] = fake_ixel("ask")

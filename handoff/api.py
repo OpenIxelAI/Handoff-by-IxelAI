@@ -35,9 +35,27 @@ import sys
 from pathlib import Path
 
 from handoff import __version__
-from handoff.board import (ACTIVE, HUMAN, RUN_KINDS, STATE_EVENTS, TERMINAL, Board, BoardError, Changed, Event,
-                           Forbidden, NoBoard, NotFound, Task, check_name, content_of, parse_task_id, run_kind,
-                           safe_name, task_ref)
+from handoff.board import (
+    ACTIVE,
+    HUMAN,
+    RUN_KINDS,
+    STATE_EVENTS,
+    TERMINAL,
+    Board,
+    BoardError,
+    Changed,
+    Event,
+    Forbidden,
+    NoBoard,
+    NotFound,
+    Task,
+    check_name,
+    content_of,
+    parse_task_id,
+    run_kind,
+    safe_name,
+    task_ref,
+)
 from handoff.ixel import DEPTH_VAR, depth
 from handoff.project import BOARD_DIR, OUTPUTS_DIR, ProjectError, board_path
 from handoff.sanitize import clean_line

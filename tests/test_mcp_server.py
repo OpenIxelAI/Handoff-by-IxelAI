@@ -1,6 +1,7 @@
 """`handoff mcp`: the tools, framing and fencing, identity rules, and the real stdio protocol."""
 import asyncio
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -13,7 +14,8 @@ from mcp.client.stdio import StdioServerParameters
 
 from handoff import fence, hosts, mcp_server
 from handoff.board import Board, BoardError
-from handoff.mcp_server import FRAME, build_server, identity_mismatch
+from handoff.fence import FRAME
+from handoff.mcp_server import build_server, identity_mismatch
 
 READ_TOOLS = {"handoff_inbox", "handoff_wait", "handoff_board", "handoff_get"}
 WRITE_TOOLS = {"handoff_create", "handoff_claim", "handoff_note", "handoff_pass", "handoff_request_review",
@@ -335,7 +337,7 @@ def test_wait_returns_when_a_task_arrives(tmp_path, quick_poll, timeout):
         text = run(go())
     finally:
         arrival.finish()
-    assert text.startswith("Your inbox changed after ") and " seconds.\n\n" in text
+    assert re.match(r"Your inbox changed after \d+ seconds?\.\n\n", text)
     assert "inbox changed" in text and "Write the tests" in text and "T-1 · open · from claude" in text
 
 
@@ -345,7 +347,7 @@ def test_wait_gives_up_after_the_timeout(tmp_path, quick_poll):
             started = time.monotonic()
             return await call(codex, "handoff_wait", {"timeout_seconds": 1}), time.monotonic() - started
     text, took = run(go())
-    assert text == ("Nothing new for codex after 1 seconds. Call handoff_wait again to keep waiting, or "
+    assert text == ("Nothing new for codex after 1 second. Call handoff_wait again to keep waiting, or "
                     "handoff_inbox to read what's there now.\n")
     assert took >= 1
 
@@ -365,7 +367,7 @@ def test_wait_ignores_changes_that_aren_t_for_you(tmp_path, quick_poll):
                 return await call(codex, "handoff_wait", {"timeout_seconds": 1}), time.monotonic()
             return await asyncio.gather(waiting(), meanwhile())
     (text, wait_ended), (board, board_answered) = run(go())
-    assert text.startswith("Nothing new for codex after 1 seconds.")
+    assert text.startswith("Nothing new for codex after 1 second.")
     assert "| T-1 | in_progress | claude | Mine |" in board and board_answered < wait_ended
 
 
@@ -375,7 +377,7 @@ def test_wait_timeout_is_clamped(tmp_path, quick_poll):
     async def go():
         async with mcp.Client(build_server("codex", tmp_path)) as codex:
             return await call(codex, "handoff_wait", {"timeout_seconds": 0})
-    assert "Nothing new for codex after 1 seconds" in run(go())
+    assert "Nothing new for codex after 1 second." in run(go())
 
 
 # ── Framing and fencing ──────────────────────────────────────────────────────

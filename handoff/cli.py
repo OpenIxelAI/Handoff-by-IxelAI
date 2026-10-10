@@ -64,7 +64,8 @@ COMMANDS = [
     ("handoff agents", "Who can take tasks here: changing files, answering, reviewing, pictures"),
     ("handoff approve T-12 AGENT [--kind edit|answer|review|image]", "Let an agent run a task, once"),
     ("handoff run [T-12 ...]", "Run approved tasks now, side by side"),
-    ("handoff worker --agent claude|codex [--once] [--share FOLDER]", "Run approved tasks headlessly, each in its own worktree"),
+    ("handoff worker --agent claude|codex [--once] [--share FOLDER]",
+     "Run approved tasks headlessly, each in its own worktree"),
     ("handoff setup [--write|--remove] [--host HOST]", "Connect Claude Code, Codex and Claude Desktop (or take "
                                                         "Handoff out of them)"),
     ("handoff doctor [--json]", "Check the board, the project and the apps"),
@@ -1615,7 +1616,8 @@ def _depth_guard() -> None:
 
 
 def _kind_text(kind: str) -> str:
-    return {"edit": "changes files", "answer": "answers", "review": "reviews", "image": "makes pictures"}.get(kind, kind)
+    return {"edit": "changes files", "answer": "answers", "review": "reviews",
+            "image": "makes pictures"}.get(kind, kind)
 
 
 def _result_line(result, agent: str) -> None:
@@ -1652,7 +1654,7 @@ def _run_and_report(board, root: Path, pairs, roster=None, as_json: bool = False
     return [{"task": r.task.ref, "agent": agents.get(r.task.id, ""), "ok": r.ok, "message": r.message,
              **({"branch": r.branch} if r.branch else {})} for r in results if r is not None] + \
         [{"task": task.ref, "agent": agents[task.id], "ok": False, "message": "It was still running when Handoff "
-          "stopped."} for (task, _), r in zip(pairs, results) if r is None]
+          "stopped."} for (task, _), r in zip(pairs, results, strict=True) if r is None]
 
 
 def cmd_dispatch(argv: list[str]) -> int:
@@ -1826,7 +1828,7 @@ def cmd_agents(argv: list[str]) -> int:
         console.print(f"  [{C['blue']}]{escape(member.name)}[/]{label}  "
                       + (", ".join(_kind_text(k) for k in ready) if ready else f"[{C['dim']}]nothing yet[/]"),
                       soft_wrap=True)
-        for kind, note in member.notes.items():
+        for note in member.notes.values():
             console.print(f"      [{C['gold']}]⚠[/] [{C['dim']}]{escape(note)}[/]", soft_wrap=True)
         for kind, why in member.kinds.items():
             if why:
