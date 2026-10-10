@@ -1079,3 +1079,82 @@ def test_watch_prints_the_board_when_output_is_not_a_terminal(project, capsys, m
     code, out, _ = run(capsys, "board", "--watch")
     assert code == 0 and out.count("Watched task") == 2 and out.count("Another task") == 1
 
+
+# ── --json, for scripts and other tools ──────────────────────────────────────
+
+def test_board_json_is_what_the_window_reads(project, capsys):
+    import json
+    run(capsys, "add", "Fix the login page", "--to", "codex")
+    run(capsys, "add", "Finished one")
+    run(capsys, "done", "T-2")
+    code, out, _ = run(capsys, "board", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["counts"] == {"open": 1, "done": 1} and data["project"] == str(project)
+    assert data["revision"] and data["unreadable"] == 0 and data["done_rule"] == "review_or_reason"
+    [task] = data["tasks"]
+    assert (task["ref"], task["status"], task["assignee"], task["title"]) == ("T-1", "open", "codex",
+                                                                             "Fix the login page")
+    code, out, _ = run(capsys, "board", "--json", "--status", "done")
+    assert code == 0 and [(t["ref"], t["status"]) for t in json.loads(out)["tasks"]] == [("T-2", "done")]
+    code, out, _ = run(capsys, "board", "--json", "--all")
+    assert [t["ref"] for t in json.loads(out)["tasks"]] == ["T-1", "T-2"]  # the table's order: by status
+    code, out, _ = run(capsys, "board", "--json", "--assignee", "codex")
+    assert [t["ref"] for t in json.loads(out)["tasks"]] == ["T-1"]
+
+
+def test_show_json_has_the_task_and_its_history(project, capsys):
+    import json
+    run(capsys, "add", "Fix the login page", "--body", "It fails on Safari", "--accept", "works on Safari")
+    run(capsys, "note", "T-1", "Only on Safari 17")
+    code, out, _ = run(capsys, "show", "T-1", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["task"]["ref"] == "T-1" and data["task"]["body"] == "It fails on Safari"
+    assert data["task"]["acceptance"] == ["works on Safari"]
+    assert [e["kind"] for e in data["events"]] == ["created", "note"]
+    assert data["events"][1]["text"] == "Only on Safari 17"
+    assert run(capsys, "1", "--json")[1] == out  # handoff T-1 --json is the same
+    code, out, err = run(capsys, "show", "T-9", "--json")
+    assert code == 1 and out == "" and "There's no task T-9" in err
+
+
+def test_doctor_json_is_only_json(project, capsys, monkeypatch, tmp_path):
+    import json
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    run(capsys, "add", "Task")
+    code, out, _ = run(capsys, "doctor", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["handoff_version"] == cli.__version__ and data["problems"] == 0
+    assert data["checks"] and all(set(check) == {"status", "what", "detail"} for check in data["checks"])
+    assert {check["status"] for check in data["checks"]} <= {"ok", "warning", "problem", "none"}
+    board = next(check for check in data["checks"] if check["what"] == "Board")
+    assert board["status"] == "ok" and "1 task" in board["detail"] and "done rule: review_or_reason" in board["detail"]
+
+
+def test_doctor_json_counts_the_problems(tmp_path, capsys, monkeypatch):
+    import json
+    monkeypatch.chdir(tmp_path)  # not a project
+    code, out, _ = run(capsys, "doctor", "--json")
+    data = json.loads(out)
+    assert code == 1 and data["problems"] == 1
+    project = next(check for check in data["checks"] if check["what"] == "Project")
+    assert project["status"] == "problem" and "isn't inside a git repository" in project["detail"]
+
+
+def test_board_json_and_watch_dont_go_together(project, capsys):
+    err = usage_error(capsys, "board", "--json", "--watch")
+    assert "--json and --watch don't go together" in err
+
+
+def test_json_keeps_stdout_for_the_json_alone(project, no_inner_gitignore, capsys, monkeypatch):
+    import json
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli.console, "input", lambda prompt="": pytest.fail(f"asked: {prompt}"))
+    board = Board.open(project)
+    task, _ = board.create("human", "Old")
+    board.set_status("human", task.id, "done", "finished")
+    board.set_keep_days("human", 30)
+    _age(project, task.id)
+    # Opening the board removes T-1: that's said on stderr, and nothing asks about .gitignore
+    code, out, err = run(capsys, "board", "--json")
+    assert code == 0 and json.loads(out)["tasks"] == [] and "Removed T-1" in err
