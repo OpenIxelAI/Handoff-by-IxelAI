@@ -409,3 +409,15 @@ def test_wrong_typed_args_are_refused_not_coerced(project, op, args):
     ok("add", project, title="First")
     assert error(op, project, **args)[0] == "usage"
 
+
+def test_board_and_task_keep_their_fields(project):
+    """Within schema 1, replies only ever gain fields; `handoff board --json` and `handoff show --json` print these
+    same shapes (api.board_summary and api.task_detail)."""
+    ok("init", project)
+    ok("add", project, title="First", assignee="codex")
+    board = ok("board", project)
+    assert set(board) >= {"exists", "revision", "project", "counts", "unreadable", "done_rule", "tasks"}
+    assert board["exists"] is True and board["project"] == str(project) and board["done_rule"] == "review_or_reason"
+    task = ok("task", project, task="T-1")
+    assert set(task) >= {"task", "events", "claims", "overlaps", "children", "outputs", "actions"}
+    assert task["task"]["ref"] == "T-1" and task["events"][0]["kind"] == "created"

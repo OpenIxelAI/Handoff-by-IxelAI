@@ -254,8 +254,8 @@ can't.
 | Command | What it does |
 |---|---|
 | `handoff` | This project's board; outside a project, the first commands to know |
-| `handoff board [--all] [--status S] [--assignee NAME] [--watch]` | The board by status, with assignee, age and the last event. `--watch` keeps refreshing |
-| `handoff show T-12` · `handoff T-12` | One task with its full history, and what you can do with it next |
+| `handoff board [--all] [--status S] [--assignee NAME] [--watch] [--json]` | The board by status, with assignee, age and the last event. `--watch` keeps refreshing |
+| `handoff show T-12 [--json]` · `handoff T-12` | One task with its full history, and what you can do with it next |
 | `handoff add "title" --to codex [--body TEXT] [--accept CHECK]… [--path PATH]…` | Add a task (with no title, it asks what needs doing and who should do it) |
 | `handoff assign T-12 claude` | Give a task to someone else (`me` for yourself, or `nobody`) |
 | `handoff note T-12 "text"` | Add a note to any task |
@@ -273,7 +273,7 @@ can't.
 | `handoff approve T-12 AGENT [--kind edit\|answer\|review\|image] [--return-to NAME]` · `--revoke` | Let an agent run one task, once, through the [worker](#the-worker-preview) (or withdraw that). With no AGENT, at a terminal, it offers the task's assignee and asks |
 | `handoff run [T-12 …]` | Run approved tasks now, side by side (all of them, if you name none) |
 | `handoff worker --agent claude\|codex [--once] [--share FOLDER]` | Keep running the tasks you approve, each in its own git worktree |
-| `handoff setup [--write\|--remove]` · `handoff doctor` | Connect the apps (or take Handoff out of them); check everything |
+| `handoff setup [--write\|--remove]` · `handoff doctor [--json]` | Connect the apps (or take Handoff out of them); check everything |
 | `handoff update [--check]` | Get the latest Handoff and reinstall it (`--check` only says whether there is one) |
 | `handoff help [COMMAND]` | Every command, grouped; or one command's options and examples (the same as `handoff COMMAND --help`) |
 
@@ -285,6 +285,8 @@ can't.
   `block --waiting-on me`, `approve --return-to me`.
 - **A mistyped command says what's wrong:** what's missing, an example to copy, and a suggestion for a
   misspelled command or flag (`handoff boards` → `handoff board`).
+- **`--json`** on `board`, `show` and `doctor` prints the same data the Ixel window reads, for scripts and
+  other tools.
 
 Commands that use the board take `--project PATH`; by default it's the git repository you're in. Any
 folder of a repository (or one of its worktrees) means that repository's board.
