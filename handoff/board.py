@@ -898,9 +898,9 @@ class Board:
             return {}
         active = sorted(ACTIVE)
         with self._read() as conn:
-            rows = conn.execute("SELECT c.task_id, c.path_glob, t.assignee FROM claims c JOIN tasks t ON t.id = c.task_id "
-                                f"WHERE c.released_at IS NULL AND t.status IN ({', '.join('?' for _ in active)})",
-                                active).fetchall()
+            rows = conn.execute("SELECT c.task_id, c.path_glob, t.assignee FROM claims c JOIN tasks t "
+                                "ON t.id = c.task_id WHERE c.released_at IS NULL "
+                                f"AND t.status IN ({', '.join('?' for _ in active)})", active).fetchall()
         claims = [(r["task_id"], clean_line(r["path_glob"]), safe_name(r["assignee"])) for r in rows]
         found: dict[int, list[Overlap]] = {task_id: [] for task_id in wanted}
         for task_id, path, _ in claims:
@@ -1404,7 +1404,8 @@ class Board:
             self._event(conn, task.id, actor, "worker", data={"state": "revoked", "approval": approval.id})
             return task
 
-    def pending_runs(self, worker: str | None = None, task_ids: Iterable[int] | None = None) -> list[tuple[Task, Event]]:
+    def pending_runs(self, worker: str | None = None,
+                     task_ids: Iterable[int] | None = None) -> list[tuple[Task, Event]]:
         """Tasks approved for `worker` (None: for anyone) and still as the person approved them, oldest approval
         first. `task_ids` narrows it to those tasks."""
         worker = check_name(worker, "worker") if worker is not None else None
@@ -1434,7 +1435,8 @@ class Board:
             tasks = _readable(conn.execute(
                 f"SELECT * FROM tasks WHERE assignee = ? AND status IN ({', '.join('?' for _ in runnable)})",
                 [worker, *runnable]))
-            return [t for t in tasks if (a := self._latest_approval(conn, t, worker)) is not None and not self._sealed(a)]
+            return [t for t in tasks
+                    if (a := self._latest_approval(conn, t, worker)) is not None and not self._sealed(a)]
 
     def start_run(self, worker: str, task_id: int, approval_id: int, run: dict) -> tuple[Task, list[Event]]:
         """Take an approved task for one run. Two workers can't both start the same approval. The task and

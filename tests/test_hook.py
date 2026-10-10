@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from handoff import hook, hosts
+from handoff import hosts
 from handoff.board import HUMAN, Board
 from handoff.hosts import SetupError
 
@@ -173,7 +173,8 @@ def test_settings_it_cant_read_are_left_alone(tmp_path, text, message):
 def test_on_windows_a_plain_path_is_one_line_git_bash_and_powershell_both_run(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(hosts, "launch_command",
-                        lambda: (r"C:\Users\Añna\AppData\Local\Handoff\.venv\Scripts\python.exe", ["-I", "-m", "handoff"]))
+                        lambda: (r"C:\Users\Añna\AppData\Local\Handoff\.venv\Scripts\python.exe",
+                                 ["-I", "-m", "handoff"]))
     assert hosts.hook_handler() == {"type": "command", "timeout": hosts.HOOK_TIMEOUT, "command":
                                     "C:/Users/Añna/AppData/Local/Handoff/.venv/Scripts/python.exe "
                                     "-I -m handoff hook session-start --as claude"}
@@ -331,8 +332,8 @@ def test_claude_code_hears_whats_waiting_when_a_session_starts(project, tmp_path
             {"type": "command", "command": command, "args": [*prefix, "hook", "session-start", "--as", "claude"]}]}]}}),
             encoding="utf-8")
     with CaptureServer() as fake:
-        env = _env(tmp_path, CLAUDE_CONFIG_DIR=str(config), ANTHROPIC_BASE_URL=fake.url, ANTHROPIC_API_KEY="sk-ant-test",
-                   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
+        env = _env(tmp_path, CLAUDE_CONFIG_DIR=str(config), ANTHROPIC_BASE_URL=fake.url,
+                   ANTHROPIC_API_KEY="sk-ant-test", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
         proc = _run([claude, "-p", "--output-format", "text"], env, project, "What's next?")
         sent = json.dumps([r["body"] for r in fake.requests if r["body"]])
     assert proc.returncode == 0, proc.stdout + proc.stderr

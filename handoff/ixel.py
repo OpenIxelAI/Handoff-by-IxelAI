@@ -128,7 +128,8 @@ def _safe_line(text: object, limit: int) -> str:
 
 
 def run_panel(prompt: str, runner: Runner = _run, timeout: float = TIMEOUT_SEC) -> dict:
-    """Ask the panel. Returns what to keep with the review: the verdict, or an error. Never raises for Ixel's failures."""
+    """Ask the panel. Returns what to keep with the review: the verdict, or an error. Never raises for Ixel's
+    failures."""
     ixel = check_available()
     command = [ixel, "review", "--json", "-"]  # fixed: agent text only ever goes on stdin
     try:

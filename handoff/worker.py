@@ -63,14 +63,17 @@ SANDBOX_POWERS = ("You can read and edit files in this folder and run commands h
                   "installed on the system can't be added. Git commands don't work here either: the repository "
                   "this folder belongs to is outside it.")
 
-BRIEF = """You're {agent}, working on task {ref} through Handoff's worker. The person approved this task for you to do on your own.
-
-You're in a git worktree of their project (the current folder), on the branch {branch}. {powers} Make the changes the task asks for, carefully, then stop. The worker commits what you changed on {branch}; it never pushes.
-
-When you're done, end your reply with these three sections:
-DONE: what you changed, file by file
-LEFT: what's still to do, including anything you couldn't do or check here (or "nothing")
-VERIFY: how the person should check it, such as the test commands to run"""
+BRIEF = ("You're {agent}, working on task {ref} through Handoff's worker. The person approved this task for "
+         "you to do on your own.\n"
+         "\n"
+         "You're in a git worktree of their project (the current folder), on the branch {branch}. {powers} "
+         "Make the changes the task asks for, carefully, then stop. The worker commits what you changed on "
+         "{branch}; it never pushes.\n"
+         "\n"
+         "When you're done, end your reply with these three sections:\n"
+         "DONE: what you changed, file by file\n"
+         "LEFT: what's still to do, including anything you couldn't do or check here (or \"nothing\")\n"
+         "VERIFY: how the person should check it, such as the test commands to run")
 
 
 @dataclass(frozen=True)

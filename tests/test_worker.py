@@ -240,7 +240,8 @@ def test_removing_a_task_leaves_its_worktree_and_branch_and_says_so(board, repo,
     assert result.ok and gitwork.task_branches(repo) == {"T-1"}
     assert cli.main(["delete", "T-1", "--yes", "--project", str(repo)]) == 0
     out = capsys.readouterr().out
-    assert "T-1's worktree and branch are still there, with the agent's work (its commits carry the task's title)" in out
+    assert "T-1's worktree and branch are still there, with the agent's work (its commits carry the task's title)" \
+        in out
     assert "git worktree remove .handoff/worktrees/T-1" in out and "git branch -D handoff/T-1" in out
     # and the Ixel window's delete, the same in its reply
     assert api._work_left(repo, "T-1") == [
@@ -542,7 +543,8 @@ def test_a_change_to_a_pull_request_starts_from_its_head(board, repo):
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == mine and not (repo / "pay.py").exists()
     handoff = board.events(task.id)[-1]
     assert handoff.data["files"] == ["pay.py"]  # only what the agent changed, not the pull request's own files
-    assert [e.data["base"] for e in board.events(task.id) if e.kind == "worker" and "base" in e.data] == [target["head"]]
+    bases = [e.data["base"] for e in board.events(task.id) if e.kind == "worker" and "base" in e.data]
+    assert bases == [target["head"]]
 
 
 def test_a_leftover_branch_that_doesnt_hold_the_commit_is_refused(board, repo):
@@ -596,8 +598,9 @@ def test_the_commit_a_change_starts_from_is_sealed(board, repo):
         board.approve(HUMAN, task.id, "claude", kind="answer", target=target)
     conn = sqlite3.connect(board.path)
     with conn:
+        forged = json.dumps({**approval.data, "target": {**target, "head": target["base"]}})
         conn.execute("INSERT INTO events (task_id, at, actor, kind, text, data) VALUES (?, ?, 'human', 'approved', "
-                     "'', ?)", (task.id, approval.at, json.dumps({**approval.data, "target": {**target, "head": target["base"]}})))
+                     "'', ?)", (task.id, approval.at, forged))
     conn.close()
     assert board.pending_runs("claude") == []  # the newest approval is the one that counts, and it doesn't
 

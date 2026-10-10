@@ -15,9 +15,17 @@ import pytest
 from handoff import sandbox
 from handoff import worker as worker_module
 from handoff.board import HUMAN, Board
-from handoff.worker import (CLAUDE, CLAUDE_KEY_FILE, CODEX, ClaudeLogin, CodexLogin, Worker, WorkerUnavailable,
-                            _looks_secret, claude_sandbox_settings)
-
+from handoff.worker import (
+    CLAUDE,
+    CLAUDE_KEY_FILE,
+    CODEX,
+    ClaudeLogin,
+    CodexLogin,
+    Worker,
+    WorkerUnavailable,
+    _looks_secret,
+    claude_sandbox_settings,
+)
 
 # ── The sandbox's command line ───────────────────────────────────────────────
 

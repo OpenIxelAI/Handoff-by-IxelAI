@@ -31,8 +31,8 @@ from handoff import approvals, gitwork
 from handoff.board import HUMAN, Board, BoardError, Event, Task, run_kind, safe_name
 from handoff.fence import numbered
 from handoff.ixel import child_env, find_ixel
-from handoff.project import BOARD_DIR, OUTPUTS_DIR
 from handoff.proc import Stopped, run_tree, stopping
+from handoff.project import BOARD_DIR, OUTPUTS_DIR
 from handoff.sanitize import clean_line, clean_text, find_secret
 
 VIA_IXEL = ("answer", "review", "image")
@@ -229,7 +229,8 @@ def review_plan(root: Path, roster: IxelRoster | None = None) -> tuple[list[str]
         raise RunProblem("there's nothing to review: no changes since the last commit, no new files, no commits "
                          "on this branch beyond main, and no earlier commit.")
     if new:
-        return target[0], f"{target[1]} (not your new files: this Ixel MAT can't read them; update it with: ixel update)"
+        return target[0], (f"{target[1]} (not your new files: this Ixel MAT can't read them; update it with: "
+                           "ixel update)")
     return target
 
 
@@ -302,7 +303,8 @@ def command_for(ixel: str, root: Path, task: Task, kind: str, agent: str, roster
         else:
             flags, what = review_plan(root, roster)
         stdin = f"{(FILES_REVIEW_BRIEF if files else REVIEW_BRIEF).format(what=what)}\n\n{_task_text(task)}"
-        return [ixel, "ask", "--agent", agent, "--json", *flags, "-"], stdin[:MAX_QUESTION_CHARS], f"It reviewed {what}."
+        return ([ixel, "ask", "--agent", agent, "--json", *flags, "-"], stdin[:MAX_QUESTION_CHARS],
+                f"It reviewed {what}.")
     if kind == "image":
         provider = image_provider(agent, roster or IxelRoster([], []))
         if provider is None:

@@ -16,8 +16,8 @@ import sysconfig
 from pathlib import Path
 
 import pytest
-
 from cli_capture import CaptureServer, offered_tools
+
 from handoff import __version__, hosts, ixel
 from handoff.board import Board
 

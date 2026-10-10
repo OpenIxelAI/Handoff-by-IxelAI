@@ -829,7 +829,8 @@ def test_the_agent_that_planned_a_task_can_review_it(board):
 def _run(board, task, agent, kind, finish=True):
     board.approve(HUMAN, task.id, agent, return_to="claude", kind=kind)
     [(_, approval)] = board.pending_runs(agent)
-    board.start_run(agent, task.id, approval.id, {"branch": f"handoff/{task.ref}"} if kind == "edit" else {"kind": kind})
+    board.start_run(agent, task.id, approval.id,
+                    {"branch": f"handoff/{task.ref}"} if kind == "edit" else {"kind": kind})
     if finish:
         board.finish_run(agent, task.id, "claude", done="Done")
     else:
