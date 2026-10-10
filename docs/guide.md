@@ -43,11 +43,12 @@ if your user folder's name has a space in it, the hook needs Claude Code 2.1.139
 
 Each app joins the board under its own name: a task for `gemini` is in Gemini CLI's inbox, and OpenCode is
 `opencode` whichever model it runs. Gemini CLI, OpenCode and Grok Build have no session hook, so ask them to
-"check your handoffs". Grok Build also loads Claude Code's MCP servers and runs its hooks. Once Grok is
-connected its own `handoff` comes first; until then it uses Claude's and works as `claude` on the board, which
-`handoff doctor` points out. Claude Code's session hook says nothing to Grok. A settings file with comments or
-trailing commas in it (JSONC) is read but never rewritten, since saving it would lose them: `handoff setup
---write` says so, and `handoff setup` shows the entry to add by hand.
+"check your handoffs". Any agent can also be asked to wait for a handoff, with `handoff_wait`. Grok Build also
+loads Claude Code's MCP servers and runs its hooks. Once Grok is connected its own `handoff` comes first; until
+then it uses Claude's and works as `claude` on the board, which `handoff doctor` points out. Claude Code's
+session hook says nothing to Grok. A settings file with comments or trailing commas in it (JSONC) is read but
+never rewritten, since saving it would lose them: `handoff setup --write` says so, and `handoff setup` shows
+the entry to add by hand.
 
 The **ChatGPT app itself isn't supported**: its connectors only reach MCP servers on the internet, and
 Handoff never listens on a network port. Codex signs in with the same ChatGPT subscription and works.
@@ -226,6 +227,7 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap
 | Tool | What it does |
 |---|---|
 | `handoff_inbox` | What's waiting for you: tasks assigned to you (new, handed back, or waiting for your review) with the latest handoff or review in full (and what came after it), tasks blocked waiting on you, and open tasks nobody has taken. **The tool behind "check your handoffs".** |
+| `handoff_wait` | Wait, up to 14 minutes, until something new reaches your inbox, then show it: for "wait for Codex" instead of switching apps |
 | `handoff_board` | The whole board in brief, filtered by status or assignee |
 | `handoff_get` | One task with its full history |
 | `handoff_create` | A new task: title, body, acceptance checks, assignee, parent task, and the paths it will change |
