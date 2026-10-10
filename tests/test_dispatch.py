@@ -9,12 +9,13 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
 from rich.console import Console
 
-from handoff import asks, cli, crew, sandbox
+from handoff import asks, cli, crew, sandbox, worker
 from handoff.board import HUMAN, Board, BoardError, run_kind
 from test_worker import _fake_claude, _no_sandbox, git
 
@@ -221,7 +222,6 @@ def test_guess_kind(text, can_edit, kind):
                                      "draw " + "x- " * 1300, "make " + "the " * 990 + "image"],
                          ids=["makes", "one-long-word", "short-words", "dashes", "determiners"])
 def test_guessing_the_kind_stays_quick_on_any_request(hostile):
-    import time
     started = time.perf_counter()
     for _ in range(10):
         crew.guess_kind(hostile[:crew.MAX_REQUEST_CHARS], None)
@@ -318,6 +318,25 @@ def test_agents_says_who_can_do_what(repo, fake_ixel, run_cli):
     assert code == 0 and "grok  answers, reviews, makes pictures" in out  # no "grok Grok"
     assert 'handoff dispatch "claude review my changes, codex make me a list of …"' in out
     assert not (repo / ".handoff").exists()  # looking makes no board
+
+
+def test_the_roster_s_checks_run_side_by_side(tmp_path, monkeypatch):
+    """Each check starts a program (claude --help, codex exec --help, ixel ask --list), so one after another
+    they'd take seconds."""
+    monkeypatch.setattr(worker.Worker, "check", lambda self: time.sleep(0.3))  # both agents look ready
+    monkeypatch.setattr(asks, "find_ixel", lambda: "ixel")
+
+    def runner(argv, stdin, env, timeout, cwd):
+        if argv[1:3] == ["ask", "--list"]:  # (the picture list comes back at once)
+            time.sleep(0.3)
+        return subprocess.CompletedProcess(argv, 0, '{"agents": [], "providers": []}', "")
+
+    started = time.perf_counter()
+    roster = crew.build_roster(None, tmp_path, runner=runner)
+    took = time.perf_counter() - started
+    assert took < 0.75, took  # three 0.3 s waits one after another would take 0.9 s
+    assert list(roster.members) == ["claude", "codex"] and roster.problems == []
+    assert [m.kinds for m in roster.members.values()] == [{"edit": ""}, {"edit": ""}]
 
 
 def test_the_plan_shows_every_part_and_adds_nothing(repo, fake_ixel, run_cli):
@@ -421,7 +440,6 @@ def test_runs_really_happen_at_the_same_time(repo):
 def test_ctrl_c_stops_every_run_and_each_one_says_so(repo, monkeypatch):
     # Real programs, stopped the way Ctrl+C stops them; a few rounds, since what went wrong was a race
     import _thread
-    import time
 
     from handoff import proc
     monkeypatch.setattr(asks, "find_ixel", lambda: "ixel")

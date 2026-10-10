@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -125,25 +126,34 @@ def board_name(name: object) -> str | None:
 
 def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._run, check_edits: bool = True) -> Roster:
     """Who can take which kind of run, here, now. Checks the edit agents and asks Ixel who it knows;
-    nothing is sent to a model, and nothing reads the board (a plan needs none)."""
+    nothing is sent to a model, and nothing reads the board (a plan needs none). The checks run side by
+    side, since each starts a program (an agent's --help, its sandbox's probe, Ixel's lists) that takes a
+    second or more on its own."""
     from handoff.worker import AGENTS, Worker, WorkerUnavailable
 
-    members: dict[str, Member] = {}
-    for name in AGENTS:
-        member = members.setdefault(name, Member(name, name.capitalize()))
-        if not check_edits:
-            member.kinds["edit"] = ""
-            continue
+    def edit_check(name: str) -> tuple[str, str]:
+        """Whether `name` can change files here: ("", a note) when it can, (why not, "") when it can't."""
         try:
             worker = Worker(board, root, name)  # type: ignore[arg-type]  (only checked, never run)
             worker.check()
-            member.kinds["edit"] = ""
-            if worker.fallback_reason:
-                member.notes["edit"] = f"edits without running commands here ({worker.fallback_reason})"
         except WorkerUnavailable as exc:
-            member.kinds["edit"] = str(exc)
+            return str(exc), ""
+        note = f"edits without running commands here ({worker.fallback_reason})" if worker.fallback_reason else ""
+        return "", note
 
-    ixel = asks.ixel_roster(root, runner)
+    members: dict[str, Member] = {}
+    with ThreadPoolExecutor(max_workers=len(AGENTS) + 1) as pool:
+        checks = {name: pool.submit(edit_check, name) for name in AGENTS} if check_edits else {}
+        listing = pool.submit(asks.ixel_roster, root, runner)
+        for name in AGENTS:
+            member = members.setdefault(name, Member(name, name.capitalize()))
+            if not check_edits:
+                member.kinds["edit"] = ""
+                continue
+            member.kinds["edit"], note = checks[name].result()
+            if note:
+                member.notes["edit"] = note
+        ixel = listing.result()
     providers = {p["name"]: p for p in ixel.providers}
     for item in ixel.agents:
         name = board_name(item.get("name"))
