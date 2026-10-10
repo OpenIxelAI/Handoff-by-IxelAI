@@ -9,6 +9,8 @@ __pycache__/
 # Editor
 .vscode/
 .idea/
+# Claude Code's worktrees, when it works inside the checkout
+.claude/worktrees/
 
 # Build / install
 *.egg-info/
