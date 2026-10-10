@@ -8,9 +8,12 @@ which takes at most len(a) × len(b) steps: no regular expressions.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 from handoff.sanitize import clean_line
 
 MAX_PATH_CHARS = 256
+OVERLAP_CACHE = 4_096  # pattern pairs whose answer is kept: a board of a few hundred claims repeats its pairs
 
 
 class PathError(ValueError):
@@ -72,7 +75,13 @@ def _pattern(path: str) -> list[str]:
 
 
 def overlaps(a: str, b: str) -> bool:
-    """Can some path be covered by both claims? Case-insensitive, to err on the side of warning."""
+    """Can some path be covered by both claims? Case-insensitive, to err on the side of warning. The answer
+    is the same either way round, so each pair is worked out once and remembered (OVERLAP_CACHE of them)."""
+    return _overlaps(a, b) if a <= b else _overlaps(b, a)
+
+
+@lru_cache(maxsize=OVERLAP_CACHE)
+def _overlaps(a: str, b: str) -> bool:
     left, right = _pattern(a), _pattern(b)
     if not any(c in a + b for c in "*?"):
         # two plain paths overlap when one is inside the other (a folder named v1.2 too)

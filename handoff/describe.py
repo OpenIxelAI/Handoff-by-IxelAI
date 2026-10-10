@@ -71,7 +71,7 @@ def describe(event: Event, who: Callable[[str], str] | None = None) -> str:
     if event.kind == "created":
         return "created it" + (f", assigned to {name('assignee')}" if data.get("assignee") else "")
     if event.kind == "claimed":
-        return "claimed it"
+        return "claimed it" + (", still blocked" if data.get("status") == "blocked" else "")
     if event.kind == "note":
         moved = data.get("from") in _STATUSES and data.get("to") in _STATUSES
         return "added a note" + (f" and set it {data['from']} → {data['to']}" if moved else "")
@@ -86,6 +86,8 @@ def describe(event: Event, who: Callable[[str], str] | None = None) -> str:
     if event.kind == "status":
         before, after = (data.get(k) if data.get(k) in _STATUSES else "?" for k in ("from", "to"))
         line = f"set it {before} → {after}"
+        if data.get("assignee"):  # taken out of review by the person: it's its author's again
+            line += f", back with {name('assignee')}"
         return line + (f", waiting on {name('waiting_on')}" if data.get("waiting_on") else "")
     if event.kind == "assigned":
         return f"reassigned it from {name('from')} to {name('to')}"

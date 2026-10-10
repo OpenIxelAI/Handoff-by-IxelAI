@@ -186,6 +186,19 @@ def test_revision_changes_with_every_change(project):
     assert board.revision() != before
 
 
+def test_the_board_counts_each_tasks_overlapping_claims(project):
+    ok("init", project)
+    board = Board.open(project)
+    board.create("codex", "A", assignee="codex", paths=["src"])
+    board.create("claude", "B", assignee="claude", paths=["src/api.py", "src/db.py"])
+    board.create("gemini", "C", assignee="gemini", paths=["docs"])
+    done, _ = board.create("gemini", "D", assignee="gemini", paths=["src"])
+    board.set_status(HUMAN, done.id, "done")  # finished: its claims are released, so they count for nobody
+    counts = {t["ref"]: t["overlaps"] for t in ok("board", project)["tasks"]}
+    assert counts == {"T-1": 2, "T-2": 2, "T-3": 0, "T-4": 0}
+    assert ok("task", project, task="T-2")["task"]["overlaps"] == 2
+
+
 def test_outputs_list_plain_files_only(project, tmp_path):
     ok("init", project)
     ok("add", project, title="Pictures", assignee="grok")

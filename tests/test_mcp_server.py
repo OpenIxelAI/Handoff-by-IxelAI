@@ -380,6 +380,21 @@ def test_two_stdio_servers_share_one_board(tmp_path):
     assert (project / ".handoff" / "board.db").exists()
 
 
+def test_claiming_a_blocked_task_nobody_has_says_what_to_do(tmp_path):
+    async def go():
+        board = Board.open(tmp_path)
+        task, _ = board.create("human", "Needs the keys")
+        board.set_status("human", task.id, "blocked", "Waiting for the API keys")
+        async with mcp.Client(build_server("codex", tmp_path)) as codex:
+            text = await call(codex, "handoff_claim", {"task_id": "T-1"})
+            assert "T-1 is yours (blocked)" in text and "Waiting for the API keys" in text
+            assert "handoff_status (status open)" in text
+            await call(codex, "handoff_status", {"task_id": "T-1", "status": "open"})
+        return board.get(task.id)
+    task = run(go())
+    assert task.status == "open" and task.assignee == "codex"
+
+
 def test_stdio_server_without_a_project_explains(tmp_path):
     async def go():
         async with mcp.Client(_params("codex", tmp_path), read_timeout_seconds=60) as codex:

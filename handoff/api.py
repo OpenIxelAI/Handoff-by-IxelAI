@@ -33,8 +33,8 @@ from pathlib import Path
 
 from handoff import __version__
 from handoff.board import (ACTIVE, HUMAN, RUN_KINDS, STATE_EVENTS, TERMINAL, Board, BoardError, Changed, Event,
-                           Forbidden, NotFound, Task, check_name, content_of, parse_task_id, run_kind, safe_name,
-                           task_ref)
+                           Forbidden, NoBoard, NotFound, Task, check_name, content_of, parse_task_id, run_kind,
+                           safe_name, task_ref)
 from handoff.ixel import DEPTH_VAR, depth
 from handoff.project import BOARD_DIR, OUTPUTS_DIR, ProjectError, board_path
 from handoff.sanitize import clean_line
@@ -176,14 +176,20 @@ def _summary(task: Task, last: Event | None, state: Event | None, approved: dict
 
 
 def _overlap_counts(board: Board, tasks: list[Task]) -> dict[int, int]:
+    """How many other active tasks' claims each task's own claims overlap. Each pair of claims is compared
+    once (an overlap counts for both), not once per task, so a board of hundreds of claims stays quick."""
     from handoff.globs import overlaps
     live = {t.id for t in board.tasks(statuses=sorted(ACTIVE))}
     claims = [c for c in board.active_claims() if c.task_id in live]
-    counts: dict[int, int] = {}
-    for task in tasks:
-        mine = [c.path_glob for c in claims if c.task_id == task.id]
-        counts[task.id] = sum(1 for path in mine for c in claims
-                              if c.task_id != task.id and overlaps(path, c.path_glob))
+    counts: dict[int, int] = {task.id: 0 for task in tasks}
+    for n, mine in enumerate(claims):
+        for other in claims[n + 1:]:
+            if mine.task_id == other.task_id or (mine.task_id not in counts and other.task_id not in counts):
+                continue
+            if overlaps(mine.path_glob, other.path_glob):
+                for task_id in (mine.task_id, other.task_id):
+                    if task_id in counts:
+                        counts[task_id] += 1
     return counts
 
 
@@ -527,8 +533,10 @@ def handle(raw: bytes) -> tuple[dict, int]:
         return {"schema": SCHEMA, "ok": True, "op": op, "data": data}, 0
     except ApiError as exc:
         code, message = exc.code, str(exc)
+    except NoBoard as exc:
+        code, message = "no_board", str(exc)
     except NotFound as exc:
-        code, message = ("no_board" if "no board" in str(exc) else "not_found"), str(exc)
+        code, message = "not_found", str(exc)
     except Forbidden as exc:
         code, message = "forbidden", str(exc)
     except Changed as exc:

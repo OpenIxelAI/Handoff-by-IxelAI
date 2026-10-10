@@ -229,7 +229,7 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap
 | `handoff_board` | The whole board in brief, filtered by status or assignee |
 | `handoff_get` | One task with its full history |
 | `handoff_create` | A new task: title, body, acceptance checks, assignee, parent task, and the paths it will change |
-| `handoff_claim` | Take an open task, or one handed to you; optionally claim paths |
+| `handoff_claim` | Take an open task, one handed to you, or a blocked one nobody has (it stays blocked, and yours to set open); optionally claim paths |
 | `handoff_note` | A progress note (the first one marks the task in progress) |
 | `handoff_pass` | **The handoff:** what I did, what's left, how to check it, files touched. Reassigns the task |
 | `handoff_request_review` | Send the task to a reviewer (not yourself) |
@@ -261,7 +261,7 @@ can't.
 | `handoff reopen T-12` | Open a done, cancelled or blocked task again |
 | `handoff block T-12 "why" [--waiting-on NAME]` | Mark a task blocked, and say why |
 | `handoff review T-12 [approve\|changes ["notes"]] [--check N=RESULT]… [--panel]` | Review a task that's waiting for you. With no verdict, it shows what came back and its checks, then asks. `--check "2=not_met:fails when empty"` marks check 2 |
-| `handoff status T-12 open\|blocked\|done` | Set a status directly (`done`, `reopen` and `block` are the short ways) |
+| `handoff status T-12 open\|blocked\|done` | Set a status directly (`done`, `reopen` and `block` are the short ways). On a task in review, this or `cancel` ends the review and gives the task back to its author |
 | `handoff cancel T-12` · `handoff delete T-12` | Cancel (keeps the history), or delete for good with its results in `.handoff/outputs` (asks first) |
 | `handoff clean [--older-than DAYS] [--yes]` | Remove finished tasks that haven't changed in DAYS days (30 if you leave it out), with their history and results, after listing them and asking |
 | `handoff keep [DAYS\|forever]` | Show or set how long this board keeps finished tasks. It keeps them until you delete or clean them, unless you set a number of days |

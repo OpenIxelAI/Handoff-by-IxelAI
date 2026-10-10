@@ -41,6 +41,9 @@ logger = logging.getLogger("handoff.mcp")
 INBOX_LIMIT = 20
 BOARD_LIMIT = 100
 BODY_CHARS_IN_INBOX = 1_500
+# What an inbox entry says happened last, and which of those it quotes in full (the latest handoff or review)
+INBOX_LATEST_KINDS = ("handoff", "review", "review_requested", "note", "status", "created", "assigned")
+INBOX_MAIN_KINDS = ("handoff", "review", "review_requested")
 
 INSTRUCTIONS = """Handoff is a task board shared by the AI agents working on this project (such as Claude and Codex) and the user. On it, you are "{me}".
 
@@ -134,16 +137,23 @@ def build_server(me: str, root: Path | None, project_error: str | None = None,
             return reply.render()
         reply.add(f"# Handoffs for {me}", "")
         shown = inbox.mine[:INBOX_LIMIT]
+        blocked = inbox.blocked_on_me[:INBOX_LIMIT]
+        # What each entry quotes, read for all of them at once rather than a few reads per task
+        ids = [t.id for t in shown]
+        latest = b.last_events(ids, kinds=INBOX_LATEST_KINDS)
+        main = b.last_events(ids, kinds=INBOX_MAIN_KINDS)
+        overlapping = b.overlaps_for_all(ids)
+        reasons = b.last_events([t.id for t in blocked], kinds=["status"])
         if shown:
             reply.add(f"## Assigned to you ({len(inbox.mine)})", "")
         for task in shown:
-            inbox_entry(reply, b, task)
+            inbox_entry(reply, task, latest.get(task.id), main.get(task.id), overlapping.get(task.id, []))
         if len(inbox.mine) > INBOX_LIMIT:
             reply.add(f"…and {len(inbox.mine) - INBOX_LIMIT} more; handoff_board assignee={me} lists them.", "")
         if inbox.blocked_on_me:
             reply.add(f"## Blocked, waiting on you ({len(inbox.blocked_on_me)})", "")
-            for task in inbox.blocked_on_me[:INBOX_LIMIT]:
-                reason = b.last_event_of(task.id, ["status"])
+            for task in blocked:
+                reason = reasons.get(task.id)
                 reply.add(f"### {task.ref} · assigned to {task.assignee or 'nobody'} · {ago(task.updated_at, now())}")
                 reply.quote("title", task.title)
                 if reason and reason.text:
@@ -156,11 +166,10 @@ def build_server(me: str, root: Path | None, project_error: str | None = None,
             reply.quote("titles", "\n".join(f"{t.ref}: {t.title}" for t in inbox.unassigned))
         return reply.render()
 
-    def inbox_entry(reply: Reply, b: Board, task: Task) -> None:
-        latest = b.last_event_of(task.id, ["handoff", "review", "review_requested", "note", "status", "created",
-                                           "assigned"])
-        # The latest handoff or review is quoted in full, so a note added after it can't hide it
-        main = b.last_event_of(task.id, ["handoff", "review", "review_requested"])
+    def inbox_entry(reply: Reply, task: Task, latest: Event | None, main: Event | None,
+                    overlapping: list[Overlap]) -> None:
+        """One task in the inbox. `latest` is its latest event of INBOX_LATEST_KINDS; `main`, the latest handoff
+        or review (INBOX_MAIN_KINDS), quoted in full, so a note added after it can't hide it."""
         who = latest.actor if latest else task.created_by
         reply.add(f"### {task.ref} · {task.status} · from {who} · {ago(task.updated_at, now())}")
         reply.quote("title", task.title)
@@ -170,7 +179,7 @@ def build_server(me: str, root: Path | None, project_error: str | None = None,
             reply.quote("body", body)
         if task.acceptance:
             reply.quote("acceptance checks", numbered(task.acceptance))
-        quote_overlaps(reply, b.overlaps_for(task.id))
+        quote_overlaps(reply, overlapping)
         if main is not None:
             reply.add(f"Latest {'review' if main.kind == 'review' else 'handoff'}: {main.actor} {describe(main)} "
                       f"({ago(main.at, now())}).")
@@ -313,9 +322,15 @@ def build_server(me: str, root: Path | None, project_error: str | None = None,
         ctx: Context | None = None,
     ) -> str:
         def go() -> str:
-            task, found = board(ctx).claim(me, parse_task_id(task_id), paths)
+            b = board(ctx)
+            task, found = b.claim(me, parse_task_id(task_id), paths)
             reply = Reply()
             reply.add(f"{task.ref} is yours ({task.status}). handoff_get {task.ref} shows its details and history.")
+            if task.status == "blocked":  # taken while blocked: say why it is, and that it's theirs to unblock
+                reason = b.last_event_of(task.id, ["status"])
+                if reason and reason.text:
+                    reply.quote(f"why it's blocked, from {reason.actor}", reason.text)
+                reply.add(next_step(task))
             quote_overlaps(reply, found)
             return reply.render()
         return act(go)

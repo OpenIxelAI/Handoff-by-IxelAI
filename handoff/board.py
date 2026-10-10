@@ -150,6 +150,10 @@ class NotFound(BoardError):
     pass
 
 
+class NoBoard(NotFound):
+    """The project has no board yet (and this call doesn't make one)."""
+
+
 class Forbidden(BoardError):
     pass
 
@@ -553,7 +557,7 @@ class Board:
             raise BoardError(f"{folder} is a file, not a folder; Handoff keeps its board there. Move it away.")
         if not path.exists():
             if not create:
-                raise NotFound(f"There's no board in {root} yet. Run `handoff board` there to start one.")
+                raise NoBoard(f"There's no board in {root} yet. Run `handoff board` there to start one.")
             try:
                 folder.mkdir(mode=0o700, exist_ok=True)
                 ignore = folder / ".gitignore"
@@ -582,7 +586,7 @@ class Board:
         if problem:
             raise BoardError(problem)
         if not path.is_file():
-            raise NotFound(f"There's no board in {root} yet.")
+            raise NoBoard(f"There's no board in {root} yet.")
         return cls(path, read_only=True)
 
     def _connect(self) -> sqlite3.Connection:
@@ -767,7 +771,8 @@ class Board:
         return {r["task_id"]: _event_from_row(r) for r in rows}
 
     def revision(self) -> str:
-        """Changes whenever anything on the board does, and never comes back to an earlier value (ids only
+        """Changes whenever anything on the board does, its settings included (the done rule, how long it
+        keeps finished tasks), and never comes back to an earlier value for the tasks themselves (ids only
         grow, even past a deleted task), for a window that redraws only when there's something new. Opaque:
         compare it, don't read it."""
         with self._read() as conn:
@@ -776,7 +781,8 @@ class Board:
                 "(SELECT IFNULL(MAX(seq), 0) FROM sqlite_sequence WHERE name = 'tasks'), "
                 "(SELECT IFNULL(MAX(updated_at), '') FROM tasks), (SELECT IFNULL(MAX(id), 0) FROM claims), "
                 "(SELECT COUNT(*) FROM claims WHERE released_at IS NOT NULL), "
-                "(SELECT IFNULL(MAX(value), '') FROM meta WHERE key = 'done_rule')").fetchone()
+                "(SELECT IFNULL(GROUP_CONCAT(pair, ';'), '') FROM "
+                "(SELECT key || '=' || value AS pair FROM meta ORDER BY key))").fetchone()
         return "/".join(str(value) for value in row)
 
     def last_event_of(self, task_id: int, kinds: Iterable[str]) -> Event | None:
@@ -883,15 +889,25 @@ class Board:
     def overlaps_for(self, task_id: int) -> list[Overlap]:
         """Other active tasks' claims that overlap this task's own, whichever was claimed first: the agent
         that claimed first hears about a later overlap here (its inbox, the task, and its next note)."""
+        return self.overlaps_for_all([task_id]).get(task_id, [])
+
+    def overlaps_for_all(self, task_ids: Iterable[int]) -> dict[int, list[Overlap]]:
+        """overlaps_for, for several tasks at once from one read of the claims (an inbox lists many)."""
+        wanted = set(task_ids)
+        if not wanted:
+            return {}
         active = sorted(ACTIVE)
         with self._read() as conn:
             rows = conn.execute("SELECT c.task_id, c.path_glob, t.assignee FROM claims c JOIN tasks t ON t.id = c.task_id "
                                 f"WHERE c.released_at IS NULL AND t.status IN ({', '.join('?' for _ in active)})",
                                 active).fetchall()
-        mine = [clean_line(r["path_glob"]) for r in rows if r["task_id"] == task_id]
-        return [Overlap(path, r["task_id"], clean_line(r["path_glob"]), safe_name(r["assignee"]))
-                for path in mine for r in rows
-                if r["task_id"] != task_id and overlaps(path, clean_line(r["path_glob"]))]
+        claims = [(r["task_id"], clean_line(r["path_glob"]), safe_name(r["assignee"])) for r in rows]
+        found: dict[int, list[Overlap]] = {task_id: [] for task_id in wanted}
+        for task_id, path, _ in claims:
+            if task_id in found:
+                found[task_id] += [Overlap(path, other, other_path, who) for other, other_path, who in claims
+                                   if other != task_id and overlaps(path, other_path)]
+        return found
 
     def _release_claims(self, conn: sqlite3.Connection, task: Task, actor: str) -> None:
         rows = conn.execute("SELECT path_glob FROM claims WHERE task_id = ? AND released_at IS NULL",
@@ -961,6 +977,11 @@ class Board:
             if task.status in ("open", "handed_off"):
                 task = self._update(conn, task, status="claimed", assignee=actor)
                 self._event(conn, task.id, actor, "claimed")
+            elif task.assignee is None:
+                # Blocked, with nobody to unblock it (the person blocked it unassigned, or took its assignee
+                # away). Taking it makes the agent the one who can set it open, so it's theirs, still blocked
+                task = self._update(conn, task, assignee=actor)
+                self._event(conn, task.id, actor, "claimed", data={"status": task.status})
             elif not claimed:
                 return task, []  # already yours: nothing to change
             found = self._add_claims(conn, task, actor, claimed)
@@ -1152,10 +1173,12 @@ class Board:
                     self._check_done_rule(conn, task, reason)
                 self._release_claims(conn, task, actor)
             before = task.status
-            task = self._update(conn, task, status=status,
-                                waiting_on=waiting_on if status == "blocked" else None)
-            self._event(conn, task.id, actor, "status", reason,
-                        data={"from": before, "to": status, "waiting_on": task.waiting_on})
+            changes: dict = {"status": status, "waiting_on": waiting_on if status == "blocked" else None}
+            data: dict = {"from": before, "to": status}
+            if before == "in_review":  # (the person, above) takes it out of review: its author has it again
+                changes["assignee"] = data["assignee"] = self._review_author(conn, task)
+            task = self._update(conn, task, **changes)
+            self._event(conn, task.id, actor, "status", reason, data={**data, "waiting_on": task.waiting_on})
             return task
 
     def _check_done_rule(self, conn: sqlite3.Connection, task: Task, reason: str) -> None:
@@ -1206,8 +1229,12 @@ class Board:
             self._require_active(task, "cancel it")
             self._release_claims(conn, task, actor)
             before = task.status
-            task = self._update(conn, task, status="cancelled", waiting_on=None)
-            self._event(conn, task.id, actor, "status", reason, data={"from": before, "to": "cancelled"})
+            changes: dict = {"status": "cancelled", "waiting_on": None}
+            data: dict = {"from": before, "to": "cancelled"}
+            if before == "in_review":  # the review is off: reopened later, the task is its author's, not the reviewer's
+                changes["assignee"] = data["assignee"] = self._review_author(conn, task)
+            task = self._update(conn, task, **changes)
+            self._event(conn, task.id, actor, "status", reason, data=data)
             return task
 
     # ── The worker: the person approves a task for a headless agent ──
@@ -1387,10 +1414,14 @@ class Board:
         if worker is not None:
             query += " AND assignee = ?"
             params.append(worker)
-        wanted = None if task_ids is None else set(task_ids)
+        if task_ids is not None:
+            wanted = sorted({i for i in task_ids if isinstance(i, int) and not isinstance(i, bool)})
+            if not wanted:
+                return []
+            query += f" AND id IN ({', '.join('?' for _ in wanted)})"
+            params += wanted
         with self._read() as conn:
-            tasks = [t for t in _readable(conn.execute(query, params)) if wanted is None or t.id in wanted]
-            found = [(t, a) for t in tasks
+            found = [(t, a) for t in _readable(conn.execute(query, params))
                      if t.assignee and (a := self._pending_approval(conn, t, worker)) is not None]
         return sorted(found, key=lambda pair: pair[1].id)
 

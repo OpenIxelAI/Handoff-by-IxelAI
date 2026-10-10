@@ -150,6 +150,8 @@ START = [
 ]
 
 CLEAN_DAYS = 30  # handoff clean removes finished tasks older than this, unless told otherwise
+WATCH_POLL_SEC = 2.0     # handoff board --watch: how often it looks for a change
+WATCH_REDRAW_SEC = 30.0  # and how long it goes without redrawing when nothing changed (the ages shown move on)
 PROJECT_HELP = "the project folder (default: the git repository containing this folder)"
 YOU = ("me", "you", "myself")  # names for the person, wherever they type a name
 NOBODY = ("nobody", "anyone", "none", "-")  # no assignee: anyone can claim it
@@ -674,20 +676,28 @@ def cmd_board(argv: list[str]) -> int:
         shown = None
         try:
             while True:
-                if board.revision() != shown:
-                    shown = board.revision()
+                revision = board.revision()
+                if revision != shown:
+                    shown = revision
                     _print_board(board, root, statuses, assignee)
-                time.sleep(2)
+                time.sleep(WATCH_POLL_SEC)
         except KeyboardInterrupt:
             pass
         return 0
 
     from rich.live import Live
     try:
+        shown, waited = board.revision(), 0.0
         with Live(render_board(board, root, statuses, assignee), console=console, auto_refresh=False) as live:
             while True:
-                time.sleep(2)
-                live.update(render_board(board, root, statuses, assignee), refresh=True)
+                time.sleep(WATCH_POLL_SEC)
+                waited += WATCH_POLL_SEC
+                revision = board.revision()
+                # Redrawn when the board changes (revision() is one cheap query), and now and then anyway, so
+                # the ages in the Updated column keep up
+                if revision != shown or waited >= WATCH_REDRAW_SEC:
+                    shown, waited = revision, 0.0
+                    live.update(render_board(board, root, statuses, assignee), refresh=True)
     except KeyboardInterrupt:
         pass
     return 0

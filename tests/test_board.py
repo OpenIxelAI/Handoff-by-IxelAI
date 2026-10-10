@@ -8,7 +8,8 @@ import sys
 import pytest
 
 from handoff import board as board_module
-from handoff.board import HUMAN, Board, BoardError, Forbidden, NotFound, parse_task_id
+from handoff.board import HUMAN, Board, BoardError, Forbidden, NoBoard, NotFound, parse_task_id
+from handoff.describe import describe
 
 
 @pytest.fixture
@@ -159,6 +160,26 @@ def test_cannot_claim_a_finished_task(board, finish):
         board.cancel(HUMAN, task.id)
     with pytest.raises(BoardError, match=f"is {finish}"):
         board.claim("codex", task.id)
+
+
+def test_claiming_an_unassigned_blocked_task_takes_it_but_keeps_it_blocked(board):
+    # The person blocked it with nobody on it: nobody but them could have set it open again, and an agent
+    # claiming it heard "it's yours" while nothing changed
+    task = new(board, assignee=None)
+    board.set_status(HUMAN, task.id, "blocked", reason="Waiting for the API keys")
+    task, _ = board.claim("codex", task.id)
+    assert task.status == "blocked" and task.assignee == "codex"
+    assert kinds(board, task.id) == ["created", "status", "claimed"]
+    assert describe(board.events(task.id)[-1]) == "claimed it, still blocked"
+    assert board.inbox("codex").mine == [task]
+    assert board.set_status("codex", task.id, "open", reason="The keys arrived").status == "open"
+
+
+def test_claiming_a_blocked_task_of_your_own_changes_nothing(board):
+    task = new(board, "codex", "codex")
+    board.set_status("codex", task.id, "blocked", reason="Waiting")
+    board.claim("codex", task.id)
+    assert kinds(board, task.id) == ["created", "claimed", "status"]
 
 
 def test_cannot_claim_a_task_in_review(board):
@@ -506,12 +527,68 @@ def test_the_person_is_not_bound_by_the_done_rule(board):
     assert board.set_status(HUMAN, new(board).id, "done").status == "done"
 
 
+@pytest.mark.parametrize("how", ["open", "blocked", "done", "cancel"])
+def test_taking_a_task_out_of_review_hands_it_back_to_its_author(board, how):
+    # Only the person can; before, the reviewer was left owning an open (or reopened) task
+    task = new(board, "claude", "claude")
+    board.claim("claude", task.id)
+    board.request_review("claude", task.id, "codex", "Check the endpoint")
+    assert board.get(task.id).assignee == "codex"
+    if how == "cancel":
+        task = board.cancel(HUMAN, task.id, "Not needed after all")
+    else:
+        task = board.set_status(HUMAN, task.id, how, reason="Changed my mind")
+    assert task.status == ("cancelled" if how == "cancel" else how) and task.assignee == "claude"
+    event = board.events(task.id)[-1]
+    assert event.kind == "status" and event.data["assignee"] == "claude"
+    assert describe(event).startswith(f"set it in_review → {task.status}, back with claude")
+    if how in ("done", "cancel"):
+        assert board.set_status(HUMAN, task.id, "open").assignee == "claude"
+
+
+def test_an_agent_still_cannot_take_a_task_out_of_review(board):
+    task = new(board, "claude", "claude")
+    board.request_review("claude", task.id, "codex", "Check it")
+    with pytest.raises(BoardError, match="waiting for review"):
+        board.set_status("codex", task.id, "open")
+    assert board.get(task.id).assignee == "codex"
+
+
 def test_only_the_person_reopens_finished_tasks(board):
     task = new(board, "codex", "codex")
     board.set_status("codex", task.id, "done", reason="ok")
     with pytest.raises(BoardError, match="is done"):
         board.set_status("codex", task.id, "open")
     assert board.set_status(HUMAN, task.id, "open").status == "open"
+
+
+def test_revision_changes_when_a_setting_changes(board):
+    before = board.revision()
+    board.set_keep_days(HUMAN, 30)
+    after = board.revision()
+    assert after != before
+    board.set_done_rule("any")
+    assert board.revision() not in (before, after)
+    board.set_setting("gitignore_asked", "yes")
+    assert len({before, after, board.revision()}) == 3
+
+
+def test_overlaps_for_all_matches_overlaps_for(board):
+    a = new(board, "codex", "codex", paths=["src"])
+    b = new(board, "claude", "claude", paths=["src/api.py"])
+    c = new(board, paths=["docs"])
+    found = board.overlaps_for_all([a.id, b.id, c.id])
+    assert found == {t.id: board.overlaps_for(t.id) for t in (a, b, c)}
+    assert [o.other_task_id for o in found[a.id]] == [b.id] and found[c.id] == []
+    assert board.overlaps_for_all([]) == {}
+
+
+def test_opening_a_board_that_isnt_there_says_so(tmp_path):
+    with pytest.raises(NoBoard):
+        Board.open(tmp_path, create=False)
+    with pytest.raises(NoBoard):
+        Board.open_read_only(tmp_path)
+    assert issubclass(NoBoard, NotFound)
 
 
 # ── The person's controls ────────────────────────────────────────────────────
