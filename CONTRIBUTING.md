@@ -35,8 +35,12 @@ the install's own signed python.exe, and `handoff setup --write` points your app
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
+ruff check .
 pytest
 ```
+
+`ruff check .` is the lint CI runs (unused imports, likely mistakes, import order; `ruff check --fix .` sorts
+imports for you), and lines stay within 120 columns.
 
 **On Windows**, run these in the Handoff folder:
 
@@ -54,6 +58,6 @@ prompt, it asks. It writes `windows-check-report.txt`; attach it to an issue.
 `tests/test_docs.py` checks that [docs/guide.md](docs/guide.md) names every tool, command, status and done rule,
 so update the guide with the code.
 
-On GitHub, every pull request and every push to `main` runs the tests on Linux and Windows (`checks`). The full
+On GitHub, every pull request and every push to `main` runs the lint and the tests on Linux and Windows (`checks`). The full
 run, with the installers, macOS and the live worker tests, starts only by hand (**Actions → tests → Run
 workflow**). Run `pytest` before you push either way.

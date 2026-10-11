@@ -12,6 +12,8 @@ whoever picks it up next knows what was done, what's left, and how to check it.
 ## When you start
 - "Check your handoffs" → `handoff_inbox`: tasks handed to you, reviews waiting on you, and what the
   other agent took.
+- "Wait for Codex" (or Claude) → `handoff_wait`: it returns as soon as something new reaches your inbox, or
+  after a couple of minutes if nothing does; call it again to keep waiting.
 - "Show the board" → `handoff_board`.
 - Before working on a task, read it in full with `handoff_get`.
 

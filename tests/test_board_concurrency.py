@@ -48,7 +48,7 @@ def test_two_writers_lose_nothing(tmp_path):
                for name in ("claude", "codex")]
     go.write_text("go", encoding="utf-8")
     results = [w.communicate(timeout=120) for w in workers]
-    for worker, (out, err) in zip(workers, results):
+    for worker, (_, err) in zip(workers, results, strict=True):
         assert worker.returncode == 0, err
 
     # every race task was claimed exactly once, and the wins add up

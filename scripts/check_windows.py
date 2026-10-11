@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT))
 
 from cli_capture import CaptureServer, offered_tools  # noqa: E402
+
 from handoff.sanitize import find_secret  # noqa: E402
 
 REPORT: list[str] = []

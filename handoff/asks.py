@@ -31,8 +31,8 @@ from handoff import approvals, gitwork
 from handoff.board import HUMAN, Board, BoardError, Event, Task, run_kind, safe_name
 from handoff.fence import numbered
 from handoff.ixel import child_env, find_ixel
-from handoff.project import BOARD_DIR, OUTPUTS_DIR
 from handoff.proc import Stopped, run_tree, stopping
+from handoff.project import BOARD_DIR, OUTPUTS_DIR
 from handoff.sanitize import clean_line, clean_text, find_secret
 
 VIA_IXEL = ("answer", "review", "image")
@@ -94,22 +94,40 @@ def _json_out(runner: Runner, command: list[str], root: Path, timeout: float) ->
     return data if isinstance(data, dict) else None
 
 
-def ixel_roster(root: Path, runner: Runner = _run) -> IxelRoster:
-    """Who Ixel can ask, and which picture services have a key. Nothing is sent to a model."""
-    ixel = find_ixel()
+def ixel_list(ixel: str, which: str, root: Path, runner: Runner = _run) -> dict | None:
+    """One of Ixel's lists, as it printed it: `ixel ask --list` ("ask": who it can ask) or `ixel image --list`
+    ("image": which picture services have a key). None when it printed nothing readable."""
+    return _json_out(runner, [ixel, which, "--list", "--json"], root, LIST_TIMEOUT_SEC)
+
+
+def roster_from_lists(ixel: str | None, listed: dict | None, pictures: dict | None) -> IxelRoster:
+    """What Ixel's two lists say, put together. `ixel` is the command (None when there's none), `listed` what
+    `ixel ask --list` printed and `pictures` what `ixel image --list` did (ixel_list)."""
     if ixel is None:
         return IxelRoster([], [], "Ixel MAT isn't installed (no `ixel` command), so only claude and codex can "
                                   "take tasks, as edits. Install Ixel MAT to give answers, reviews and pictures to "
                                   "any model.")
-    listed = _json_out(runner, [ixel, "ask", "--list", "--json"], root, LIST_TIMEOUT_SEC)
     if listed is None or not isinstance(listed.get("agents"), list):
         return IxelRoster([], [], "This Ixel MAT can't take single tasks yet (`ixel ask` is missing). Update it "
                                   "with: ixel update")
-    pictures = _json_out(runner, [ixel, "image", "--list", "--json"], root, LIST_TIMEOUT_SEC) or {}
+    pictures = pictures or {}
     agents = [a for a in listed["agents"] if isinstance(a, dict) and isinstance(a.get("name"), str)]
     providers = [p for p in pictures.get("providers") or [] if isinstance(p, dict) and isinstance(p.get("name"), str)]
     features = tuple(f for f in listed.get("features") or [] if isinstance(f, str))
     return IxelRoster(agents, providers, features=features)
+
+
+def ixel_roster(root: Path, runner: Runner = _run) -> IxelRoster:
+    """Who Ixel can ask, and which picture services have a key, one list after the other (crew.build_roster
+    asks for both at once). Nothing is sent to a model."""
+    ixel = find_ixel()
+    if ixel is None:
+        return roster_from_lists(None, None, None)
+    listed = ixel_list(ixel, "ask", root, runner)
+    roster = roster_from_lists(ixel, listed, None)
+    if roster.problem:  # (no need for the pictures' list then)
+        return roster
+    return roster_from_lists(ixel, listed, ixel_list(ixel, "image", root, runner))
 
 
 # ── What a run reads ─────────────────────────────────────────────────────────
@@ -229,7 +247,8 @@ def review_plan(root: Path, roster: IxelRoster | None = None) -> tuple[list[str]
         raise RunProblem("there's nothing to review: no changes since the last commit, no new files, no commits "
                          "on this branch beyond main, and no earlier commit.")
     if new:
-        return target[0], f"{target[1]} (not your new files: this Ixel MAT can't read them; update it with: ixel update)"
+        return target[0], (f"{target[1]} (not your new files: this Ixel MAT can't read them; update it with: "
+                           "ixel update)")
     return target
 
 
@@ -302,7 +321,8 @@ def command_for(ixel: str, root: Path, task: Task, kind: str, agent: str, roster
         else:
             flags, what = review_plan(root, roster)
         stdin = f"{(FILES_REVIEW_BRIEF if files else REVIEW_BRIEF).format(what=what)}\n\n{_task_text(task)}"
-        return [ixel, "ask", "--agent", agent, "--json", *flags, "-"], stdin[:MAX_QUESTION_CHARS], f"It reviewed {what}."
+        return ([ixel, "ask", "--agent", agent, "--json", *flags, "-"], stdin[:MAX_QUESTION_CHARS],
+                f"It reviewed {what}.")
     if kind == "image":
         provider = image_provider(agent, roster or IxelRoster([], []))
         if provider is None:

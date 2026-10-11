@@ -28,8 +28,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-
 from cli_capture import CaptureServer, has_tool_results
+
 from handoff import worker as worker_module
 from handoff.board import HUMAN, Board
 from handoff.worker import Worker

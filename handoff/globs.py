@@ -8,9 +8,14 @@ which takes at most len(a) × len(b) steps: no regular expressions.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 from handoff.sanitize import clean_line
 
 MAX_PATH_CHARS = 256
+# Pattern pairs whose answer is kept, for when agents claim the same folders again (each `handoff api` request is
+# a process of its own, so it helps within one request, or a long-running MCP server)
+OVERLAP_CACHE = 4_096
 
 
 class PathError(ValueError):
@@ -71,8 +76,23 @@ def _pattern(path: str) -> list[str]:
     return segments
 
 
+def plain_head(path: str) -> str | None:
+    """A claim's first segment, casefolded, when it has no wildcard (`src` for src/api.py); None when it has
+    one (`*.md`, `**`). Two claims with different plain first segments can never overlap, since overlaps
+    walks both from the start, so a caller with many claims compares only those that share one, and the
+    wildcard ones with every claim (api._overlap_counts)."""
+    head = path.casefold().split("/", 1)[0]
+    return None if "*" in head or "?" in head else head
+
+
 def overlaps(a: str, b: str) -> bool:
-    """Can some path be covered by both claims? Case-insensitive, to err on the side of warning."""
+    """Can some path be covered by both claims? Case-insensitive, to err on the side of warning. The answer
+    is the same either way round, so each pair is worked out once and remembered (OVERLAP_CACHE of them)."""
+    return _overlaps(a, b) if a <= b else _overlaps(b, a)
+
+
+@lru_cache(maxsize=OVERLAP_CACHE)
+def _overlaps(a: str, b: str) -> bool:
     left, right = _pattern(a), _pattern(b)
     if not any(c in a + b for c in "*?"):
         # two plain paths overlap when one is inside the other (a folder named v1.2 too)

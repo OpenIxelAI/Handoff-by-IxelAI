@@ -1,6 +1,7 @@
 """`handoff api`: the Ixel window's JSON door to the board."""
 import json
 import os
+import random
 import subprocess
 import sys
 
@@ -184,6 +185,49 @@ def test_revision_changes_with_every_change(project):
     before = board.revision()
     board.set_status("codex", task.id, "done", "finished")  # releases its paths
     assert board.revision() != before
+
+
+def test_the_board_counts_each_tasks_overlapping_claims(project):
+    ok("init", project)
+    board = Board.open(project)
+    board.create("codex", "A", assignee="codex", paths=["src"])
+    board.create("claude", "B", assignee="claude", paths=["src/api.py", "src/db.py"])
+    board.create("gemini", "C", assignee="gemini", paths=["docs"])
+    done, _ = board.create("gemini", "D", assignee="gemini", paths=["src"])
+    board.set_status(HUMAN, done.id, "done")  # finished: its claims are released, so they count for nobody
+    counts = {t["ref"]: t["overlaps"] for t in ok("board", project)["tasks"]}
+    assert counts == {"T-1": 2, "T-2": 2, "T-3": 0, "T-4": 0}
+    assert ok("task", project, task="T-2")["task"]["overlaps"] == 2
+
+
+def test_overlap_counts_compare_only_claims_that_could_overlap_and_miss_none(project):
+    # Claims are bucketed by their first folder; a few hundred random ones, plain and wildcard, case mixed,
+    # must count exactly what comparing every pair counts
+    from itertools import combinations
+
+    from handoff.globs import overlaps
+    rng = random.Random(20261011)
+    plain = ["src", "Src", "docs", "tests", "lib", "app", "v1.2", "README.md"]
+    wild = ["*", "**", "*.md", "s?c", "te*", "?pp"]
+    rest = ["api.py", "db.py", "*.py", "**", "test_*.py", "models", "README.md", "a?i.py"]
+
+    def claim():
+        head = rng.choice(wild) if rng.random() < 0.15 else rng.choice(plain)
+        return "/".join([head] + [rng.choice(rest) for _ in range(rng.randint(0, 2))])
+    board = Board.open(project)
+    for n in range(150):
+        paths = {claim() for _ in range(rng.randint(1, 3))}
+        board.create(HUMAN, f"Task {n}", assignee=rng.choice(["claude", "codex"]), paths=sorted(paths))
+    tasks = board.tasks()
+    claims = board.active_claims()
+    assert len(claims) > 250 and any(c.path_glob.split("/")[0] in wild for c in claims)
+    found = [overlaps(a.path_glob, b.path_glob) for a, b in combinations(claims, 2)]
+    assert any(found) and not all(found)
+    expected = {t.id: sum(overlaps(a.path_glob, b.path_glob) for a in claims if a.task_id == t.id
+                          for b in claims if b.task_id != t.id) for t in tasks}
+    assert api._overlap_counts(board, tasks) == expected
+    some = tasks[:10]
+    assert api._overlap_counts(board, some) == {t.id: expected[t.id] for t in some}
 
 
 def test_outputs_list_plain_files_only(project, tmp_path):
@@ -396,3 +440,15 @@ def test_wrong_typed_args_are_refused_not_coerced(project, op, args):
     ok("add", project, title="First")
     assert error(op, project, **args)[0] == "usage"
 
+
+def test_board_and_task_keep_their_fields(project):
+    """Within schema 1, replies only ever gain fields; `handoff board --json` and `handoff show --json` print these
+    same shapes (api.board_summary and api.task_detail)."""
+    ok("init", project)
+    ok("add", project, title="First", assignee="codex")
+    board = ok("board", project)
+    assert set(board) >= {"exists", "revision", "project", "counts", "unreadable", "done_rule", "tasks"}
+    assert board["exists"] is True and board["project"] == str(project) and board["done_rule"] == "review_or_reason"
+    task = ok("task", project, task="T-1")
+    assert set(task) >= {"task", "events", "claims", "overlaps", "children", "outputs", "actions"}
+    assert task["task"]["ref"] == "T-1" and task["events"][0]["kind"] == "created"

@@ -43,11 +43,12 @@ if your user folder's name has a space in it, the hook needs Claude Code 2.1.139
 
 Each app joins the board under its own name: a task for `gemini` is in Gemini CLI's inbox, and OpenCode is
 `opencode` whichever model it runs. Gemini CLI, OpenCode and Grok Build have no session hook, so ask them to
-"check your handoffs". Grok Build also loads Claude Code's MCP servers and runs its hooks. Once Grok is
-connected its own `handoff` comes first; until then it uses Claude's and works as `claude` on the board, which
-`handoff doctor` points out. Claude Code's session hook says nothing to Grok. A settings file with comments or
-trailing commas in it (JSONC) is read but never rewritten, since saving it would lose them: `handoff setup
---write` says so, and `handoff setup` shows the entry to add by hand.
+"check your handoffs". Any agent can also be asked to wait for a handoff, with `handoff_wait`. Grok Build also
+loads Claude Code's MCP servers and runs its hooks. Once Grok is connected its own `handoff` comes first; until
+then it uses Claude's and works as `claude` on the board, which `handoff doctor` points out. Claude Code's
+session hook says nothing to Grok. A settings file with comments or trailing commas in it (JSONC) is read but
+never rewritten, since saving it would lose them: `handoff setup --write` says so, and `handoff setup` shows
+the entry to add by hand.
 
 The **ChatGPT app itself isn't supported**: its connectors only reach MCP servers on the internet, and
 Handoff never listens on a network port. Codex signs in with the same ChatGPT subscription and works.
@@ -226,10 +227,11 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap
 | Tool | What it does |
 |---|---|
 | `handoff_inbox` | What's waiting for you: tasks assigned to you (new, handed back, or waiting for your review) with the latest handoff or review in full (and what came after it), tasks blocked waiting on you, and open tasks nobody has taken. **The tool behind "check your handoffs".** |
+| `handoff_wait` | Wait, up to 14 minutes, until something new reaches your inbox, then show it: for "wait for Codex" instead of switching apps |
 | `handoff_board` | The whole board in brief, filtered by status or assignee |
 | `handoff_get` | One task with its full history |
 | `handoff_create` | A new task: title, body, acceptance checks, assignee, parent task, and the paths it will change |
-| `handoff_claim` | Take an open task, or one handed to you; optionally claim paths |
+| `handoff_claim` | Take an open task, one handed to you, or a blocked one nobody has, unless it's waiting on someone else (it stays blocked, and yours to set open); optionally claim paths |
 | `handoff_note` | A progress note (the first one marks the task in progress) |
 | `handoff_pass` | **The handoff:** what I did, what's left, how to check it, files touched. Reassigns the task |
 | `handoff_request_review` | Send the task to a reviewer (not yourself) |
@@ -252,8 +254,8 @@ can't.
 | Command | What it does |
 |---|---|
 | `handoff` | This project's board; outside a project, the first commands to know |
-| `handoff board [--all] [--status S] [--assignee NAME] [--watch]` | The board by status, with assignee, age and the last event. `--watch` keeps refreshing |
-| `handoff show T-12` · `handoff T-12` | One task with its full history, and what you can do with it next |
+| `handoff board [--all] [--status S] [--assignee NAME] [--watch] [--json]` | The board by status, with assignee, age and the last event. `--watch` keeps refreshing |
+| `handoff show T-12 [--json]` · `handoff T-12` | One task with its full history, and what you can do with it next |
 | `handoff add "title" --to codex [--body TEXT] [--accept CHECK]… [--path PATH]…` | Add a task (with no title, it asks what needs doing and who should do it) |
 | `handoff assign T-12 claude` | Give a task to someone else (`me` for yourself, or `nobody`) |
 | `handoff note T-12 "text"` | Add a note to any task |
@@ -261,7 +263,7 @@ can't.
 | `handoff reopen T-12` | Open a done, cancelled or blocked task again |
 | `handoff block T-12 "why" [--waiting-on NAME]` | Mark a task blocked, and say why |
 | `handoff review T-12 [approve\|changes ["notes"]] [--check N=RESULT]… [--panel]` | Review a task that's waiting for you. With no verdict, it shows what came back and its checks, then asks. `--check "2=not_met:fails when empty"` marks check 2 |
-| `handoff status T-12 open\|blocked\|done` | Set a status directly (`done`, `reopen` and `block` are the short ways) |
+| `handoff status T-12 open\|blocked\|done` | Set a status directly (`done`, `reopen` and `block` are the short ways). On a task in review, this or `cancel` ends the review and gives the task back to its author |
 | `handoff cancel T-12` · `handoff delete T-12` | Cancel (keeps the history), or delete for good with its results in `.handoff/outputs` (asks first) |
 | `handoff clean [--older-than DAYS] [--yes]` | Remove finished tasks that haven't changed in DAYS days (30 if you leave it out), with their history and results, after listing them and asking |
 | `handoff keep [DAYS\|forever]` | Show or set how long this board keeps finished tasks. It keeps them until you delete or clean them, unless you set a number of days |
@@ -271,7 +273,7 @@ can't.
 | `handoff approve T-12 AGENT [--kind edit\|answer\|review\|image] [--return-to NAME]` · `--revoke` | Let an agent run one task, once, through the [worker](#the-worker-preview) (or withdraw that). With no AGENT, at a terminal, it offers the task's assignee and asks |
 | `handoff run [T-12 …]` | Run approved tasks now, side by side (all of them, if you name none) |
 | `handoff worker --agent claude\|codex [--once] [--share FOLDER]` | Keep running the tasks you approve, each in its own git worktree |
-| `handoff setup [--write\|--remove]` · `handoff doctor` | Connect the apps (or take Handoff out of them); check everything |
+| `handoff setup [--write\|--remove]` · `handoff doctor [--json]` | Connect the apps (or take Handoff out of them); check everything |
 | `handoff update [--check]` | Get the latest Handoff and reinstall it (`--check` only says whether there is one) |
 | `handoff help [COMMAND]` | Every command, grouped; or one command's options and examples (the same as `handoff COMMAND --help`) |
 
@@ -283,6 +285,8 @@ can't.
   `block --waiting-on me`, `approve --return-to me`.
 - **A mistyped command says what's wrong:** what's missing, an example to copy, and a suggestion for a
   misspelled command or flag (`handoff boards` → `handoff board`).
+- **`--json`** on `board` and `show` prints the same data the Ixel window reads; on `doctor` it prints each check
+  as JSON (`status` is ok, warning, problem or none, with `what` and `detail`), for scripts and other tools.
 
 Commands that use the board take `--project PATH`; by default it's the git repository you're in. Any
 folder of a repository (or one of its worktrees) means that repository's board.

@@ -19,6 +19,9 @@ any more: show it again), busy, internal.
 Approving what the person saw: `task` gives the task's `content`, a hash of its text and history as the
 agent would get them. Pass it back as approve's `shown`, and the approval is refused (changed) if an agent
 changed the task in between, instead of sealing something the person never saw.
+
+The shapes of `board` and `task` are board_summary() and task_detail(), which `handoff board --json` and
+`handoff show --json` print too, so a script reads the same data the window does.
 """
 from __future__ import annotations
 
@@ -29,12 +32,32 @@ import sqlite3
 import stat
 import subprocess
 import sys
+from itertools import chain, combinations
 from pathlib import Path
 
 from handoff import __version__
-from handoff.board import (ACTIVE, HUMAN, RUN_KINDS, STATE_EVENTS, TERMINAL, Board, BoardError, Changed, Event,
-                           Forbidden, NotFound, Task, check_name, content_of, parse_task_id, run_kind, safe_name,
-                           task_ref)
+from handoff.board import (
+    ACTIVE,
+    HUMAN,
+    RUN_KINDS,
+    STATE_EVENTS,
+    TERMINAL,
+    Board,
+    BoardError,
+    Changed,
+    Claim,
+    Event,
+    Forbidden,
+    NoBoard,
+    NotFound,
+    Task,
+    check_name,
+    content_of,
+    parse_task_id,
+    run_kind,
+    safe_name,
+    task_ref,
+)
 from handoff.ixel import DEPTH_VAR, depth
 from handoff.project import BOARD_DIR, OUTPUTS_DIR, ProjectError, board_path
 from handoff.sanitize import clean_line
@@ -176,14 +199,32 @@ def _summary(task: Task, last: Event | None, state: Event | None, approved: dict
 
 
 def _overlap_counts(board: Board, tasks: list[Task]) -> dict[int, int]:
-    from handoff.globs import overlaps
+    """How many other active tasks' claims each task's own claims overlap. Each pair of claims is compared
+    once (an overlap counts for both), not once per task, and only pairs that can overlap at all: claims that
+    start with the same plain folder (src/api.py and src/db.py, not src and docs), and the ones that start
+    with a wildcard against every claim (globs.plain_head). A board of hundreds of claims stays quick."""
+    from handoff.globs import overlaps, plain_head
     live = {t.id for t in board.tasks(statuses=sorted(ACTIVE))}
     claims = [c for c in board.active_claims() if c.task_id in live]
-    counts: dict[int, int] = {}
-    for task in tasks:
-        mine = [c.path_glob for c in claims if c.task_id == task.id]
-        counts[task.id] = sum(1 for path in mine for c in claims
-                              if c.task_id != task.id and overlaps(path, c.path_glob))
+    counts: dict[int, int] = {task.id: 0 for task in tasks}
+    by_head: dict[str, list[Claim]] = {}
+    wild: list[Claim] = []
+    for claim in claims:
+        head = plain_head(claim.path_glob)
+        if head is None:
+            wild.append(claim)
+        else:
+            by_head.setdefault(head, []).append(claim)
+    pairs = chain((pair for group in by_head.values() for pair in combinations(group, 2)),
+                  combinations(wild, 2),
+                  ((mine, other) for mine in wild for group in by_head.values() for other in group))
+    for mine, other in pairs:
+        if mine.task_id == other.task_id or (mine.task_id not in counts and other.task_id not in counts):
+            continue
+        if overlaps(mine.path_glob, other.path_glob):
+            for task_id in (mine.task_id, other.task_id):
+                if task_id in counts:
+                    counts[task_id] += 1
     return counts
 
 
@@ -288,6 +329,32 @@ def _event(event: Event) -> dict:
             "panel": panel_text(panel) if isinstance(panel, dict) else ""}
 
 
+def board_summary(board: Board, root: Path, tasks: list[Task], revision: str | None = None) -> dict:
+    """The board as the window and `handoff board --json` show it: `tasks` are the ones the caller chose, in the
+    order it wants them. `revision` is one the caller read before it fetched the tasks (so a change in between
+    shows up on its next poll); left out, it's read now."""
+    # counts has only the statuses Handoff knows; a task it can't read is only counted, never listed
+    return {"project": str(root), "revision": board.revision() if revision is None else revision,
+            "counts": board.counts(), "unreadable": board.unreadable(), "done_rule": board.done_rule,
+            "tasks": _summaries(board, tasks)}
+
+
+def task_detail(board: Board, root: Path, task_id: int) -> dict:
+    """One task as the window and `handoff show --json` show it: the task with its body, acceptance checks and
+    what its runs were approved for, its history, claims, overlaps, subtasks, results, and what the person can
+    do with it next."""
+    task, events, claims, children = board.task_with_history(task_id)
+    summary = _summaries(board, [task])[0]
+    # Per kind of run, what approving it again is of (Board.approve keeps it, while its approval checks out)
+    targets = board.approval_targets(task.id)
+    return {"task": {**summary, "body": task.body, "acceptance": task.acceptance, "targets": targets,
+                     "content": content_of(task, events)},  # (approve's `shown`)
+            "events": [_event(e) for e in events], "claims": [c.path_glob for c in claims],
+            "overlaps": [o.describe() for o in board.overlaps_for(task.id)],
+            "children": _summaries(board, children), "outputs": _outputs(root, task),
+            "actions": actions(task, summary["run"])}
+
+
 # ── The ops ───────────────────────────────────────────────────────────────────
 
 # What this Handoff can do beyond the ops, for a window that needs it. run-target: a review or a change can
@@ -315,27 +382,14 @@ def op_board(request: dict) -> dict:
     if shown < 0:
         raise ApiError("usage", "args.done must be 0 or more.")
     shown = min(shown, MAX_DONE_SHOWN)
-    revision = board.revision()
+    revision = board.revision()  # before the tasks, so a change between the two shows up on the next poll
     tasks = board.tasks(statuses=sorted(ACTIVE)) + board.tasks(statuses=sorted(TERMINAL), limit=shown)
-    # counts has only the statuses Handoff knows; a task it can't read is only counted, never listed
-    return {"exists": True, "revision": revision, "project": str(root), "counts": board.counts(),
-            "unreadable": board.unreadable(), "done_rule": board.done_rule, "tasks": _summaries(board, tasks)}
+    return {"exists": True, **board_summary(board, root, tasks, revision)}
 
 
 def op_task(request: dict) -> dict:
     root = _project(request)
-    board = _board(root)
-    task_id = _task_arg(request.get("args", {}))
-    task, events, claims, children = board.task_with_history(task_id)
-    summary = _summaries(board, [task])[0]
-    # Per kind of run, what approving it again is of (Board.approve keeps it, while its approval checks out)
-    targets = board.approval_targets(task.id)
-    return {"task": {**summary, "body": task.body, "acceptance": task.acceptance, "targets": targets,
-                     "content": content_of(task, events)},  # (approve's `shown`)
-            "events": [_event(e) for e in events], "claims": [c.path_glob for c in claims],
-            "overlaps": [o.describe() for o in board.overlaps_for(task.id)],
-            "children": _summaries(board, children), "outputs": _outputs(root, task),
-            "actions": actions(task, summary["run"])}
+    return task_detail(_board(root), root, _task_arg(request.get("args", {})))
 
 
 def op_agents(request: dict) -> dict:
@@ -527,8 +581,10 @@ def handle(raw: bytes) -> tuple[dict, int]:
         return {"schema": SCHEMA, "ok": True, "op": op, "data": data}, 0
     except ApiError as exc:
         code, message = exc.code, str(exc)
+    except NoBoard as exc:
+        code, message = "no_board", str(exc)
     except NotFound as exc:
-        code, message = ("no_board" if "no board" in str(exc) else "not_found"), str(exc)
+        code, message = "not_found", str(exc)
     except Forbidden as exc:
         code, message = "forbidden", str(exc)
     except Changed as exc:

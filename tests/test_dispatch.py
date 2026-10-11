@@ -9,14 +9,15 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
 from rich.console import Console
-
-from handoff import asks, cli, crew, sandbox
-from handoff.board import HUMAN, Board, BoardError, run_kind
 from test_worker import _fake_claude, _no_sandbox, git
+
+from handoff import asks, cli, crew, sandbox, worker
+from handoff.board import HUMAN, Board, BoardError, run_kind
 
 REQUEST = ("/handoff all codex i need you to review, grok generate photos based on my work, claude finish the "
            "next step and gemini or whoever make me a list of projects to check out")
@@ -59,9 +60,37 @@ def fake_ixel(tmp_path, monkeypatch):
         import json, os, sys
         args = sys.argv[1:]
         stdin = sys.stdin.read()
-        with open({str(log)!r}, "a", encoding="utf-8") as f:
-            f.write(json.dumps({{"argv": args, "stdin": stdin, "cwd": os.getcwd(),
-                                 "depth": os.environ.get("HANDOFF_DEPTH")}}) + "\\n")
+        # The whole line in one write: `ask --list` and `image --list` run side by side, and two appends at once
+        # mustn't tear each other's lines
+        line = (json.dumps({{"argv": args, "stdin": stdin, "cwd": os.getcwd(),
+                             "depth": os.environ.get("HANDOFF_DEPTH")}}) + "\\n").encode("utf-8")
+        def append():
+            fd = os.open({str(log)!r}, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0))
+            try:
+                os.write(fd, line)
+            finally:
+                os.close(fd)
+        if os.name == "nt":
+            # Windows appends by moving to the end and then writing, so two at once can land on the same spot
+            # and one overwrites the other: they take turns, on a lock the system lets go of if one is killed
+            import msvcrt, time
+            lock = os.open({str(log) + ".lock"!r}, os.O_RDWR | os.O_CREAT)
+            try:
+                locked = False
+                for _ in range(3000):
+                    try:
+                        msvcrt.locking(lock, msvcrt.LK_NBLCK, 1)
+                        locked = True
+                        break
+                    except OSError:
+                        time.sleep(0.01)
+                append()
+                if locked:
+                    msvcrt.locking(lock, msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(lock)
+        else:
+            append()
         def opt(name, default=None):
             return args[args.index(name) + 1] if name in args else default
         if args[:2] == ["ask", "--list"]:
@@ -110,7 +139,8 @@ def fake_ixel(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "check", _no_sandbox)  # claude runs edit-only and codex can't edit, anywhere
 
     def calls(kind=None):
-        found = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+        lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        found = [json.loads(line) for line in lines if line.strip()]
         return [c for c in found if kind is None or (c["argv"][0] == kind and "--list" not in c["argv"])]
     return calls
 
@@ -221,7 +251,6 @@ def test_guess_kind(text, can_edit, kind):
                                      "draw " + "x- " * 1300, "make " + "the " * 990 + "image"],
                          ids=["makes", "one-long-word", "short-words", "dashes", "determiners"])
 def test_guessing_the_kind_stays_quick_on_any_request(hostile):
-    import time
     started = time.perf_counter()
     for _ in range(10):
         crew.guess_kind(hostile[:crew.MAX_REQUEST_CHARS], None)
@@ -318,6 +347,172 @@ def test_agents_says_who_can_do_what(repo, fake_ixel, run_cli):
     assert code == 0 and "grok  answers, reviews, makes pictures" in out  # no "grok Grok"
     assert 'handoff dispatch "claude review my changes, codex make me a list of …"' in out
     assert not (repo / ".handoff").exists()  # looking makes no board
+
+
+def test_the_roster_s_checks_run_side_by_side(tmp_path, monkeypatch):
+    """Each check starts a program (claude --help, codex exec --help, ixel ask --list, ixel image --list), so
+    one after another they'd take seconds."""
+    monkeypatch.setattr(worker.Worker, "check", lambda self: time.sleep(0.5))  # both agents look ready
+    monkeypatch.setattr(asks, "find_ixel", lambda: "ixel")
+    listed = []
+
+    def runner(argv, stdin, env, timeout, cwd):
+        listed.append(argv[1:3])
+        time.sleep(0.5)
+        return subprocess.CompletedProcess(argv, 0, '{"agents": [], "providers": []}', "")
+
+    started = time.perf_counter()
+    roster = crew.build_roster(None, tmp_path, runner=runner)
+    took = time.perf_counter() - started
+    assert sorted(listed) == [["ask", "--list"], ["image", "--list"]]
+    assert took < 0.95, took  # any two of the four 0.5 s waits one after the other would take 1 s
+    assert list(roster.members) == ["claude", "codex"] and roster.problems == []
+    assert [m.kinds for m in roster.members.values()] == [{"edit": ""}, {"edit": ""}]
+
+
+def test_ctrl_c_while_building_the_roster_stops_ixel_s_lists(tmp_path, monkeypatch):
+    """Ctrl+C only reaches the main thread: the lists running on the pool's threads are stopped, not waited
+    for (each could take a minute)."""
+    from concurrent.futures import Future
+
+    from handoff import proc
+    monkeypatch.setattr(asks, "find_ixel", lambda: "ixel")
+    noticed = []
+
+    def runner(argv, stdin, env, timeout, cwd):  # like run_tree: runs until stop_all, then says it was stopped
+        give_up = time.monotonic() + 5
+        while not proc.stopping() and time.monotonic() < give_up:
+            time.sleep(0.01)
+        if proc.stopping():
+            noticed.append(argv[1])
+            raise proc.Stopped("it was stopped while it was running")
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    result = Future.result
+    calls = []
+
+    def ctrl_c(self, timeout=None):  # the person presses Ctrl+C while build_roster waits on the first result
+        calls.append(self)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return result(self, timeout)
+
+    monkeypatch.setattr(Future, "result", ctrl_c)
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            crew.build_roster(None, tmp_path, runner=runner, check_edits=False)
+        took = time.monotonic() - started
+        assert proc.stopping()
+        assert took < 1, took
+        give_up = time.monotonic() + 2
+        while len(noticed) < 2 and time.monotonic() < give_up:
+            time.sleep(0.01)
+        assert sorted(noticed) == ["ask", "image"]  # both lists were running, and both stopped
+    finally:
+        proc.allow_runs()
+
+
+def _slow_program(path: Path) -> str:
+    """A program that takes 20 seconds, started by its own path (the way Worker.check starts an agent)."""
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(20)\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def _wait_until_running(proc, programs: set[str], count: int) -> None:
+    deadline = time.monotonic() + 10
+    while sum(p.args[0] in programs for p in list(proc._running)) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="starts a #! script")
+def test_ctrl_c_stops_an_agent_s_help_check(tmp_path, monkeypatch):
+    """The checks run on the pool's threads, where Ctrl+C doesn't reach: stop_all stops their programs too."""
+    from handoff import proc
+    monkeypatch.delenv("HANDOFF_DEPTH", raising=False)
+    monkeypatch.setattr(sandbox, "check", _no_sandbox)  # claude falls back to edit-only, then runs its --help
+    slow = _slow_program(tmp_path / "bin" / "claude")
+    check = worker.Worker(None, tmp_path, "claude", command=slow)  # type: ignore[arg-type]
+    raised = []
+
+    def run():
+        try:
+            check.check()
+        except BaseException as exc:  # noqa: BLE001 — what it raised is what the test looks at
+            raised.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        _wait_until_running(proc, {slow}, 1)
+        time.sleep(0.3)
+        assert proc.stop_all() == 1  # its --help was running
+        thread.join(3)
+        assert not thread.is_alive()
+        [exc] = raised
+        assert isinstance(exc, worker.WorkerUnavailable) and str(exc) == "The check was stopped before it finished."
+    finally:
+        proc.allow_runs()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="starts #! scripts")
+@pytest.mark.parametrize("slow_part", ["sandbox probe", "help"])
+def test_ctrl_c_while_building_the_roster_stops_the_edit_checks_too(tmp_path, monkeypatch, slow_part):
+    """Left running on the pool's threads, a slow check would hold the command up after Ctrl+C until its
+    program ends (Python waits for those threads before it exits)."""
+    from concurrent.futures import Future
+
+    from handoff import proc
+    monkeypatch.delenv("HANDOFF_DEPTH", raising=False)
+    monkeypatch.setattr(asks, "find_ixel", lambda: None)  # only the edit checks run
+    bin_dir = tmp_path / "bin"
+    agents = {_slow_program(bin_dir / "claude"), _slow_program(bin_dir / "codex")}
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    if slow_part == "help":
+        bwrap = bin_dir / "bwrap"
+        bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")  # the sandbox can run: on to each --help
+        bwrap.chmod(0o755)
+        slow = agents
+    else:
+        slow = {_slow_program(bin_dir / "bwrap")}
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox, "find_bwrap", lambda: str(bin_dir / "bwrap"))
+    monkeypatch.setattr(sandbox, "find_on_path", lambda name: "/usr/bin/" + name)  # (claude's needs: socat)
+    original, ended = worker.Worker.check, []
+
+    def check(self):
+        try:
+            original(self)
+        except BaseException as exc:
+            ended.append(exc)
+            raise
+        ended.append(None)
+
+    monkeypatch.setattr(worker.Worker, "check", check)
+    result, pressed = Future.result, []
+
+    def ctrl_c(self, timeout=None):  # Ctrl+C while both checks' programs are running
+        if not pressed:
+            _wait_until_running(proc, slow, 2)
+            pressed.append(time.monotonic())
+            raise KeyboardInterrupt
+        return result(self, timeout)
+
+    monkeypatch.setattr(Future, "result", ctrl_c)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            crew.build_roster(None, tmp_path)
+        assert time.monotonic() - pressed[0] < 1
+        give_up = pressed[0] + 2
+        while len(ended) < 2 and time.monotonic() < give_up:
+            time.sleep(0.01)
+        assert len(ended) == 2, "a check was still running"
+        assert all(isinstance(exc, worker.WorkerUnavailable) for exc in ended), ended
+        assert not proc._running
+    finally:
+        proc.allow_runs()
 
 
 def test_the_plan_shows_every_part_and_adds_nothing(repo, fake_ixel, run_cli):
@@ -421,7 +616,6 @@ def test_runs_really_happen_at_the_same_time(repo):
 def test_ctrl_c_stops_every_run_and_each_one_says_so(repo, monkeypatch):
     # Real programs, stopped the way Ctrl+C stops them; a few rounds, since what went wrong was a race
     import _thread
-    import time
 
     from handoff import proc
     monkeypatch.setattr(asks, "find_ixel", lambda: "ixel")
@@ -605,7 +799,8 @@ def test_an_answer_is_written_through_a_new_file(repo, tmp_path):
     folder.mkdir()
     _link(folder / "answer.md", victim)
     asks._replace(folder / "answer.md", "the answer\n")
-    assert not (folder / "answer.md").is_symlink() and (folder / "answer.md").read_text(encoding="utf-8") == "the answer\n"
+    assert not (folder / "answer.md").is_symlink()
+    assert (folder / "answer.md").read_text(encoding="utf-8") == "the answer\n"
     assert victim.read_text(encoding="utf-8") == "keep me\n" and [p.name for p in folder.iterdir()] == ["answer.md"]
 
 
@@ -657,7 +852,8 @@ def test_an_older_ixel_reviews_without_new_files_and_says_so(repo, fake_ixel, ru
     (repo / "till.py").write_text("x = 1\n", encoding="utf-8")
     code, out, _ = run_cli("dispatch", "--plan", "--json", "codex review my changes")
     [step] = json.loads(out)["steps"]
-    assert "the only changes are new files git doesn't track yet" in step["problem"] and "ixel update" in step["problem"]
+    assert "the only changes are new files git doesn't track yet" in step["problem"]
+    assert "ixel update" in step["problem"]
     (repo / "README.md").write_text("# Shop\nNow with receipts.\n", encoding="utf-8")
     review = _review_call(fake_ixel, run_cli)
     assert review["argv"] == ["ask", "--agent", "codex", "--json", "--diff", "-"]
@@ -751,7 +947,8 @@ def test_a_pull_request_is_reviewed_at_the_commits_approved(repo, fake_ixel, run
     board = Board.open(repo)
     task, _ = board.create(HUMAN, "Review pull request #7: Pay")
     board.approve(HUMAN, task.id, "codex", kind="review", target=target)
-    assert "approved it for codex, through Ixel MAT, to review pull request #7 (pr into main)" in run_cli("show", "T-1")[1]
+    shown = run_cli("show", "T-1")[1]
+    assert "approved it for codex, through Ixel MAT, to review pull request #7 (pr into main)" in shown
     code, out, _ = run_cli("run", "T-1")
     assert code == 0, out
     [review] = fake_ixel("ask")

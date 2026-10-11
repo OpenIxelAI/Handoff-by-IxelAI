@@ -14,7 +14,8 @@ from rich.console import Console
 
 from handoff import cli, ixel
 from handoff.board import HUMAN, Board
-from handoff.mcp_server import FRAME, build_server
+from handoff.fence import FRAME
+from handoff.mcp_server import build_server
 
 VERDICT = {"question": "…", "mode": "review", "calls": 7, "error": None, "final": {
     "answer": "The tests cover GET and POST but not the 404 case.", "confidence": "high",

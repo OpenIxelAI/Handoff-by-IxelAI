@@ -233,7 +233,8 @@ SCAN_OVERLAP_BYTES = 8 * 1024
 def stage_all(root: Path, worktree: Worktree) -> list[str]:
     """Stage everything the agent changed. Returns the added or modified paths."""
     _git(root, ["add", "-A"], worktree=worktree)
-    out = _git(root, ["diff", "--no-ext-diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"], worktree=worktree).stdout
+    out = _git(root, ["diff", "--no-ext-diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"],
+               worktree=worktree).stdout
     return [name for name in out.split("\0") if name]
 
 

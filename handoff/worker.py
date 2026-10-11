@@ -63,14 +63,17 @@ SANDBOX_POWERS = ("You can read and edit files in this folder and run commands h
                   "installed on the system can't be added. Git commands don't work here either: the repository "
                   "this folder belongs to is outside it.")
 
-BRIEF = """You're {agent}, working on task {ref} through Handoff's worker. The person approved this task for you to do on your own.
-
-You're in a git worktree of their project (the current folder), on the branch {branch}. {powers} Make the changes the task asks for, carefully, then stop. The worker commits what you changed on {branch}; it never pushes.
-
-When you're done, end your reply with these three sections:
-DONE: what you changed, file by file
-LEFT: what's still to do, including anything you couldn't do or check here (or "nothing")
-VERIFY: how the person should check it, such as the test commands to run"""
+BRIEF = ("You're {agent}, working on task {ref} through Handoff's worker. The person approved this task for "
+         "you to do on your own.\n"
+         "\n"
+         "You're in a git worktree of their project (the current folder), on the branch {branch}. {powers} "
+         "Make the changes the task asks for, carefully, then stop. The worker commits what you changed on "
+         "{branch}; it never pushes.\n"
+         "\n"
+         "When you're done, end your reply with these three sections:\n"
+         "DONE: what you changed, file by file\n"
+         "LEFT: what's still to do, including anything you couldn't do or check here (or \"nothing\")\n"
+         "VERIFY: how the person should check it, such as the test commands to run")
 
 
 @dataclass(frozen=True)
@@ -527,10 +530,10 @@ class Worker:
         if not self.command:
             raise WorkerUnavailable(f"The `{self.spec.command}` command isn't on PATH, so the {self.spec.name} "
                                     "worker can't run.")
-        try:
-            proc = subprocess.run([self.command, *self.spec.help_args], capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=60,
-                                  env=agent_env(self.spec))
+        try:  # (through run_tree, so Ctrl+C's stop_all stops it on whatever thread it runs)
+            proc = run_tree([self.command, *self.spec.help_args], "", agent_env(self.spec), 60.0)
+        except Stopped as exc:
+            raise WorkerUnavailable("The check was stopped before it finished.") from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise WorkerUnavailable(f"Couldn't run `{self.spec.command} --help`: {exc}") from exc
         missing = [flag for flag in self.spec.required_flags if flag not in proc.stdout + proc.stderr]

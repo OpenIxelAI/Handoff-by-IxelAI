@@ -1,6 +1,6 @@
 name: checks
 
-# The fast test suites, on every pull request and every push to main: Linux on the oldest
+# The lint and the fast test suites, on every pull request and every push to main: Linux on the oldest
 # Python Handoff supports, and Windows, where it's used most. GitHub Actions is free for
 # public repositories. The full run (installers on several systems, macOS, the live worker
 # sandbox tests) stays in tests.yml, started by hand.
@@ -19,6 +19,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: python -m ruff check .
+
   pytest:
     name: pytest (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}

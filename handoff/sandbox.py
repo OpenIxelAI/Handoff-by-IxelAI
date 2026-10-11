@@ -29,7 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from handoff.proc import find_on_path
+from handoff.proc import Stopped, find_on_path, run_tree
 
 SYSTEM_READ_ONLY = ("/usr", "/etc", "/opt", "/nix", "/snap", "/srv")
 LIB_DIRS = ("/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32")
@@ -186,9 +186,10 @@ def check(needs: tuple[str, ...] = ()) -> str:
         raise SandboxUnavailable(f"The agent's own sandbox needs {', '.join(missing)}, which isn't installed. "
                                  f"Install it ({_install_hint(missing[0])}), then try again.")
     probe = _base(bwrap) + ["--", "/usr/bin/env", "true"]
-    try:
-        proc = subprocess.run(probe, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              stdin=subprocess.DEVNULL, timeout=30)
+    try:  # (through run_tree, so Ctrl+C's stop_all stops it on whatever thread it runs)
+        proc = run_tree(probe, "", dict(os.environ), 30.0)
+    except Stopped as exc:
+        raise SandboxUnavailable("The sandbox check was stopped before it finished.") from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise SandboxUnavailable(f"bubblewrap didn't start: {exc}") from exc
     if proc.returncode != 0:

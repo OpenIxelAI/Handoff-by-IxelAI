@@ -54,3 +54,10 @@ def test_overlap_check_is_bounded_on_hostile_patterns():
     started = time.perf_counter()
     overlaps(normalize_path(a), normalize_path(b))
     assert time.perf_counter() - started < 2.0
+
+
+def test_an_overlap_is_worked_out_once_whichever_way_round():
+    from handoff.globs import _overlaps
+    _overlaps.cache_clear()
+    assert overlaps("src/*.py", "src/api.py") and overlaps("src/api.py", "src/*.py")
+    assert (_overlaps.cache_info().misses, _overlaps.cache_info().hits) == (1, 1)

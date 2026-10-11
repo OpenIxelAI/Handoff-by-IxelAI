@@ -27,8 +27,8 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from cli_capture import CaptureServer, has_tool_results, offered_tools
+
 from handoff.board import HUMAN, Board
 from handoff.worker import CLAUDE_TOOLS, Worker
 
@@ -171,7 +171,7 @@ def test_the_worker_keeps_claude_in_its_worktree(tmp_path, monkeypatch):
 def test_worker_refuses_a_claude_without_restricted_mode(tmp_path, monkeypatch):
     # A CLI whose --help lacks the lock-down flags (an old or different release) must not be run
     fake = tmp_path / "claude"
-    fake.write_text(f'#!/bin/sh\necho "Usage: claude [options] --tools --permission-mode"\n', encoding="utf-8")
+    fake.write_text('#!/bin/sh\necho "Usage: claude [options] --tools --permission-mode"\n', encoding="utf-8")
     fake.chmod(0o755)
     monkeypatch.delenv("HANDOFF_DEPTH", raising=False)
     from handoff.worker import WorkerUnavailable

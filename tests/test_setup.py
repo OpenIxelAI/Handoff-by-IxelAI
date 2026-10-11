@@ -249,7 +249,8 @@ def test_a_config_is_never_readable_by_others_even_while_it_is_written(fake_home
     assert seen == {".config.toml.handoff-tmp": 0o600}
     assert outside.read_text(encoding="utf-8") == "mine\n"  # never written through the link
     config = fake_home / ".codex" / "config.toml"
-    assert stat.S_IMODE(config.stat().st_mode) == 0o600 and "[mcp_servers.handoff]" in config.read_text(encoding="utf-8")
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert "[mcp_servers.handoff]" in config.read_text(encoding="utf-8")
 
 
 def test_a_longer_codex_timeout_you_set_is_kept(fake_home):
@@ -552,7 +553,7 @@ def test_gemini_opencode_and_grok_are_added_keeping_everything_else(three_apps):
     data = json.loads(opencode.read_text(encoding="utf-8"))
     command, args = hosts.server_args("opencode")
     assert data["mcp"]["handoff"] == {"type": "local", "command": [command, *args], "enabled": True,
-                                      "timeout": hosts.JSON_TOOL_TIMEOUT_MS}  # each tool call: a panel review takes minutes
+                                      "timeout": hosts.JSON_TOOL_TIMEOUT_MS}  # per call: a panel review takes minutes
     assert args[-2:] == ["--as", "opencode"] and Path(command).is_absolute()
     assert data["model"] == "xai/grok-code" and data["mcp"]["docs"]["type"] == "remote"
 
@@ -641,8 +642,8 @@ def test_setup_prints_gemini_opencode_and_grok(tmp_path):
 def test_a_jsonc_file_with_handoff_in_it_is_read_but_not_rewritten(three_apps):
     gemini, opencode, _ = three_apps
     command, args = hosts.server_args("opencode")
-    jsonc = ('{\n  // mine\n  "mcp": {\n    /* Handoff */ "handoff": {"type": "local", "command": %s, "enabled": true,},\n'
-             '  },\n}\n' % json.dumps([command, *args]))
+    jsonc = ('{\n  // mine\n  "mcp": {\n    /* Handoff */ "handoff": {"type": "local", "command": %s, '
+             '"enabled": true,},\n  },\n}\n' % json.dumps([command, *args]))
     opencode.write_text(jsonc, encoding="utf-8")
     ok, detail = hosts.configured("opencode")
     assert ok and detail.endswith("--as opencode")  # doctor reads it

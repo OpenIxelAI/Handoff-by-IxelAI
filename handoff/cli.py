@@ -45,8 +45,8 @@ err_console = Console(stderr=True, highlight=False)
 
 # (usage, what it does). `handoff help` shows them under GROUPS
 COMMANDS = [
-    ("handoff board [--all] [--status S] [--assignee NAME] [--watch]", "Who's doing what, and what's blocked"),
-    ("handoff show T-12", "One task with its full history (or just: handoff T-12)"),
+    ("handoff board [--all] [--status S] [--assignee NAME] [--watch] [--json]", "Who's doing what, and what's blocked"),
+    ("handoff show T-12 [--json]", "One task with its full history (or just: handoff T-12)"),
     ('handoff add "title" [--to NAME] [--body TEXT] [--accept CHECK]...', "Add a task (and assign it)"),
     ("handoff assign T-12 NAME", "Give a task to claude, codex, me… (or nobody)"),
     ('handoff note T-12 "text"', "Add a note to a task"),
@@ -64,10 +64,11 @@ COMMANDS = [
     ("handoff agents", "Who can take tasks here: changing files, answering, reviewing, pictures"),
     ("handoff approve T-12 AGENT [--kind edit|answer|review|image]", "Let an agent run a task, once"),
     ("handoff run [T-12 ...]", "Run approved tasks now, side by side"),
-    ("handoff worker --agent claude|codex [--once] [--share FOLDER]", "Run approved tasks headlessly, each in its own worktree"),
+    ("handoff worker --agent claude|codex [--once] [--share FOLDER]",
+     "Run approved tasks headlessly, each in its own worktree"),
     ("handoff setup [--write|--remove] [--host HOST]", "Connect Claude Code, Codex and Claude Desktop (or take "
                                                         "Handoff out of them)"),
-    ("handoff doctor", "Check the board, the project and the apps"),
+    ("handoff doctor [--json]", "Check the board, the project and the apps"),
     ("handoff done-rule [review_or_reason|review|any]", "When agents may mark tasks done"),
     ("handoff keep [DAYS|forever]", "How long this board keeps finished tasks"),
     ("handoff update [--check]", "Get the latest Handoff and reinstall it"),
@@ -101,7 +102,7 @@ FLAGS = {"--version": "version", "-v": "version", "--help": "help", "-h": "help"
 # What each command's --help ends with; the first one is also the example a usage error shows
 EXAMPLES = {
     "board": ["handoff board", "handoff board --all", "handoff board --assignee codex --watch"],
-    "show": ["handoff show T-3", "handoff T-3"],
+    "show": ["handoff show T-3", "handoff T-3", "handoff show T-3 --json"],
     "add": ['handoff add "Fix the login page" --to codex',
             'handoff add "Write the release notes" --accept "Mentions the new API"'],
     "assign": ["handoff assign T-3 codex", "handoff assign T-3 me", "handoff assign T-3 nobody"],
@@ -124,7 +125,7 @@ EXAMPLES = {
     "run": ["handoff run", "handoff run T-3 T-4"],
     "worker": ["handoff worker --agent claude", "handoff worker --agent codex --once"],
     "setup": ["handoff setup", "handoff setup --write", "handoff setup --remove"],
-    "doctor": ["handoff doctor"],
+    "doctor": ["handoff doctor", "handoff doctor --json"],
     "done-rule": ["handoff done-rule", "handoff done-rule review"],
     "keep": ["handoff keep 30", "handoff keep forever", "handoff keep"],
     "update": ["handoff update --check", "handoff update"],
@@ -150,6 +151,8 @@ START = [
 ]
 
 CLEAN_DAYS = 30  # handoff clean removes finished tasks older than this, unless told otherwise
+WATCH_POLL_SEC = 2.0     # handoff board --watch: how often it looks for a change
+WATCH_REDRAW_SEC = 30.0  # and how long it goes without redrawing when nothing changed (the ages shown move on)
 PROJECT_HELP = "the project folder (default: the git repository containing this folder)"
 YOU = ("me", "you", "myself")  # names for the person, wherever they type a name
 NOBODY = ("nobody", "anyone", "none", "-")  # no assignee: anyone can claim it
@@ -396,9 +399,11 @@ def _board(args: argparse.Namespace, expire: bool = True):
     from handoff.board import Board
     root = _root(args)
     board = _opened = Board.open(root, expire=expire)
-    # With --json, what's printed is the JSON alone: this goes to stderr
-    _say_expired(board, err_console if getattr(args, "json", False) else console)
-    _maybe_ask_gitignore(board, root)
+    # With --json, what's printed is the JSON alone: this goes to stderr, and no question is asked
+    as_json = getattr(args, "json", False)
+    _say_expired(board, err_console if as_json else console)
+    if not as_json:
+        _maybe_ask_gitignore(board, root)
     return board
 
 
@@ -592,6 +597,13 @@ def _print_table(table) -> None:
 
 # ── board ────────────────────────────────────────────────────────────────────
 
+def _board_tasks(board, statuses: list[str] | None, assignee: str | None) -> list:
+    """The tasks the flags select, in the table's order: by status, newest first within one."""
+    tasks = board.tasks(statuses=statuses, assignee=assignee)
+    tasks.sort(key=lambda t: STATUS_ORDER.index(t.status))  # stable: newest first within a status
+    return tasks
+
+
 def _board_parts(board, root: Path, statuses: list[str] | None,
                  assignee: str | None) -> tuple[list[Text], Table | None]:
     """The board's header lines, and its table (None when no task matches)."""
@@ -600,8 +612,7 @@ def _board_parts(board, root: Path, statuses: list[str] | None,
     from handoff.sanitize import clean_line
     from handoff.timefmt import ago
 
-    tasks = board.tasks(statuses=statuses, assignee=assignee)
-    tasks.sort(key=lambda t: STATUS_ORDER.index(t.status))  # stable: newest first within a status
+    tasks = _board_tasks(board, statuses, assignee)
     last = board.last_events((t.id for t in tasks), skip=("claim_paths", "release_paths"))
     counts = board.counts()
     active = sum(n for s, n in counts.items() if s in ACTIVE)
@@ -653,6 +664,8 @@ def _print_board(board, root: Path, statuses: list[str] | None, assignee: str | 
 
 
 def cmd_board(argv: list[str]) -> int:
+    import json
+
     from handoff.board import ACTIVE, STATUSES, check_name
 
     parser = _parser("board", "Show the board: who's doing what, what's blocked, what's waiting for review.",
@@ -662,11 +675,20 @@ def cmd_board(argv: list[str]) -> int:
                         help=f"only tasks with this status: {_or(STATUSES)}")
     parser.add_argument("--assignee", metavar="NAME", help="only tasks assigned to NAME (me for yours)")
     parser.add_argument("--watch", action="store_true", help="keep refreshing (Ctrl+C to stop)")
+    parser.add_argument("--json", action="store_true", help="print it as JSON")
     args = parser.parse_args(argv)
+    if args.json and args.watch:
+        parser.error("--json and --watch don't go together")
     statuses = [args.status] if args.status else (None if args.all else sorted(ACTIVE))
     assignee = check_name(_person(args.assignee), "--assignee") if args.assignee else None
     root = _root(args)
     board = _board(args)
+    if args.json:  # the same data the Ixel window reads (api.py's `board`), over the tasks the flags select
+        from handoff.api import board_summary
+        revision = board.revision()  # before the tasks, so a change between the two shows on the next look
+        summary = board_summary(board, root, _board_tasks(board, statuses, assignee), revision)
+        print(json.dumps({"exists": True, **summary}, indent=2))
+        return 0
     if not args.watch:
         _print_board(board, root, statuses, assignee)
         return 0
@@ -674,20 +696,28 @@ def cmd_board(argv: list[str]) -> int:
         shown = None
         try:
             while True:
-                if board.revision() != shown:
-                    shown = board.revision()
+                revision = board.revision()
+                if revision != shown:
+                    shown = revision
                     _print_board(board, root, statuses, assignee)
-                time.sleep(2)
+                time.sleep(WATCH_POLL_SEC)
         except KeyboardInterrupt:
             pass
         return 0
 
     from rich.live import Live
     try:
+        shown, waited = board.revision(), 0.0
         with Live(render_board(board, root, statuses, assignee), console=console, auto_refresh=False) as live:
             while True:
-                time.sleep(2)
-                live.update(render_board(board, root, statuses, assignee), refresh=True)
+                time.sleep(WATCH_POLL_SEC)
+                waited += WATCH_POLL_SEC
+                revision = board.revision()
+                # Redrawn when the board changes (revision() is one cheap query), and now and then anyway, so
+                # the ages in the Updated column keep up
+                if revision != shown or waited >= WATCH_REDRAW_SEC:
+                    shown, waited = revision, 0.0
+                    live.update(render_board(board, root, statuses, assignee), refresh=True)
     except KeyboardInterrupt:
         pass
     return 0
@@ -794,6 +824,8 @@ def _history(events) -> list:
 
 
 def cmd_show(argv: list[str]) -> int:
+    import json
+
     from handoff.board import task_ref
     from handoff.project import board_path
     from handoff.sanitize import clean_line, clean_text
@@ -801,12 +833,18 @@ def cmd_show(argv: list[str]) -> int:
 
     parser = _parser("show", "Show one task with its full history. handoff T-12 on its own does the same.")
     parser.add_argument("task", metavar="T-12", help="the task: T-12, t12 or just 12")
+    parser.add_argument("--json", action="store_true", help="print it as JSON")
     args = parser.parse_args(argv)
     task_id = _task_id(args.task)
-    if not board_path(_root(args)).exists():  # looking at a task never makes a board
+    root = _root(args)
+    if not board_path(root).exists():  # looking at a task never makes a board
         raise CommandError(f"This project has no board yet, so there's no task {task_ref(task_id)}.\nAdd one with: "
                            + _with_project('handoff add "title"', args))
     board = _board(args)
+    if args.json:  # the same data the Ixel window reads (api.py)
+        from handoff.api import task_detail
+        print(json.dumps(task_detail(board, root, task_id), indent=2))
+        return 0
     task, events, claims, children = board.task_with_history(task_id)
 
     console.print()
@@ -1580,7 +1618,8 @@ def _depth_guard() -> None:
 
 
 def _kind_text(kind: str) -> str:
-    return {"edit": "changes files", "answer": "answers", "review": "reviews", "image": "makes pictures"}.get(kind, kind)
+    return {"edit": "changes files", "answer": "answers", "review": "reviews",
+            "image": "makes pictures"}.get(kind, kind)
 
 
 def _result_line(result, agent: str) -> None:
@@ -1617,7 +1656,7 @@ def _run_and_report(board, root: Path, pairs, roster=None, as_json: bool = False
     return [{"task": r.task.ref, "agent": agents.get(r.task.id, ""), "ok": r.ok, "message": r.message,
              **({"branch": r.branch} if r.branch else {})} for r in results if r is not None] + \
         [{"task": task.ref, "agent": agents[task.id], "ok": False, "message": "It was still running when Handoff "
-          "stopped."} for (task, _), r in zip(pairs, results) if r is None]
+          "stopped."} for (task, _), r in zip(pairs, results, strict=True) if r is None]
 
 
 def cmd_dispatch(argv: list[str]) -> int:
@@ -1791,7 +1830,7 @@ def cmd_agents(argv: list[str]) -> int:
         console.print(f"  [{C['blue']}]{escape(member.name)}[/]{label}  "
                       + (", ".join(_kind_text(k) for k in ready) if ready else f"[{C['dim']}]nothing yet[/]"),
                       soft_wrap=True)
-        for kind, note in member.notes.items():
+        for note in member.notes.values():
             console.print(f"      [{C['gold']}]⚠[/] [{C['dim']}]{escape(note)}[/]", soft_wrap=True)
         for kind, why in member.kinds.items():
             if why:
@@ -1969,6 +2008,7 @@ def _setup_remove(wanted: list[str]) -> int:
 # ── doctor ───────────────────────────────────────────────────────────────────
 
 def cmd_doctor(argv: list[str]) -> int:
+    import json
     import os
     import platform
     import sqlite3
@@ -1978,16 +2018,27 @@ def cmd_doctor(argv: list[str]) -> int:
     from handoff.project import ProjectError, board_path, gitignore_has_board, resolve_project
 
     parser = _parser("doctor", "Check the project, the board and which apps have Handoff set up.")
+    parser.add_argument("--json", action="store_true", help="print it as JSON")
     args = parser.parse_args(argv)
     problems = 0
+    checks: list[dict] = []  # with --json, every line, printed as one JSON at the end
 
     def line(mark: str, what: str, detail: str = "") -> None:
+        if args.json:
+            status = {"✓": "ok", "⚠": "warning", "✗": "problem", "–": "none"}[mark]
+            checks.append({"status": status, "what": what, "detail": detail})
+            return
         color = {"✓": C["green"], "⚠": C["gold"], "✗": C["red"], "–": C["dim"]}[mark]
         # soft_wrap: the terminal wraps long lines, so a command in `detail` pastes as one line
         console.print(f"  [{color}]{mark}[/] {escape(what)}" + (f"  [{C['dim']}]{escape(detail)}[/]" if detail else ""),
                       soft_wrap=True)
 
-    print_banner()
+    def gap() -> None:
+        if not args.json:
+            console.print()
+
+    if not args.json:
+        print_banner()
     line("✓", f"Handoff {__version__}", f"Python {platform.python_version()} · {_shown_path(sys.executable)}")
     line("✓", f"SQLite {sqlite3.sqlite_version}")
 
@@ -2015,7 +2066,7 @@ def cmd_doctor(argv: list[str]) -> int:
                 kept = "forever" if board.keep_days is None else _plural(board.keep_days, "day")
                 line("✓", "Board", f"{_shown_path(path)} · {_plural(sum(counts.values()), 'task')} · "
                                    f"done rule: {board.done_rule} · finished tasks kept {kept}")
-                _say_expired(board)
+                _say_expired(board, err_console if args.json else console)
                 unreadable = board.unreadable()
                 if unreadable:
                     line("⚠", f"{_plural(unreadable, 'task')} on the board can't be read",
@@ -2035,7 +2086,7 @@ def cmd_doctor(argv: list[str]) -> int:
         else:
             line("⚠", "The board isn't in .gitignore", "add a .handoff/ line, or run any handoff command here")
 
-    console.print()
+    gap()
     for host in hosts.HOSTS:
         label = hosts.HOST_LABELS[host]
         if not hosts.installed(host):
@@ -2067,7 +2118,7 @@ def cmd_doctor(argv: list[str]) -> int:
                 line("✓", "Claude Code's session hook", "it hears which tasks wait for it when a session starts")
 
     from handoff import ixel
-    console.print()
+    gap()
     ixel_cmd = ixel.find_ixel()
     if ixel_cmd:
         line("✓", "Ixel", f"{_shown_path(ixel_cmd)}; reviews can ask the panel (handoff_review panel=true), and "
@@ -2090,7 +2141,9 @@ def cmd_doctor(argv: list[str]) -> int:
                 line("✓", f"Worker ({agent})", f"ready, in its sandbox: handoff approve T-12 {agent}")
         except WorkerUnavailable as exc:
             line("–", f"Worker ({agent})", str(exc))
-    console.print()
+    gap()
+    if args.json:
+        print(json.dumps({"handoff_version": __version__, "problems": problems, "checks": checks}, indent=2))
     return 1 if problems else 0
 
 

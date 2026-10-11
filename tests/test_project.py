@@ -1,8 +1,14 @@
 """Finding the project root, and the opt-in .gitignore line."""
 import pytest
 
-from handoff.project import (ProjectError, add_board_to_gitignore, board_path, find_project_root,
-                             gitignore_has_board, resolve_project)
+from handoff.project import (
+    ProjectError,
+    add_board_to_gitignore,
+    board_path,
+    find_project_root,
+    gitignore_has_board,
+    resolve_project,
+)
 
 
 def make_repo(path):

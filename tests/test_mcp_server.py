@@ -1,19 +1,23 @@
 """`handoff mcp`: the tools, framing and fencing, identity rules, and the real stdio protocol."""
 import asyncio
 import os
+import re
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 
 import mcp
 import pytest
 from mcp.client.stdio import StdioServerParameters
 
-from handoff import fence
+from handoff import fence, hosts, mcp_server
 from handoff.board import Board, BoardError
-from handoff.mcp_server import FRAME, build_server, identity_mismatch
+from handoff.fence import FRAME
+from handoff.mcp_server import build_server, identity_mismatch
 
-READ_TOOLS = {"handoff_inbox", "handoff_board", "handoff_get"}
+READ_TOOLS = {"handoff_inbox", "handoff_wait", "handoff_board", "handoff_get"}
 WRITE_TOOLS = {"handoff_create", "handoff_claim", "handoff_note", "handoff_pass", "handoff_request_review",
                "handoff_review", "handoff_status"}
 
@@ -51,6 +55,8 @@ def test_tools_and_annotations(tmp_path):
     assert set(tools) == READ_TOOLS | WRITE_TOOLS
     for name, tool in tools.items():
         assert tool.annotations.read_only_hint is (name in READ_TOOLS), name
+        # waiting reads only, but what it answers depends on when it's called
+        assert tool.annotations.idempotent_hint is (name in READ_TOOLS - {"handoff_wait"}), name
         assert tool.annotations.destructive_hint is False, name
         assert "ctx" not in tool.input_schema.get("properties", {}), name
     assert tools["handoff_review"].input_schema["properties"]["verdict"]["enum"] == ["approve", "changes"]
@@ -275,8 +281,9 @@ def test_bad_input_is_a_tool_error(tmp_path):
 def test_no_project_says_how_to_fix_it(tmp_path):
     async def go():
         async with mcp.Client(build_server("claude", None, "No project found: pass --project PATH.")) as claude:
-            return await fail(claude, "handoff_inbox")
-    assert "--project PATH" in run(go())
+            return await fail(claude, "handoff_inbox"), await fail(claude, "handoff_wait", {"timeout_seconds": 1})
+    for text in run(go()):
+        assert "--project PATH" in text
 
 
 def test_identity_mismatch():
@@ -285,6 +292,129 @@ def test_identity_mismatch():
     assert not identity_mismatch("claude", "claude-code")
     assert not identity_mismatch("codex", "codex-mcp-client")
     assert not identity_mismatch("gemini", "claude-code") and not identity_mismatch("claude", None)
+
+
+# ── Waiting for a handoff ────────────────────────────────────────────────────
+
+@pytest.fixture
+def quick_poll(monkeypatch):
+    monkeypatch.setattr(mcp_server, "WAIT_POLL_SEC", 0.02)
+
+
+class Later:
+    """What the other app does `seconds` after start(), on its own thread with its own connection to the board.
+    finish() waits for it and raises whatever it raised, so a failure there fails the test."""
+
+    def __init__(self, seconds, fn):
+        self.error = None
+
+        def go():
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001 — finish() raises it on the test's thread
+                self.error = exc
+        self.timer = threading.Timer(seconds, go)
+
+    def start(self):
+        self.timer.start()
+
+    def finish(self):
+        if self.timer.ident is not None:
+            self.timer.join()
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.mark.parametrize("timeout", [5, 100000])  # 100000 is over the most it waits: clamped, not refused
+def test_wait_returns_when_a_task_arrives(tmp_path, quick_poll, timeout):
+    arrival = Later(0.1, lambda: Board.open(tmp_path).create("claude", "Write the tests", assignee="codex"))
+
+    async def go():
+        async with mcp.Client(build_server("codex", tmp_path)) as codex:
+            arrival.start()
+            return await call(codex, "handoff_wait", {"timeout_seconds": timeout})
+    try:
+        text = run(go())
+    finally:
+        arrival.finish()
+    # It quotes the board, so it opens with the frame like every other response that does
+    assert text.startswith(FRAME)
+    assert re.search(r"^# Handoffs for codex\n\nYour inbox changed after \d+ seconds?\.\n", text, re.M)
+    assert "Write the tests" in text and "T-1 · open · from claude" in text
+
+
+def test_wait_gives_up_after_the_timeout(tmp_path, quick_poll):
+    async def go():
+        async with mcp.Client(build_server("codex", tmp_path)) as codex:
+            started = time.monotonic()
+            return await call(codex, "handoff_wait", {"timeout_seconds": 1}), time.monotonic() - started
+    text, took = run(go())
+    assert text == ("Nothing new for codex after 1 second. Call handoff_wait again to keep waiting, or "
+                    "handoff_inbox to read what's there now.\n")
+    assert took >= 1
+
+
+def test_wait_ignores_changes_that_aren_t_for_you(tmp_path, quick_poll):
+    async def go():
+        claude_server, codex_server = pair(tmp_path)
+        async with mcp.Client(claude_server) as claude, mcp.Client(codex_server) as codex:
+            async def meanwhile():
+                await asyncio.sleep(0.1)
+                await call(claude, "handoff_create", {"title": "Mine", "assignee": "claude"})
+                await call(claude, "handoff_note", {"task_id": "T-1", "text": "Halfway"})
+                # the waiting server still answers its other requests
+                return await call(codex, "handoff_board"), time.monotonic()
+
+            async def waiting():
+                return await call(codex, "handoff_wait", {"timeout_seconds": 1}), time.monotonic()
+            return await asyncio.gather(waiting(), meanwhile())
+    (text, wait_ended), (board, board_answered) = run(go())
+    assert text.startswith("Nothing new for codex after 1 second.")
+    assert "| T-1 | in_progress | claude | Mine |" in board and board_answered < wait_ended
+
+
+def test_wait_ignores_another_agent_taking_a_task_from_the_pool(tmp_path, quick_poll):
+    # The task leaves codex's inbox, but nothing arrived for codex
+    Board.open(tmp_path).create("claude", "Anyone's task")
+    taken = Later(0.1, lambda: Board.open(tmp_path).claim("claude", 1))
+
+    async def go():
+        async with mcp.Client(build_server("codex", tmp_path)) as codex:
+            taken.start()
+            return await call(codex, "handoff_wait", {"timeout_seconds": 1})
+    try:
+        text = run(go())
+    finally:
+        taken.finish()
+    assert text.startswith("Nothing new for codex after 1 second.")
+    assert Board.open(tmp_path).get(1).assignee == "claude"
+
+
+def test_wait_sees_a_note_made_in_the_same_second(tmp_path, quick_poll):
+    # The clock never moves, so the task's updated_at doesn't either: the note's event is what shows it
+    def clock():
+        return "2026-01-01T00:00:00Z"
+    Board.open(tmp_path, clock=clock).create("claude", "Write the tests", assignee="codex")
+    noted = Later(0.1, lambda: Board.open(tmp_path, clock=clock).note("human", 1, "Use the staging data"))
+
+    async def go():
+        async with mcp.Client(build_server("codex", tmp_path, clock=clock)) as codex:
+            noted.start()
+            return await call(codex, "handoff_wait", {"timeout_seconds": 5})
+    try:
+        text = run(go())
+    finally:
+        noted.finish()
+    assert text.startswith(FRAME) and "Your inbox changed after" in text and "Use the staging data" in text
+
+
+def test_wait_timeout_is_clamped(tmp_path, quick_poll):
+    assert mcp_server.WAIT_MAX_SEC < hosts.CODEX_TOOL_TIMEOUT  # or the app gives up on the call before it ends
+
+    async def go():
+        async with mcp.Client(build_server("codex", tmp_path)) as codex:
+            return await call(codex, "handoff_wait", {"timeout_seconds": 0})
+    assert "Nothing new for codex after 1 second." in run(go())
 
 
 # ── Framing and fencing ──────────────────────────────────────────────────────
@@ -378,6 +508,21 @@ def test_two_stdio_servers_share_one_board(tmp_path):
     assert "Write the tests" in codex_inbox and "pytest passes" in codex_inbox
     assert "codex handed it to claude" in claude_inbox and "Done: Tests written ✓" in claude_inbox
     assert (project / ".handoff" / "board.db").exists()
+
+
+def test_claiming_a_blocked_task_nobody_has_says_what_to_do(tmp_path):
+    async def go():
+        board = Board.open(tmp_path)
+        task, _ = board.create("human", "Needs the keys")
+        board.set_status("human", task.id, "blocked", "Waiting for the API keys")
+        async with mcp.Client(build_server("codex", tmp_path)) as codex:
+            text = await call(codex, "handoff_claim", {"task_id": "T-1"})
+            assert "T-1 is yours (blocked)" in text and "Waiting for the API keys" in text
+            assert "handoff_status (status open)" in text
+            await call(codex, "handoff_status", {"task_id": "T-1", "status": "open"})
+        return board.get(task.id)
+    task = run(go())
+    assert task.status == "open" and task.assignee == "codex"
 
 
 def test_stdio_server_without_a_project_explains(tmp_path):

@@ -915,9 +915,9 @@ def test_piped_output_keeps_paths_and_help_whole(tmp_path):
 
 def test_long_text_in_the_cli_has_no_long_lines_or_dashes():
     # The help reads well at 80 columns; new prose doesn't use em-dashes
-    for usage, what in cli.COMMANDS:
+    for _, what in cli.COMMANDS:
         assert len("        " + what) <= 88, what
-    for usage, what in cli.START:
+    for _, what in cli.START:
         assert len("        " + what) <= 80 and "—" not in what
     assert "—" not in cli._aliases_line()
 
@@ -1058,8 +1058,10 @@ def test_an_agent_handoff_started_can_t_act_as_you(project, capsys, monkeypatch)
 
 def test_a_missing_reason_or_review_text_says_what_to_type(project, capsys):
     run(capsys, "add", "Task")
-    for args, said in ((["status", "T-1", "blocked"], 'Say why it\'s blocked: handoff status T-1 blocked --reason "'),
-                       (["review", "T-1", "changes"], 'Say what to change: handoff review T-1 changes "what to change"')):
+    for args, said in ((["status", "T-1", "blocked"],
+                        'Say why it\'s blocked: handoff status T-1 blocked --reason "'),
+                       (["review", "T-1", "changes"],
+                        'Say what to change: handoff review T-1 changes "what to change"')):
         with pytest.raises(SystemExit) as stopped:
             cli.main(args)
         assert stopped.value.code == 2 and said in capsys.readouterr().err
@@ -1079,3 +1081,146 @@ def test_watch_prints_the_board_when_output_is_not_a_terminal(project, capsys, m
     code, out, _ = run(capsys, "board", "--watch")
     assert code == 0 and out.count("Watched task") == 2 and out.count("Another task") == 1
 
+
+def test_watch_in_a_terminal_redraws_only_when_the_board_changes(project, capsys, monkeypatch):
+    run(capsys, "add", "Watched task")
+    monkeypatch.setattr(cli, "console", Console(width=200, highlight=False, force_terminal=True))
+    naps, updates = [], []
+
+    class FakeLive:
+        def __init__(self, renderable, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def update(self, renderable, refresh=False):
+            drawn = Console(width=200)
+            with drawn.capture() as page:
+                drawn.print(renderable)
+            updates.append((len(naps), page.get()))
+
+    def nap(seconds):
+        naps.append(seconds)
+        if len(naps) == 1:
+            cli.main(["add", "Another task"])  # the board changes: one redraw
+        elif len(naps) == 4:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(cli.time, "sleep", nap)
+    monkeypatch.setattr("rich.live.Live", FakeLive)
+    code, _, _ = run(capsys, "board", "--watch")
+    assert code == 0 and len(naps) == 4
+    assert [n for n, _ in updates] == [1]  # the change, and nothing on the two looks that found none
+    assert "Another task" in updates[0][1]
+
+
+# ── --json, for scripts and other tools ──────────────────────────────────────
+
+def test_board_json_is_what_the_window_reads(project, capsys):
+    import json
+    run(capsys, "add", "Fix the login page", "--to", "codex")
+    run(capsys, "add", "Finished one")
+    run(capsys, "done", "T-2")
+    code, out, _ = run(capsys, "board", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["counts"] == {"open": 1, "done": 1} and data["project"] == str(project)
+    from handoff import api
+    window = api.op_board({"project": str(project)})
+    assert data["exists"] is True and set(data) == set(window) and data["revision"] == window["revision"]
+    assert data["revision"] and data["unreadable"] == 0 and data["done_rule"] == "review_or_reason"
+    [task] = data["tasks"]
+    assert (task["ref"], task["status"], task["assignee"], task["title"]) == ("T-1", "open", "codex",
+                                                                             "Fix the login page")
+    code, out, _ = run(capsys, "board", "--json", "--status", "done")
+    assert code == 0 and [(t["ref"], t["status"]) for t in json.loads(out)["tasks"]] == [("T-2", "done")]
+    code, out, _ = run(capsys, "board", "--json", "--all")
+    assert [t["ref"] for t in json.loads(out)["tasks"]] == ["T-1", "T-2"]  # the table's order: by status
+    code, out, _ = run(capsys, "board", "--json", "--assignee", "codex")
+    assert [t["ref"] for t in json.loads(out)["tasks"]] == ["T-1"]
+
+
+def test_board_json_reads_the_revision_before_the_tasks(project, capsys, monkeypatch):
+    # A change landing while it reads the tasks isn't in them, so the revision mustn't have it either: the
+    # next look would take the board as unchanged and never show it
+    import json
+    run(capsys, "add", "First")
+    read_tasks = cli._board_tasks
+
+    def tasks_then_a_change(board, statuses, assignee):
+        found = read_tasks(board, statuses, assignee)
+        board.create("human", "Landed in between")
+        return found
+    monkeypatch.setattr(cli, "_board_tasks", tasks_then_a_change)
+    code, out, _ = run(capsys, "board", "--json")
+    data = json.loads(out)
+    assert code == 0 and [t["title"] for t in data["tasks"]] == ["First"]
+    assert data["revision"] != Board.open(project).revision()
+
+
+def test_show_json_has_the_task_and_its_history(project, capsys):
+    import json
+    run(capsys, "add", "Fix the login page", "--body", "It fails on Safari", "--accept", "works on Safari")
+    run(capsys, "note", "T-1", "Only on Safari 17")
+    code, out, _ = run(capsys, "show", "T-1", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["task"]["ref"] == "T-1" and data["task"]["body"] == "It fails on Safari"
+    assert data["task"]["acceptance"] == ["works on Safari"]
+    assert [e["kind"] for e in data["events"]] == ["created", "note"]
+    assert data["events"][1]["text"] == "Only on Safari 17"
+    assert run(capsys, "1", "--json")[1] == out  # handoff T-1 --json is the same
+    code, out, err = run(capsys, "show", "T-9", "--json")
+    assert code == 1 and out == "" and "There's no task T-9" in err
+
+
+def test_doctor_json_is_only_json(project, capsys, monkeypatch, tmp_path):
+    import json
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    run(capsys, "add", "Task")
+    code, out, _ = run(capsys, "doctor", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["handoff_version"] == cli.__version__ and data["problems"] == 0
+    assert data["checks"] and all(set(check) == {"status", "what", "detail"} for check in data["checks"])
+    assert {check["status"] for check in data["checks"]} <= {"ok", "warning", "problem", "none"}
+    board = next(check for check in data["checks"] if check["what"] == "Board")
+    assert board["status"] == "ok" and "1 task" in board["detail"] and "done rule: review_or_reason" in board["detail"]
+
+
+def test_doctor_json_counts_the_problems(tmp_path, capsys, monkeypatch):
+    import json
+    monkeypatch.chdir(tmp_path)  # not a project
+    code, out, _ = run(capsys, "doctor", "--json")
+    data = json.loads(out)
+    assert code == 1 and data["problems"] == 1
+    project = next(check for check in data["checks"] if check["what"] == "Project")
+    assert project["status"] == "problem" and "isn't inside a git repository" in project["detail"]
+
+
+def test_board_json_and_watch_dont_go_together(project, capsys):
+    err = usage_error(capsys, "board", "--json", "--watch")
+    assert "--json and --watch don't go together" in err
+
+
+@pytest.mark.parametrize("command", ["board", "doctor"])
+def test_json_keeps_stdout_for_the_json_alone(project, no_inner_gitignore, capsys, monkeypatch, tmp_path, command):
+    import json
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli.console, "input", lambda prompt="": pytest.fail(f"asked: {prompt}"))
+    board = Board.open(project)
+    task, _ = board.create("human", "Old")
+    board.set_status("human", task.id, "done", "finished")
+    board.set_keep_days("human", 30)
+    _age(project, task.id)
+    # Opening the board removes T-1: that's said on stderr, and nothing asks about .gitignore
+    code, out, err = run(capsys, command, "--json")
+    data = json.loads(out)
+    assert "Removed T-1" in err
+    if command == "board":
+        assert code == 0 and data["tasks"] == []
+    else:
+        assert data["checks"] and code == (1 if data["problems"] else 0)
