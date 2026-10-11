@@ -242,18 +242,21 @@ def test_handoff_merge_from_the_command_line(board, repo, current, monkeypatch, 
 
 # ── What a task's branch may not do to your checkout (found by an adversarial review) ──
 
-def test_an_ignored_file_of_yours_is_never_overwritten(board, repo):
+@pytest.mark.parametrize("path", [".env", ".env/README", ".env/deeper/README"])
+def test_an_ignored_file_of_yours_is_never_overwritten(board, repo, path):
     (repo / ".gitignore").write_text(".env\n", encoding="utf-8")
     commit(repo, "ignore .env")
     (repo / ".env").write_text("MINE=1\n", encoding="utf-8")
-    # The agent empties .gitignore in its worktree and commits its own .env
+    # The agent empties .gitignore in its worktree and commits its own .env, or a folder named .env that git
+    # would delete the person's file to make room for
     task, _ = board.create(HUMAN, "Settings", "x")
     board.approve(HUMAN, task.id, "claude")
     [(_, approval)] = board.pending_runs("claude", [task.id])
     folder = repo / ".handoff" / "worktrees" / task.ref
     git(repo, "worktree", "add", "-b", f"handoff/{task.ref}", str(folder))
     (folder / ".gitignore").write_text("", encoding="utf-8")
-    (folder / ".env").write_text("AGENT=1\n", encoding="utf-8")
+    (folder / path).parent.mkdir(parents=True, exist_ok=True)
+    (folder / path).write_text("AGENT=1\n", encoding="utf-8")
     commit(folder, "settings")
     tip = head(folder)
     board.start_run("claude", task.id, approval.id, {"branch": f"handoff/{task.ref}"})

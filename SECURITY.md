@@ -139,8 +139,8 @@ It refuses, changing nothing, when:
 - your checkout is detached, has a task's branch out, has uncommitted changes to tracked files, or is in
   the middle of a merge, rebase, cherry-pick or revert (a failed merge is aborted only when it's Handoff's own);
 - the branch would change Handoff's board folder (`.handoff`); the worker never commits one either;
-- it would replace a file of yours git doesn't track. Git overwrites ignored files (an `.env`, local app
-  settings) without asking, so Handoff checks each one first;
+- it would replace a file of yours git doesn't track, or put a folder where one is. Git overwrites ignored
+  files (an `.env`, local app settings) without asking, so Handoff checks each one first;
 - it writes through a link in your checkout;
 - it changes `.gitattributes`, `.lfsconfig` or `.gitmodules`, which tell git what to run on your computer.
   Merge those yourself after a look. The merge itself never runs Git LFS's download, so a branch can't make

@@ -496,6 +496,15 @@ def _incoming_problem(root: Path, commit: str) -> str | None:
             links.append(name)
         elif name not in tracked and os.path.lexists(root / name):
             mine.append(name)
+        else:
+            # A file of yours where the branch puts a folder: git deletes an ignored one to make room
+            for i in range(1, len(parts)):
+                folder = "/".join(parts[:i])
+                if os.path.lexists(root / folder) and not (root / folder).is_dir():
+                    if folder not in tracked:
+                        mine.append(folder)
+                    break
+    mine = list(dict.fromkeys(mine))
     if board:
         return (f"It would change Handoff's own board folder ({', '.join(_shown(n) for n in board[:5])}), which a "
                 "task's branch never may. Look at the branch; don't merge it.")
