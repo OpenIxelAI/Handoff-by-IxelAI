@@ -161,8 +161,8 @@ def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._ru
         listed, pictures = [job.result() for job in lists] if lists else (None, None)
         ixel = asks.roster_from_lists(command, listed, pictures)
     except BaseException:
-        # Ctrl+C reaches this thread only: stop Ixel's lists rather than wait out their timeout, and leave the
-        # rest (an agent's --help) to finish on its own instead of waiting for it here
+        # Ctrl+C reaches this thread only: stop every check's program (Ixel's lists, an agent's --help, its
+        # sandbox's probe) rather than wait out their timeouts, here or when Python waits for the pool's threads
         proc.stop_all()
         pool.shutdown(wait=False, cancel_futures=True)
         raise

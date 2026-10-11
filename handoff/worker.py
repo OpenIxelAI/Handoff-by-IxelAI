@@ -530,10 +530,10 @@ class Worker:
         if not self.command:
             raise WorkerUnavailable(f"The `{self.spec.command}` command isn't on PATH, so the {self.spec.name} "
                                     "worker can't run.")
-        try:
-            proc = subprocess.run([self.command, *self.spec.help_args], capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=60,
-                                  env=agent_env(self.spec))
+        try:  # (through run_tree, so Ctrl+C's stop_all stops it on whatever thread it runs)
+            proc = run_tree([self.command, *self.spec.help_args], "", agent_env(self.spec), 60.0)
+        except Stopped as exc:
+            raise WorkerUnavailable("The check was stopped before it finished.") from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise WorkerUnavailable(f"Couldn't run `{self.spec.command} --help`: {exc}") from exc
         missing = [flag for flag in self.spec.required_flags if flag not in proc.stdout + proc.stderr]

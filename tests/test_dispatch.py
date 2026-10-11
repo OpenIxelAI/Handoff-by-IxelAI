@@ -60,9 +60,37 @@ def fake_ixel(tmp_path, monkeypatch):
         import json, os, sys
         args = sys.argv[1:]
         stdin = sys.stdin.read()
-        with open({str(log)!r}, "a", encoding="utf-8") as f:
-            f.write(json.dumps({{"argv": args, "stdin": stdin, "cwd": os.getcwd(),
-                                 "depth": os.environ.get("HANDOFF_DEPTH")}}) + "\\n")
+        # The whole line in one write: `ask --list` and `image --list` run side by side, and two appends at once
+        # mustn't tear each other's lines
+        line = (json.dumps({{"argv": args, "stdin": stdin, "cwd": os.getcwd(),
+                             "depth": os.environ.get("HANDOFF_DEPTH")}}) + "\\n").encode("utf-8")
+        def append():
+            fd = os.open({str(log)!r}, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0))
+            try:
+                os.write(fd, line)
+            finally:
+                os.close(fd)
+        if os.name == "nt":
+            # Windows appends by moving to the end and then writing, so two at once can land on the same spot
+            # and one overwrites the other: they take turns, on a lock the system lets go of if one is killed
+            import msvcrt, time
+            lock = os.open({str(log) + ".lock"!r}, os.O_RDWR | os.O_CREAT)
+            try:
+                locked = False
+                for _ in range(3000):
+                    try:
+                        msvcrt.locking(lock, msvcrt.LK_NBLCK, 1)
+                        locked = True
+                        break
+                    except OSError:
+                        time.sleep(0.01)
+                append()
+                if locked:
+                    msvcrt.locking(lock, msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(lock)
+        else:
+            append()
         def opt(name, default=None):
             return args[args.index(name) + 1] if name in args else default
         if args[:2] == ["ask", "--list"]:
@@ -111,7 +139,8 @@ def fake_ixel(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "check", _no_sandbox)  # claude runs edit-only and codex can't edit, anywhere
 
     def calls(kind=None):
-        found = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+        lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        found = [json.loads(line) for line in lines if line.strip()]
         return [c for c in found if kind is None or (c["argv"][0] == kind and "--list" not in c["argv"])]
     return calls
 
@@ -380,6 +409,108 @@ def test_ctrl_c_while_building_the_roster_stops_ixel_s_lists(tmp_path, monkeypat
         while len(noticed) < 2 and time.monotonic() < give_up:
             time.sleep(0.01)
         assert sorted(noticed) == ["ask", "image"]  # both lists were running, and both stopped
+    finally:
+        proc.allow_runs()
+
+
+def _slow_program(path: Path) -> str:
+    """A program that takes 20 seconds, started by its own path (the way Worker.check starts an agent)."""
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(20)\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def _wait_until_running(proc, programs: set[str], count: int) -> None:
+    deadline = time.monotonic() + 10
+    while sum(p.args[0] in programs for p in list(proc._running)) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="starts a #! script")
+def test_ctrl_c_stops_an_agent_s_help_check(tmp_path, monkeypatch):
+    """The checks run on the pool's threads, where Ctrl+C doesn't reach: stop_all stops their programs too."""
+    from handoff import proc
+    monkeypatch.delenv("HANDOFF_DEPTH", raising=False)
+    monkeypatch.setattr(sandbox, "check", _no_sandbox)  # claude falls back to edit-only, then runs its --help
+    slow = _slow_program(tmp_path / "bin" / "claude")
+    check = worker.Worker(None, tmp_path, "claude", command=slow)  # type: ignore[arg-type]
+    raised = []
+
+    def run():
+        try:
+            check.check()
+        except BaseException as exc:  # noqa: BLE001 — what it raised is what the test looks at
+            raised.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        _wait_until_running(proc, {slow}, 1)
+        time.sleep(0.3)
+        assert proc.stop_all() == 1  # its --help was running
+        thread.join(3)
+        assert not thread.is_alive()
+        [exc] = raised
+        assert isinstance(exc, worker.WorkerUnavailable) and str(exc) == "The check was stopped before it finished."
+    finally:
+        proc.allow_runs()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="starts #! scripts")
+@pytest.mark.parametrize("slow_part", ["sandbox probe", "help"])
+def test_ctrl_c_while_building_the_roster_stops_the_edit_checks_too(tmp_path, monkeypatch, slow_part):
+    """Left running on the pool's threads, a slow check would hold the command up after Ctrl+C until its
+    program ends (Python waits for those threads before it exits)."""
+    from concurrent.futures import Future
+
+    from handoff import proc
+    monkeypatch.delenv("HANDOFF_DEPTH", raising=False)
+    monkeypatch.setattr(asks, "find_ixel", lambda: None)  # only the edit checks run
+    bin_dir = tmp_path / "bin"
+    agents = {_slow_program(bin_dir / "claude"), _slow_program(bin_dir / "codex")}
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    if slow_part == "help":
+        bwrap = bin_dir / "bwrap"
+        bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")  # the sandbox can run: on to each --help
+        bwrap.chmod(0o755)
+        slow = agents
+    else:
+        slow = {_slow_program(bin_dir / "bwrap")}
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox, "find_bwrap", lambda: str(bin_dir / "bwrap"))
+    monkeypatch.setattr(sandbox, "find_on_path", lambda name: "/usr/bin/" + name)  # (claude's needs: socat)
+    original, ended = worker.Worker.check, []
+
+    def check(self):
+        try:
+            original(self)
+        except BaseException as exc:
+            ended.append(exc)
+            raise
+        ended.append(None)
+
+    monkeypatch.setattr(worker.Worker, "check", check)
+    result, pressed = Future.result, []
+
+    def ctrl_c(self, timeout=None):  # Ctrl+C while both checks' programs are running
+        if not pressed:
+            _wait_until_running(proc, slow, 2)
+            pressed.append(time.monotonic())
+            raise KeyboardInterrupt
+        return result(self, timeout)
+
+    monkeypatch.setattr(Future, "result", ctrl_c)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            crew.build_roster(None, tmp_path)
+        assert time.monotonic() - pressed[0] < 1
+        give_up = pressed[0] + 2
+        while len(ended) < 2 and time.monotonic() < give_up:
+            time.sleep(0.01)
+        assert len(ended) == 2, "a check was still running"
+        assert all(isinstance(exc, worker.WorkerUnavailable) for exc in ended), ended
+        assert not proc._running
     finally:
         proc.allow_runs()
 
