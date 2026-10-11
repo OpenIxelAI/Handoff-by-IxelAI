@@ -222,6 +222,43 @@ echo 'abi <abi/4.0>, profile bwrap /usr/bin/bwrap flags=(unconfined) { userns, }
 sudo apparmor_parser -r /etc/apparmor.d/bwrap
 ```
 
+### Pick the model, or a chain of models
+
+An edit runs on the agent's own default model unless you name one when you approve it:
+
+```bash
+handoff approve T-7 claude --model claude-haiku-5-5        # one model (an alias like haiku works too)
+handoff approve T-7 claude --chain claude-fable-5-1,claude-opus-5-5,claude-haiku-5-5
+handoff approve T-7 claude --chain claude-fable-5-1:max,claude-opus-5-5:high,claude-haiku-5-5
+handoff approve T-7 codex --model gpt-5.5 --effort xhigh
+```
+
+A **chain** lists models biggest first, for claude. The first one reads the task (it can read files, not change
+them) and plans up to 6 steps, giving each step to the smallest of the others that can do it well: design and
+tricky logic to the bigger ones, tests, docs and small edits to the smaller ones. Then each step runs in turn in
+the same worktree, and each is committed on its own on `handoff/T-7`, so `git log` shows which model made what.
+If a step fails, the chain stops there and keeps what the steps before it committed. The whole chain gets the
+run's time limit. `handoff dispatch "claude finish the next step" --chain ...` (or `--model`) does the same for
+claude's edits in a dispatch.
+
+**How hard each model thinks.** `--effort` sets it, in the agent's own words: claude (Claude Code's
+`--effort`) takes low, medium, high, xhigh or max; codex (its `model_reasoning_effort`) takes minimal, low,
+medium, high, xhigh, max or ultra (the newest GPT models take them all; older ones fewer). Leave it out and each model thinks as hard as it does by default. In a chain, give one
+model its own after a colon (`claude-fable-5-1:max`); `--effort` covers the models that don't have one. Effort
+costs tokens: the biggest model at max effort is the dearest part of a chain, so save it for the planning that
+needs it. Claude Code's "ultracode" isn't an effort level (it's how a session runs several agents at once), so
+the worker doesn't take it.
+
+The model, or the chain, and each model's effort are sealed into the approval with the rest, so a board can't
+move a run to a bigger, dearer model or turn one up. Codex takes `--model` too; a chain runs on claude only.
+
+**What it used.** Every claude run reports, per model, its tokens and an estimated cost at API prices (on a
+subscription, that's what it would have cost; it counts toward your plan's limits instead). It's the proof of
+which model did the work. `handoff show T-7` lists it under each run, the handback ends with it, and `handoff
+run --json` and the API (`usage` and `cost` on the task and on its runs, each task's on the board too, and the
+board's `usage` and `spent`, what its tasks' runs used and cost in all) carry it for the Ixel app. A run that was stopped (by its
+time limit or Ctrl+C) has no report, so what it used isn't counted.
+
 ## What the agents can do
 
 | Tool | What it does |

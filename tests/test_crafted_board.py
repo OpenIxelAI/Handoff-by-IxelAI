@@ -220,7 +220,8 @@ def test_json_nested_thousands_deep_is_one_bad_field_not_a_crash(tmp_path, capsy
     conn.execute("UPDATE events SET data = ? WHERE kind = 'note'", ('{"a":' * 100_000 + "1" + "}" * 100_000,))
     conn.commit()
     conn.close()
-    assert [t.title for t in board.tasks()] == ["Second", "First"] and board.unreadable() == 0
+    # (in either order: the clock has whole seconds, so the note may or may not land a second after "Second")
+    assert sorted(t.title for t in board.tasks()) == ["First", "Second"] and board.unreadable() == 0
     assert board.get(1).acceptance == [] and [e.data for e in board.events(1) if e.kind == "note"] == [{}]
 
     monkeypatch.chdir(tmp_path)

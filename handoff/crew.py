@@ -347,10 +347,12 @@ def task_body(request: str, step: Step) -> str:
     return "\n".join(lines)
 
 
-def add_and_approve(board: Board, request: str, steps: list[Step],
-                    return_to: str = HUMAN) -> list[tuple[Task, Event]]:
+def add_and_approve(board: Board, request: str, steps: list[Step], return_to: str = HUMAN,
+                    models: list[str] | None = None,
+                    efforts: dict[str, str] | None = None) -> list[tuple[Task, Event]]:
     """Add a task per runnable step, assigned to its agent, and approve each for its one run. All or none:
-    if one can't be added or approved, none of them stay (a worker would run one that did)."""
+    if one can't be added or approved, none of them stay (a worker would run one that did). `models`: what
+    claude's edits run on (one model, or a chain, biggest first), and `efforts` how hard each thinks."""
     added, made = [], []
     try:
         for step in steps:
@@ -358,7 +360,9 @@ def add_and_approve(board: Board, request: str, steps: list[Step],
                 continue
             task, _ = board.create(HUMAN, step.title(), task_body(request, step), assignee=step.agent)
             made.append(task.id)
-            board.approve(HUMAN, task.id, step.agent, return_to, step.kind)
+            claude_edit = step.kind == "edit" and step.agent == "claude"
+            board.approve(HUMAN, task.id, step.agent, return_to, step.kind, models=models if claude_edit else None,
+                          efforts=efforts if claude_edit else None)
             approved = board.pending_runs(step.agent, [task.id])
             if approved:
                 added.append(approved[0])

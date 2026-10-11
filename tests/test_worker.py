@@ -486,6 +486,113 @@ def test_large_file_without_secret_is_committed(board, repo):
     )
 
 
+FAKE_KEY = "sk-proj-" + "a" * 40
+
+
+def committed(repo, name, data: bytes):
+    """A file in the project's last commit, which a run starts from."""
+    (repo / name).write_bytes(data)
+    git(repo, "add", name)
+    git(repo, "-c", "user.name=Ada", "-c", "user.email=ada@example.com", "commit", "-q", "-m", f"add {name}")
+
+
+def append(name, data: bytes):
+    def action(folder):
+        with (folder / name).open("ab") as file:
+            file.write(data)
+    return action
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_a_secret_already_committed_doesnt_hold_up_changes_around_it(board, repo, newline):
+    """A test's fake key that's already in the project isn't new: only the lines a change adds are checked."""
+    committed(repo, "test_keys.py", newline.join([f"KEY = '{FAKE_KEY}'".encode(), b"", b"def test_one():",
+                                                   b"    pass", b""]))
+    approved(board)
+    [result] = worker(board, repo, FakeAgent(append("test_keys.py", b"def test_two():" + newline))).run_pending()
+    assert result.ok and result.commit, result.message
+    assert "test_two" in git(repo, "show", "handoff/T-1:test_keys.py").stdout
+
+
+def test_a_secret_added_to_a_committed_file_is_not_committed(board, repo):
+    committed(repo, "settings.py", b"DEBUG = True\n")
+    approved(board)
+    [result] = worker(board, repo, FakeAgent(append("settings.py", f"KEY = '{FAKE_KEY}'\n".encode()))).run_pending()
+    assert not result.ok and "looks like a secret: settings.py (an API key" in result.message
+    assert git(repo, "rev-list", "--count", "handoff/T-1").stdout.strip() == "2"  # nothing new
+
+
+def test_a_committed_secret_copied_to_a_new_file_is_not_committed(board, repo):
+    committed(repo, "old.py", f"KEY = '{FAKE_KEY}'\n".encode())
+
+    def copy(folder):
+        (folder / "new.py").write_bytes((folder / "old.py").read_bytes())
+    approved(board)
+    [result] = worker(board, repo, FakeAgent(copy)).run_pending()
+    assert not result.ok and "looks like a secret: new.py (an API key" in result.message
+
+
+def test_a_secret_added_inside_a_long_line_of_a_committed_file_is_not_committed(board, repo):
+    """A line longer than a read is checked whole, even across the reads."""
+    committed(repo, "data.txt", b"x\n")
+    line = b"x" * (gitwork.MAX_SCAN_BYTES - 4) + b" ghp_" + b"a" * 36 + b"\n"  # the token split across two reads
+    approved(board)
+    [result] = worker(board, repo, FakeAgent(append("data.txt", line))).run_pending()
+    assert not result.ok and "data.txt (a GitHub token" in result.message
+
+
+FAKE_PEM = ("-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEowIBAAKCAQEAfakefakefake\nAAAAAAAAAAAAAAAA\n"
+            "-----END RSA " + "PRIVATE KEY-----\n")
+
+
+def test_a_new_private_key_next_to_a_committed_fake_one_is_not_committed(board, repo):
+    """Its header line is the old key's too, so the key's lines are checked together."""
+    committed(repo, "test_keys.py", f'KEY = """\n{FAKE_PEM}"""\n'.encode())
+    real = FAKE_PEM.replace("MIIEowIBAAKCAQEAfakefakefake", "MIIEpAIBAAKCAQEAnewnewnewnew")
+    approved(board)
+    agent = FakeAgent(append("test_keys.py", f'OTHER = """\n{real}"""\n'.encode()))
+    [result] = worker(board, repo, agent).run_pending()
+    assert not result.ok and "test_keys.py (a private key)" in result.message
+
+
+def test_a_committed_fake_private_key_doesnt_hold_up_changes_around_it(board, repo):
+    committed(repo, "test_keys.py", f'KEY = """\n{FAKE_PEM}"""\n'.encode())
+    approved(board)
+    [result] = worker(board, repo, FakeAgent(append("test_keys.py", b"def test_two():\n    pass\n"))).run_pending()
+    assert result.ok and result.commit, result.message
+
+
+def test_a_link_that_becomes_a_file_holding_a_secret_is_not_committed(board, repo):
+    committed(repo, "AGENTS.md", b"# Agents\n")
+    os.symlink("AGENTS.md", repo / "CLAUDE.md")
+    git(repo, "add", "CLAUDE.md")
+    git(repo, "-c", "user.name=Ada", "-c", "user.email=ada@example.com", "commit", "-q", "-m", "link")
+
+    def retype(folder):
+        (folder / "CLAUDE.md").unlink()
+        (folder / "CLAUDE.md").write_text("token: ghp_" + "a" * 36 + "\n", encoding="utf-8")
+    approved(board)
+    [result] = worker(board, repo, FakeAgent(retype)).run_pending()
+    assert not result.ok and "CLAUDE.md (a GitHub token" in result.message
+
+
+def test_a_secret_written_as_a_links_target_is_not_committed(board, repo):
+    def link(folder):
+        os.symlink("ghp_" + "a" * 36, folder / "token")
+    approved(board)
+    [result] = worker(board, repo, FakeAgent(link)).run_pending()
+    assert not result.ok and "token (a GitHub token" in result.message
+
+
+@pytest.mark.skipif(sys.platform in ("win32", "darwin"), reason="file names here are always UTF-8")
+def test_a_secret_in_a_file_whose_name_isnt_utf8_is_not_committed(board, repo):
+    def odd(folder):
+        (folder / os.fsdecode(b"cfg\xff.txt")).write_bytes(b"ghp_" + b"a" * 36 + b"\n")
+    approved(board)
+    [result] = worker(board, repo, FakeAgent(odd)).run_pending()
+    assert not result.ok and "cfg\ufffd.txt (a GitHub token" in result.message
+
+
 def test_no_changes(board, repo):
     approved(board)
     [result] = worker(board, repo, FakeAgent(reply="DONE: nothing needed doing")).run_pending()

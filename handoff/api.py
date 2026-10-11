@@ -35,7 +35,7 @@ import sys
 from itertools import chain, combinations
 from pathlib import Path
 
-from handoff import __version__
+from handoff import __version__, usage
 from handoff.board import (
     ACTIVE,
     HUMAN,
@@ -190,12 +190,14 @@ def _run_state(task: Task, state: Event | None, approved: dict[int, Event]) -> d
 
 
 def _summary(task: Task, last: Event | None, state: Event | None, approved: dict[int, Event],
-             overlaps: int) -> dict:
+             overlaps: int, used: tuple[float, dict | None]) -> dict:
+    cost, models = used
     return {"ref": task.ref, "id": task.id, "title": task.title, "status": task.status, "assignee": task.assignee,
             "waiting_on": task.waiting_on, "branch": task.branch,
             "parent": task_ref(task.parent_id) if task.parent_id else None, "created_by": task.created_by,
             "created_at": task.created_at, "updated_at": task.updated_at, "last_event": _when(last),
-            "run": _run_state(task, state, approved), "overlaps": overlaps}
+            "run": _run_state(task, state, approved), "overlaps": overlaps,
+            "cost": cost, "usage": models}  # (what its runs used: their cost, and model by model)
 
 
 def _overlap_counts(board: Board, tasks: list[Task]) -> dict[int, int]:
@@ -228,13 +230,15 @@ def _overlap_counts(board: Board, tasks: list[Task]) -> dict[int, int]:
     return counts
 
 
-def _summaries(board: Board, tasks: list[Task]) -> list[dict]:
+def _summaries(board: Board, tasks: list[Task], used: dict[int, tuple[float, dict | None]] | None = None) -> list[dict]:
     ids = [t.id for t in tasks]
     last = board.last_events(ids, skip=("claim_paths", "release_paths"))
     states = board.last_events(ids, kinds=STATE_EVENTS)
     approved = {task.id: approval for task, approval in board.pending_runs(None, ids)}
     counts = _overlap_counts(board, tasks)
-    return [_summary(t, last.get(t.id), states.get(t.id), approved, counts.get(t.id, 0)) for t in tasks]
+    used = board.run_usage(ids) if used is None else used
+    return [_summary(t, last.get(t.id), states.get(t.id), approved, counts.get(t.id, 0), used.get(t.id, (0.0, None)))
+            for t in tasks]
 
 
 def actions(task: Task, run: dict | None) -> list[dict]:
@@ -323,20 +327,27 @@ def _event(event: Event) -> dict:
         detail = "\n".join(string_list(event.data.get("paths")))
     elif event.kind == "review" and checks_text(event.data.get("checks")):
         detail = checks_text(event.data["checks"])
+    elif event.kind == "worker" and usage.check(event.data.get("usage")):
+        detail = "\n".join(usage.lines(event.data["usage"]))
     panel = event.data.get("panel")
+    used = usage.check(event.data.get("usage")) if event.kind == "worker" else None
     return {"id": event.id, "at": event.at, "actor": event.actor, "kind": event.kind, "summary": describe(event, _who),
             "text": event.text, "detail": detail,
-            "panel": panel_text(panel) if isinstance(panel, dict) else ""}
+            "panel": panel_text(panel) if isinstance(panel, dict) else "", "usage": used}
 
 
 def board_summary(board: Board, root: Path, tasks: list[Task], revision: str | None = None) -> dict:
     """The board as the window and `handoff board --json` show it: `tasks` are the ones the caller chose, in the
     order it wants them. `revision` is one the caller read before it fetched the tasks (so a change in between
     shows up on its next poll); left out, it's read now."""
-    # counts has only the statuses Handoff knows; a task it can't read is only counted, never listed
+    # counts has only the statuses Handoff knows; a task it can't read is only counted, never listed. spent and
+    # usage are what every run on the board used, the tasks it doesn't list included (at API prices, as the
+    # agents said): spent in all, usage model by model
+    used = board.run_usage()
     return {"project": str(root), "revision": board.revision() if revision is None else revision,
             "counts": board.counts(), "unreadable": board.unreadable(), "done_rule": board.done_rule,
-            "tasks": _summaries(board, tasks)}
+            "spent": round(min(sum(cost for cost, _ in used.values()), usage.MAX_COST), 6),
+            "usage": usage.merge(*(models for _, models in used.values())), "tasks": _summaries(board, tasks, used)}
 
 
 def task_detail(board: Board, root: Path, task_id: int) -> dict:
@@ -347,8 +358,11 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
     summary = _summaries(board, [task])[0]
     # Per kind of run, what approving it again is of (Board.approve keeps it, while its approval checks out)
     targets = board.approval_targets(task.id)
+    used = usage.merge(*(e.data.get("usage") for e in events if e.kind == "worker"))
     return {"task": {**summary, "body": task.body, "acceptance": task.acceptance, "targets": targets,
-                     "content": content_of(task, events)},  # (approve's `shown`)
+                     "content": content_of(task, events),  # (approve's `shown`)
+                     "usage": used,  # (every run's, model by model, as the summary's, from this snapshot)
+                     "workers": _workers()},
             "events": [_event(e) for e in events], "claims": [c.path_glob for c in claims],
             "overlaps": [o.describe() for o in board.overlaps_for(task.id)],
             "children": _summaries(board, children), "outputs": _outputs(root, task),
@@ -360,7 +374,18 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
 # What this Handoff can do beyond the ops, for a window that needs it. run-target: a review or a change can
 # be approved for a pull request's commits (approve's args.target), which an older Handoff would ignore.
 # approve-shown: approve's args.shown (task's `content`) refuses an approval of a task that changed since.
-FEATURES = ("run-target", "approve-shown")
+# run-models: an edit can name its models (approve's args.models: one model, or a chain, biggest first, where the
+# first plans and the others do the steps). run-usage: worker runs say what they used (events' and tasks' usage
+# and `cost`, on the board too, and the board's `usage` and `spent`: what all its runs used and cost).
+# run-effort: an edit can say how hard each model thinks (approve's args.efforts: {model: level}, or {"": level}
+# for the agent's own model), in the levels each worker takes (a task's `workers`).
+FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort")
+
+
+def _workers() -> dict:
+    """What each worker's edits can be given: its effort levels, least first, and whether it runs a chain."""
+    from handoff.worker import AGENTS, CHAIN_AGENTS
+    return {name: {"efforts": list(spec.effort_levels), "chain": name in CHAIN_AGENTS} for name, spec in AGENTS.items()}
 
 
 def op_hello(request: dict) -> dict:
@@ -496,7 +521,7 @@ def _work_left(root: Path, ref: str) -> list[str]:
 
 
 def op_approve(request: dict) -> dict:
-    from handoff.worker import AGENTS
+    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem
     board = _board(_project(request))
     args = request.get("args", {})
     agent = _name(args.get("agent"), "agent")
@@ -512,8 +537,20 @@ def op_approve(request: dict) -> dict:
     target = args.get("target")
     if target is not None and not isinstance(target, dict):
         raise ApiError("usage", "args.target must be an object: base, head and label.")
+    models = args.get("models")
+    if models is not None and not isinstance(models, list):
+        raise ApiError("usage", "args.models must be a list of model names, biggest first.")
+    if models is not None and len(models) > 1 and agent not in CHAIN_AGENTS:
+        raise BoardError(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}; {agent} takes one model.")
+    efforts = args.get("efforts")
+    if efforts is not None and not isinstance(efforts, dict):
+        raise ApiError("usage", 'args.efforts must be an object: a level for each model, like {"claude-opus-5-5": '
+                                '"high"}, or {"": "high"} for the agent\'s own model.')
+    if efforts and effort_problem(agent, efforts):
+        raise BoardError(effort_problem(agent, efforts))
     shown = _arg(args, "shown", str, required=False, default=None)  # the `content` of the task you showed
-    return _task_reply(board, board.approve(HUMAN, _task_arg(args), agent, return_to, kind, target, shown))
+    return _task_reply(board, board.approve(HUMAN, _task_arg(args), agent, return_to, kind, target, shown,
+                                            models or None, efforts or None))
 
 
 def op_revoke(request: dict) -> dict:

@@ -62,7 +62,8 @@ COMMANDS = [
     ('handoff dispatch "codex review my changes, gemini list …" [--yes]',
      "Split one request across your agents and run the parts side by side"),
     ("handoff agents", "Who can take tasks here: changing files, answering, reviewing, pictures"),
-    ("handoff approve T-12 AGENT [--kind edit|answer|review|image]", "Let an agent run a task, once"),
+    ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL] [--effort E]",
+     "Let an agent run a task, once (on a model, or a chain of models)"),
     ("handoff run [T-12 ...]", "Run approved tasks now, side by side"),
     ("handoff worker --agent claude|codex [--once] [--share FOLDER]",
      "Run approved tasks headlessly, each in its own worktree"),
@@ -803,6 +804,7 @@ def _history(events) -> list:
     """A task's history as `handoff show` prints it, with what each one wrote."""
     from handoff.describe import checks_text, describe, handoff_text, panel_text
     from handoff.timefmt import stamp
+    from handoff.usage import lines as usage_lines
 
     out: list = []
     for event in events:
@@ -820,6 +822,8 @@ def _history(events) -> list:
             out.append(_indented(checks_text(event.data["checks"])))
         if isinstance(event.data.get("panel"), dict):
             out.append(_indented("Ixel panel: " + panel_text(event.data["panel"]), C["violet"]))
+        if event.kind == "worker" and usage_lines(event.data.get("usage")):
+            out.append(_indented("\n".join(usage_lines(event.data["usage"])), C["dim"]))
     return out
 
 
@@ -1413,7 +1417,7 @@ def cmd_approve(argv: list[str]) -> int:
     from handoff.board import HUMAN, RUN_KINDS, TERMINAL
     from handoff.crew import board_name
     from handoff.sanitize import clean_line
-    from handoff.worker import AGENTS
+    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem
 
     parser = _parser("approve", "Approve a task for an agent to run, once: claude or codex change files in their "
                                 "own git worktree, in a sandbox (where it can't run, Claude only edits files); "
@@ -1431,9 +1435,22 @@ def cmd_approve(argv: list[str]) -> int:
                              "or image: through Ixel MAT, nothing in the project changes (default: edit)")
     parser.add_argument("--return-to", default=HUMAN, metavar="NAME",
                         help="who gets the task back when the run ends (default: you)")
+    parser.add_argument("--model", metavar="MODEL",
+                        help="for an edit, the model the agent runs on, like claude-opus-5-5 or haiku (default: the "
+                             "agent's own)")
+    parser.add_argument("--chain", metavar="BIG,...,SMALL",
+                        help="for a claude edit, a chain of models, biggest first, like "
+                             "claude-fable-5-1,claude-opus-5-5,claude-haiku-5-5: the first plans the steps and gives "
+                             "each to the smallest of the others that can do it well. Give one model its own effort "
+                             "with a colon: claude-fable-5-1:max")
+    parser.add_argument("--effort", metavar="LEVEL",
+                        help="for an edit, how hard the model thinks, in the agent's own levels: claude takes low, "
+                             "medium, high, xhigh or max; codex minimal, low, medium, high, xhigh, max or ultra "
+                             "(default: the model's own). With --chain, for each model that has no effort of its own")
     parser.add_argument("--revoke", action="store_true", help="withdraw an approval the worker hasn't used yet")
     parser.add_argument("--yes", action="store_true", help="don't ask; approve the task as shown")
     args = parser.parse_args(argv)
+    models, efforts = _models(parser, args)
     if args.agent and args.worker and args.agent.lower() != args.worker.lower():
         parser.fail(f"Name the agent once, like: handoff approve {args.task} {args.agent}")
     agent = args.agent or args.worker
@@ -1472,6 +1489,13 @@ def cmd_approve(argv: list[str]) -> int:
         raise CommandError(f"Only {' and '.join(AGENTS)} can change files through the worker. To have "
                            f"{agent} answer, review your changes or make pictures, add --kind answer, "
                            "review or image.")
+    if (models or efforts) and args.kind != "edit":
+        parser.fail("--model, --chain and --effort are for an edit; the models in Ixel MAT have their own (ixel "
+                    "model).")
+    if models and len(models) > 1 and agent not in CHAIN_AGENTS:
+        parser.fail(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}. For {agent}, name one with --model.")
+    if effort_problem(agent, efforts):
+        parser.fail(effort_problem(agent, efforts))
     if args.kind != "edit" and board_name(agent):  # (asks Ixel MAT who it has; no model is asked anything)
         from handoff import asks
         problem = asks.unrunnable(board_name(agent), args.kind, asks.ixel_roster(_root(args)))
@@ -1498,7 +1522,8 @@ def cmd_approve(argv: list[str]) -> int:
                 _hint("Not approved.")
                 return 1
         try:
-            task = board.approve(HUMAN, task_id, agent, return_to, args.kind, shown=content_of(task, events))
+            task = board.approve(HUMAN, task_id, agent, return_to, args.kind, shown=content_of(task, events),
+                                 models=models, efforts=efforts)
             break
         except Changed:
             if attempt == 5:
@@ -1512,7 +1537,14 @@ def cmd_approve(argv: list[str]) -> int:
               f"{_who(return_to)}.")
         console.print(f"  [{C['dim']}]Run it with:[/] handoff run {task.ref}", soft_wrap=True)
         return 0
-    _ok(f"Approved {task.ref} for the {agent} worker.")
+    efforts = efforts or {}
+
+    def at(model: str) -> str:
+        return f"{model} at {efforts[model]} effort" if model in efforts else model
+    on = (f", on {at(models[0])}" if len(models) == 1 else
+          f", as a chain: {at(models[0])} plans, then {', '.join(at(m) for m in models[1:])} do the steps"
+          ) if models else (f", at {efforts['']} effort" if "" in efforts else "")
+    _ok(f"Approved {task.ref} for the {agent} worker{on}.")
     how = _sandbox_word(agent)
     if how is None:
         console.print(f"  [{C['gold']}]⚠[/] {escape(agent)} only runs inside its sandbox, which can't run here "
@@ -1523,6 +1555,34 @@ def cmd_approve(argv: list[str]) -> int:
     console.print(f"  [{C['dim']}]Start it with:[/] handoff run {task.ref}  [{C['dim']}](or keep a worker "
                   f"running: handoff worker --agent {escape(agent)})[/]", soft_wrap=True)
     return 0
+
+
+def _models(parser, args) -> tuple[list[str] | None, dict[str, str] | None]:
+    """--model or --chain, and --effort: the models an approval names (None: the agent's default) and how hard
+    each thinks (None: each model's own). A model can carry its own effort after a colon: claude-fable-5-1:max."""
+    from handoff.approvals import MAX_MODELS, check_efforts, check_models
+    if args.model and args.chain:
+        parser.fail("Use --model for one model or --chain for several, not both.")
+    effort = (args.effort or "").strip().lower()
+    if not (args.model or args.chain):
+        return None, ({"": effort} if effort else None)
+    items = [args.model.strip()] if args.model else [m.strip() for m in args.chain.split(",") if m.strip()]
+    if args.chain and len(items) < 2:
+        parser.fail("A chain is two or more models, biggest first, like: --chain claude-opus-5-5,claude-haiku-5-5")
+    names, efforts = [], {}
+    for item in items:
+        name, _, level = (part.strip() for part in item.lower().partition(":"))
+        names.append(name)
+        if level or effort:
+            efforts[name] = level or effort
+    models = check_models(names)
+    if models is None:
+        parser.fail(f"Name 1 to {MAX_MODELS} models, each once, like claude-opus-5-5 or haiku (letters, digits, dots "
+                    "and dashes).")
+    if efforts and check_efforts(efforts, models) is None:
+        parser.fail("An effort is one word after the model, like: --chain claude-fable-5-1:max,claude-opus-5-5:high,"
+                    "claude-haiku-5-5")
+    return models, efforts or None
 
 
 KIND_VERBS = {"edit": "change files", "answer": "answer", "review": "review your changes", "image": "make pictures"}
@@ -1625,10 +1685,13 @@ def _kind_text(kind: str) -> str:
 def _result_line(result, agent: str) -> None:
     if result is None:
         return
+    from handoff.usage import total_cost
+    used = getattr(result, "used", None)
+    spent = f" (about ${total_cost(used):.4f} on {', '.join(used['models'])})" if used else ""
     if result.ok:
         where = f"; the work is on {result.branch}" if result.branch else ""
         console.print(f"  [{C['green']}]✓[/] {result.task.ref} {escape(agent)}: "
-                      f"{escape(_ran(result.message))}{escape(where)}", soft_wrap=True)
+                      f"{escape(_ran(result.message))}{escape(where)}{escape(spent)}", soft_wrap=True)
     else:
         console.print(f"  [{C['red']}]✗[/] {result.task.ref} {escape(agent)}: {escape(result.message)}", soft_wrap=True)
 
@@ -1636,6 +1699,7 @@ def _result_line(result, agent: str) -> None:
 def _run_and_report(board, root: Path, pairs, roster=None, as_json: bool = False) -> list[dict]:
     """Run the approved tasks side by side; each result as JSON-ready data, with who ran it."""
     from handoff import crew
+    from handoff.usage import total_cost
 
     agents = {task.id: task.assignee or "" for task, _ in pairs}  # once it's handed back, the assignee is you
 
@@ -1654,7 +1718,9 @@ def _run_and_report(board, root: Path, pairs, roster=None, as_json: bool = False
         console.print(f"\n  [{C['dim']}]See each result with:[/] handoff show T-N  [{C['dim']}]({refs})[/]",
                       soft_wrap=True)
     return [{"task": r.task.ref, "agent": agents.get(r.task.id, ""), "ok": r.ok, "message": r.message,
-             **({"branch": r.branch} if r.branch else {})} for r in results if r is not None] + \
+             **({"branch": r.branch} if r.branch else {}),
+             **({"usage": r.used, "cost": total_cost(r.used)} if getattr(r, "used", None) else {})}
+            for r in results if r is not None] + \
         [{"task": task.ref, "agent": agents[task.id], "ok": False, "message": "It was still running when Handoff "
           "stopped."} for (task, _), r in zip(pairs, results, strict=True) if r is None]
 
@@ -1679,8 +1745,19 @@ def cmd_dispatch(argv: list[str]) -> int:
                         help="add and approve the tasks, but don't run them (handoff run does, later)")
     parser.add_argument("--return-to", default=HUMAN, metavar="NAME",
                         help="who gets each task back when its run ends (default: you)")
+    parser.add_argument("--model", metavar="MODEL", help="the model claude's edits run on, like claude-opus-5-5")
+    parser.add_argument("--chain", metavar="BIG,...,SMALL",
+                        help="run claude's edits as a chain of models, biggest first, like claude-fable-5-1,"
+                             "claude-opus-5-5,claude-haiku-5-5: the first plans, the others do the steps (one model's "
+                             "own effort after a colon: claude-fable-5-1:max)")
+    parser.add_argument("--effort", metavar="LEVEL",
+                        help="how hard claude's edits think: low, medium, high, xhigh or max")
     parser.add_argument("--json", action="store_true", help="print the plan (and the results) as JSON")
     args = parser.parse_args(argv)
+    models, efforts = _models(parser, args)
+    from handoff.worker import effort_problem
+    if effort_problem("claude", efforts):
+        parser.fail(effort_problem("claude", efforts))
     request = " ".join(args.request)
     if request.strip() == "-" or (not request.strip() and not sys.stdin.isatty()):
         # UTF-8 whatever this computer's code page (Ixel sends it that way); -I ignores PYTHONIOENCODING
@@ -1740,7 +1817,7 @@ def cmd_dispatch(argv: list[str]) -> int:
         if answer.strip().lower().startswith("n"):
             _hint("Nothing was added.")
             return 1
-    pairs = crew.add_and_approve(board, request, runnable, return_to)
+    pairs = crew.add_and_approve(board, request, runnable, return_to, models, efforts)
     if args.no_run:
         refs = " ".join(task.ref for task, _ in pairs)
         if args.json:

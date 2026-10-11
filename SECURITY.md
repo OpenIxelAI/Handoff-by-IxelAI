@@ -268,7 +268,8 @@ shell or network access of its own.
 | `tests/test_worker_codex_live.py` | **Codex's attack test**, with the real Codex CLI inside real bubblewrap (below) |
 | `tests/test_worker_live.py` | **The attack test for Claude's edit-only mode**, where the sandbox can't run (below) |
 | `tests/test_sandbox.py` | The sandbox's command line (what's hidden, what's shown, in what order); which folders can be shared and what's hidden inside them; Claude's sandbox settings; each agent's private login and when a refreshed one is copied back; which environment variables count as credentials |
-| `tests/test_worker.py` | Approvals (the person only; one run; lapse when the task moves; sealed to this computer and board, so a cloned or edited board carries none); the worktree, branch and commit; a rewritten `.git` file and the repository's own hooks can't make the worker's git run anything; links out of the worktree are refused; the agent's environment and command line; deleting or cleaning a task leaves its worktree and branch, and says so |
+| `tests/test_worker.py` | Approvals (the person only; one run; lapse when the task moves; sealed to this computer and board, so a cloned or edited board carries none); the worktree, branch and commit; a rewritten `.git` file and the repository's own hooks can't make the worker's git run anything; links out of the worktree are refused; the agent's environment and command line; a secret added to a new or committed file is never committed, while one the branch already had doesn't block the change; deleting or cleaning a task leaves its worktree and branch, and says so |
+| `tests/test_models_usage.py` | The model or chain of models an edit runs on, and how hard each one thinks, are sealed into its approval, so a board can't move a run to a dearer model or turn one up; a level the agent doesn't take never reaches it; a chain's planner gets read-only tools; a chain that stops keeps what its steps did in the reason; usage read back from a board is checked before it's shown |
 | `tests/test_dispatch.py` | How a request splits and which kind of run each part gets; nothing is added before a yes; the runs really happen at once; the kind is sealed, so a run can't be turned into an edit; only claude and codex edit; the files a run reads stay inside the project; pictures saved anywhere else are refused; one failing part blocks only its own task; the loop guard |
 | `tests/test_update.py` | Update never overwrites local changes, and runs the installer again until the latest is installed; git, bash and PowerShell never come from the folder it's run in |
 | `tests/test_code_hygiene.py` | Every text file is opened with an explicit encoding; the installers stay ASCII for Windows PowerShell 5.1; no program is started by a bare name, and taskkill comes from System32 |
@@ -394,8 +395,13 @@ doesn't run. Findings from the reviews:
   certificate file your network settings name (`SSL_CERT_FILE` and the like). Everything else in a shared
   folder is readable by the agent's commands, so share tool folders, not work.
 - **Nothing secret is committed.** Before committing, the worker scans every added or changed file for
-  keys, tokens and private keys (the same check the board uses). If it finds one, it commits nothing and
-  blocks the task, naming the file. The one exception is a JSON Web Token on its own: test fixtures often
+  keys, tokens and private keys (the same check the board uses), including a link that took a file's place
+  and what a link points to (git commits that text). A new file is scanned whole; in a file the branch
+  already had, the lines it didn't have anywhere are (a line too long to read at once is always scanned,
+  whole; a private key is scanned from its header to its end whenever any line of it is new; and a file over
+  16 MB is scanned whole), so a test's fake key that was already committed doesn't hold up a change around
+  it, while one added anywhere still does. If it finds one, it commits nothing and blocks the task, naming
+  the file. The one exception is a JSON Web Token on its own: test fixtures often
   hold a sample one (jwt.io's, say), and they expire, so the worker commits it and its handback names the
   file for you to check before you merge. On the board, a JSON Web Token is still refused.
 - **Git that can't be redirected.** The worker runs git with `--git-dir` taken from the main repository's
