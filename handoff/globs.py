@@ -13,7 +13,9 @@ from functools import lru_cache
 from handoff.sanitize import clean_line
 
 MAX_PATH_CHARS = 256
-OVERLAP_CACHE = 4_096  # pattern pairs whose answer is kept: a board of a few hundred claims repeats its pairs
+# Pattern pairs whose answer is kept, for when agents claim the same folders again (each `handoff api` request is
+# a process of its own, so it helps within one request, or a long-running MCP server)
+OVERLAP_CACHE = 4_096
 
 
 class PathError(ValueError):
@@ -72,6 +74,15 @@ def _pattern(path: str) -> list[str]:
     if last != "**" and "." not in last[1:]:
         segments.append("**")  # a folder: the claim covers what's inside it
     return segments
+
+
+def plain_head(path: str) -> str | None:
+    """A claim's first segment, casefolded, when it has no wildcard (`src` for src/api.py); None when it has
+    one (`*.md`, `**`). Two claims with different plain first segments can never overlap, since overlaps
+    walks both from the start, so a caller with many claims compares only those that share one, and the
+    wildcard ones with every claim (api._overlap_counts)."""
+    head = path.casefold().split("/", 1)[0]
+    return None if "*" in head or "?" in head else head
 
 
 def overlaps(a: str, b: str) -> bool:

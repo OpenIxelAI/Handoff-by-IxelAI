@@ -285,8 +285,8 @@ can't.
   `block --waiting-on me`, `approve --return-to me`.
 - **A mistyped command says what's wrong:** what's missing, an example to copy, and a suggestion for a
   misspelled command or flag (`handoff boards` → `handoff board`).
-- **`--json`** on `board`, `show` and `doctor` prints the same data the Ixel window reads, for scripts and
-  other tools.
+- **`--json`** on `board` and `show` prints the same data the Ixel window reads; on `doctor` it prints each check
+  as JSON (`status` is ok, warning, problem or none, with `what` and `detail`), for scripts and other tools.
 
 Commands that use the board take `--project PATH`; by default it's the git repository you're in. Any
 folder of a repository (or one of its worktrees) means that repository's board.

@@ -1,6 +1,7 @@
 """`handoff api`: the Ixel window's JSON door to the board."""
 import json
 import os
+import random
 import subprocess
 import sys
 
@@ -197,6 +198,36 @@ def test_the_board_counts_each_tasks_overlapping_claims(project):
     counts = {t["ref"]: t["overlaps"] for t in ok("board", project)["tasks"]}
     assert counts == {"T-1": 2, "T-2": 2, "T-3": 0, "T-4": 0}
     assert ok("task", project, task="T-2")["task"]["overlaps"] == 2
+
+
+def test_overlap_counts_compare_only_claims_that_could_overlap_and_miss_none(project):
+    # Claims are bucketed by their first folder; a few hundred random ones, plain and wildcard, case mixed,
+    # must count exactly what comparing every pair counts
+    from itertools import combinations
+
+    from handoff.globs import overlaps
+    rng = random.Random(20261011)
+    plain = ["src", "Src", "docs", "tests", "lib", "app", "v1.2", "README.md"]
+    wild = ["*", "**", "*.md", "s?c", "te*", "?pp"]
+    rest = ["api.py", "db.py", "*.py", "**", "test_*.py", "models", "README.md", "a?i.py"]
+
+    def claim():
+        head = rng.choice(wild) if rng.random() < 0.15 else rng.choice(plain)
+        return "/".join([head] + [rng.choice(rest) for _ in range(rng.randint(0, 2))])
+    board = Board.open(project)
+    for n in range(150):
+        paths = {claim() for _ in range(rng.randint(1, 3))}
+        board.create(HUMAN, f"Task {n}", assignee=rng.choice(["claude", "codex"]), paths=sorted(paths))
+    tasks = board.tasks()
+    claims = board.active_claims()
+    assert len(claims) > 250 and any(c.path_glob.split("/")[0] in wild for c in claims)
+    found = [overlaps(a.path_glob, b.path_glob) for a, b in combinations(claims, 2)]
+    assert any(found) and not all(found)
+    expected = {t.id: sum(overlaps(a.path_glob, b.path_glob) for a in claims if a.task_id == t.id
+                          for b in claims if b.task_id != t.id) for t in tasks}
+    assert api._overlap_counts(board, tasks) == expected
+    some = tasks[:10]
+    assert api._overlap_counts(board, some) == {t.id: expected[t.id] for t in some}
 
 
 def test_outputs_list_plain_files_only(project, tmp_path):

@@ -683,9 +683,11 @@ def cmd_board(argv: list[str]) -> int:
     assignee = check_name(_person(args.assignee), "--assignee") if args.assignee else None
     root = _root(args)
     board = _board(args)
-    if args.json:  # the same data the Ixel window reads (api.py), over the tasks the flags select
+    if args.json:  # the same data the Ixel window reads (api.py's `board`), over the tasks the flags select
         from handoff.api import board_summary
-        print(json.dumps(board_summary(board, root, _board_tasks(board, statuses, assignee)), indent=2))
+        revision = board.revision()  # before the tasks, so a change between the two shows on the next look
+        summary = board_summary(board, root, _board_tasks(board, statuses, assignee), revision)
+        print(json.dumps({"exists": True, **summary}, indent=2))
         return 0
     if not args.watch:
         _print_board(board, root, statuses, assignee)

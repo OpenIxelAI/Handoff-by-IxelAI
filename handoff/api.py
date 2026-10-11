@@ -32,6 +32,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+from itertools import chain, combinations
 from pathlib import Path
 
 from handoff import __version__
@@ -44,6 +45,7 @@ from handoff.board import (
     Board,
     BoardError,
     Changed,
+    Claim,
     Event,
     Forbidden,
     NoBoard,
@@ -198,19 +200,31 @@ def _summary(task: Task, last: Event | None, state: Event | None, approved: dict
 
 def _overlap_counts(board: Board, tasks: list[Task]) -> dict[int, int]:
     """How many other active tasks' claims each task's own claims overlap. Each pair of claims is compared
-    once (an overlap counts for both), not once per task, so a board of hundreds of claims stays quick."""
-    from handoff.globs import overlaps
+    once (an overlap counts for both), not once per task, and only pairs that can overlap at all: claims that
+    start with the same plain folder (src/api.py and src/db.py, not src and docs), and the ones that start
+    with a wildcard against every claim (globs.plain_head). A board of hundreds of claims stays quick."""
+    from handoff.globs import overlaps, plain_head
     live = {t.id for t in board.tasks(statuses=sorted(ACTIVE))}
     claims = [c for c in board.active_claims() if c.task_id in live]
     counts: dict[int, int] = {task.id: 0 for task in tasks}
-    for n, mine in enumerate(claims):
-        for other in claims[n + 1:]:
-            if mine.task_id == other.task_id or (mine.task_id not in counts and other.task_id not in counts):
-                continue
-            if overlaps(mine.path_glob, other.path_glob):
-                for task_id in (mine.task_id, other.task_id):
-                    if task_id in counts:
-                        counts[task_id] += 1
+    by_head: dict[str, list[Claim]] = {}
+    wild: list[Claim] = []
+    for claim in claims:
+        head = plain_head(claim.path_glob)
+        if head is None:
+            wild.append(claim)
+        else:
+            by_head.setdefault(head, []).append(claim)
+    pairs = chain((pair for group in by_head.values() for pair in combinations(group, 2)),
+                  combinations(wild, 2),
+                  ((mine, other) for mine in wild for group in by_head.values() for other in group))
+    for mine, other in pairs:
+        if mine.task_id == other.task_id or (mine.task_id not in counts and other.task_id not in counts):
+            continue
+        if overlaps(mine.path_glob, other.path_glob):
+            for task_id in (mine.task_id, other.task_id):
+                if task_id in counts:
+                    counts[task_id] += 1
     return counts
 
 
