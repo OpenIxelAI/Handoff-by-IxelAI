@@ -4,6 +4,7 @@ steps), and what each run used, as Claude Code reports it.
 Real git and a fake agent standing in for `claude -p --output-format json`, in Claude's edit-only mode.
 """
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -371,6 +372,34 @@ def test_the_api_takes_efforts_and_says_what_each_worker_takes(board, repo):
 
 
 # ── Usage ────────────────────────────────────────────────────────────────────
+
+def test_the_board_says_what_each_task_and_all_its_runs_cost(board, repo):
+    calc, clock, idle = task(board), task(board, "Add a clock"), task(board, "Tidy up")
+    board.approve(HUMAN, calc.id, "claude", models=[HAIKU])
+    board.approve(HUMAN, clock.id, "claude", models=[OPUS])
+    agent = Agent({HAIKU: result("DONE: wrote calc.py", HAIKU, 0.0042),
+                   OPUS: result("DONE: wrote calc.py", OPUS, 0.25)},
+                  {HAIKU: write_calc, OPUS: write_calc})
+    assert all(ran.ok for ran in worker(board, repo, agent).run_pending())
+    # a run a board says cost something that isn't a cost (from somewhere else) adds nothing, and breaks nothing
+    conn = sqlite3.connect(board.path)
+    with conn:
+        for cost in ("lots", 10 ** 400):  # (too big for a float)
+            run = {"state": "finished", "usage": {"models": {OPUS: {"cost": cost}}}}
+            conn.execute("INSERT INTO events (task_id, at, actor, kind, text, data) VALUES (?, ?, 'claude', "
+                         "'worker', '', ?)", (idle.id, board.events(idle.id)[-1].at, json.dumps(run)))
+    conn.close()
+    board.note(HUMAN, idle.id, "Later")  # (so those runs aren't the task's last event, which its card describes)
+
+    shown = api.op_board({"project": str(repo)})
+    assert {t["ref"]: t["cost"] for t in shown["tasks"]} == {calc.ref: 0.0042, clock.ref: 0.25, idle.ref: 0.0}
+    assert shown["spent"] == 0.2542
+    board.cancel(HUMAN, calc.id)
+    # the tasks a board doesn't list still count toward what it spent
+    shown = api.op_board({"project": str(repo), "args": {"done": 0}})
+    assert calc.ref not in {t["ref"] for t in shown["tasks"]} and shown["spent"] == 0.2542
+    assert api.task_detail(board, repo, clock.id)["task"]["cost"] == 0.25
+
 
 def test_usage_read_back_from_a_board_is_checked():
     assert usage.check({"models": {"bad name!": {"in": 1}}}) is None

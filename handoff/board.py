@@ -783,6 +783,25 @@ class Board:
                                 f"WHERE {where} GROUP BY task_id)", ids + skipped + (only or [])).fetchall()
         return {r["task_id"]: _event_from_row(r) for r in rows}
 
+    def run_costs(self, task_ids: Iterable[int] | None = None) -> dict[int, float]:
+        """What each task's worker runs cost (every task's, or those of `task_ids`), added up, as the agents
+        reported it (checked again, since a board can come from somewhere else). Tasks whose runs reported
+        nothing aren't in it."""
+        query, args = "SELECT task_id, data FROM events WHERE kind = 'worker' AND data LIKE '%\"usage\"%'", []
+        if task_ids is not None:
+            args = list(task_ids)
+            if not args:
+                return {}
+            query += f" AND task_id IN ({', '.join('?' for _ in args)})"
+        with self._read() as conn:
+            rows = conn.execute(query, args).fetchall()
+        costs: dict[int, float] = {}
+        for row in rows:
+            cost = usage.total_cost(_json(row["data"], dict).get("usage"))
+            if cost:
+                costs[row["task_id"]] = round(min(costs.get(row["task_id"], 0.0) + cost, usage.MAX_COST), 6)
+        return costs
+
     def revision(self) -> str:
         """Changes whenever anything on the board does, its settings included (the done rule, how long it
         keeps finished tasks), and never comes back to an earlier value for the tasks themselves (ids only
