@@ -368,16 +368,15 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
 def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
     """The branch the project has out, when the task's branch has a finished run's work that isn't merged yet
     (what the merge action's label names); else None."""
-    if not task.branch or task.status not in ("handed_off", "in_review", "done"):
+    if not task.branch or Board.merge_blocker(task, events) is not None:
         return None
     commit = Board.run_commit(events)
     if commit is None or Board.merged_commit(events) == commit:
         return None
     from handoff import gitwork
-    try:
-        return gitwork.current_branch(root) or "your current branch"
-    except gitwork.GitError:
-        return "your current branch"
+    # Offered only when it could go through: the branch is still at the run's commit, the checkout is on a branch
+    # of its own and lacks it (merged by hand with git, it isn't offered any more)
+    return gitwork.merge_ready(root, task.branch, commit)
 
 
 # ── The ops ───────────────────────────────────────────────────────────────────
@@ -586,6 +585,9 @@ def op_merge(request: dict) -> dict:
                       "now.")
     if task.branch is None:
         raise BoardError(f"{task.ref} has no branch: nothing to merge.")
+    blocked = Board.merge_blocker(task, events)
+    if blocked:
+        raise BoardError(blocked)
     expected = Board.run_commit(events)
     if expected is None:
         raise BoardError(f"No worker run recorded a commit for {task.ref}, so there's nothing of its to merge.")
@@ -598,6 +600,8 @@ def op_merge(request: dict) -> dict:
                          "The merge was aborted, so nothing was changed.") from None
     except gitwork.GitError as exc:  # (AlreadyMerged too)
         raise BoardError(str(exc)) from None
+    # Read the board again where it is: the merge changed the checkout it lives in
+    board = _board(root)
     task = board.record_merge(HUMAN, task_id, into, sha, short, expected)
     note = gitwork.remove_worktree(root, task_id)
     return {**_task_reply(board, task), "merged": {"branch": task.branch, "into": into, "sha": short},

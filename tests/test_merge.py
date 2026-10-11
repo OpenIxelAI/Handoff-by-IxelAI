@@ -64,6 +64,7 @@ def finished_task(board, repo, title="Add a hello script", path="hello.txt", tex
     folder = repo / ".handoff" / "worktrees" / task.ref
     base = head(repo)
     git(repo, "worktree", "add", "-b", branch, str(folder))
+    (folder / path).parent.mkdir(parents=True, exist_ok=True)
     (folder / path).write_text(text, encoding="utf-8")
     commit(folder, title)
     tip = head(folder)
@@ -237,3 +238,100 @@ def test_handoff_merge_from_the_command_line(board, repo, current, monkeypatch, 
     captured = capsys.readouterr()
     assert "already merged" in captured.out + captured.err
     assert git(repo, "log", "-1", "--format=%s").stdout.strip() == "Merge T-1: Add a hello script"
+
+
+# ── What a task's branch may not do to your checkout (found by an adversarial review) ──
+
+def test_an_ignored_file_of_yours_is_never_overwritten(board, repo):
+    (repo / ".gitignore").write_text(".env\n", encoding="utf-8")
+    commit(repo, "ignore .env")
+    (repo / ".env").write_text("MINE=1\n", encoding="utf-8")
+    # The agent empties .gitignore in its worktree and commits its own .env
+    task, _ = board.create(HUMAN, "Settings", "x")
+    board.approve(HUMAN, task.id, "claude")
+    [(_, approval)] = board.pending_runs("claude", [task.id])
+    folder = repo / ".handoff" / "worktrees" / task.ref
+    git(repo, "worktree", "add", "-b", f"handoff/{task.ref}", str(folder))
+    (folder / ".gitignore").write_text("", encoding="utf-8")
+    (folder / ".env").write_text("AGENT=1\n", encoding="utf-8")
+    commit(folder, "settings")
+    tip = head(folder)
+    board.start_run("claude", task.id, approval.id, {"branch": f"handoff/{task.ref}"})
+    board.finish_run("claude", task.id, HUMAN, "did it", branch=f"handoff/{task.ref}", extra={"commit": tip})
+    before = head(repo)
+    code, message = error("merge", repo, task=task.ref)
+    assert code == "invalid" and ".env" in message and "doesn't track" in message
+    assert (repo / ".env").read_text(encoding="utf-8") == "MINE=1\n" and head(repo) == before
+
+
+def test_a_branch_that_touches_the_board_folder_is_refused(board, repo):
+    task, tip = finished_task(board, repo, title="Sneaky", path=".handoff/board.db", text="not a board\n")
+    before = head(repo)
+    code, message = error("merge", repo, task=task.ref)
+    assert code == "invalid" and "board folder" in message
+    assert head(repo) == before and Board.open(repo).get(task.id).title == "Sneaky"
+
+
+def test_a_branch_that_changes_what_git_runs_is_refused(board, repo):
+    task, _ = finished_task(board, repo, title="LFS", path=".lfsconfig", text="[lfs]\n\turl = http://127.0.0.1:9/x\n")
+    before = head(repo)
+    code, message = error("merge", repo, task=task.ref)
+    assert code == "invalid" and ".lfsconfig" in message and head(repo) == before
+
+
+def test_a_merge_of_yours_in_progress_is_left_alone(board, repo, current):
+    task, _ = finished_task(board, repo)
+    # The person is in the middle of their own conflicted merge
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "README.md").write_text("# Side\n", encoding="utf-8")
+    commit(repo, "side")
+    git(repo, "checkout", "-q", current)
+    (repo / "README.md").write_text("# Main\n", encoding="utf-8")
+    commit(repo, "main")
+    git(repo, *IDENTITY, "merge", "side", check=False)
+    assert git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0
+    code, message = error("merge", repo, task=task.ref)
+    assert code == "invalid" and "middle of a merge" in message
+    assert git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0  # still theirs
+
+
+def test_no_merge_while_a_run_is_under_way(board, repo):
+    task, _ = finished_task(board, repo)
+    board.set_status(HUMAN, task.id, "open")
+    board.approve(HUMAN, task.id, "claude")
+    code, message = error("merge", repo, task=task.ref)
+    assert code == "invalid" and ("approved for another run" in message or "handed back" in message)
+    assert merge_actions(repo, task.ref) == []
+    [(_, approval)] = board.pending_runs("claude", [task.id])
+    board.start_run("claude", task.id, approval.id, {"branch": task.branch})
+    code, message = error("merge", repo, task=task.ref)
+    assert code == "invalid"
+    assert (repo / ".handoff" / "worktrees" / task.ref).is_dir()  # the run's worktree is still there
+
+
+def test_a_worktree_with_uncommitted_work_is_kept(board, repo):
+    task, _ = finished_task(board, repo)
+    folder = repo / ".handoff" / "worktrees" / task.ref
+    (folder / "draft.txt").write_text("not committed\n", encoding="utf-8")
+    data = ok("merge", repo, task=task.ref)
+    assert folder.is_dir() and (folder / "draft.txt").exists()
+    assert data["left"] and "uncommitted" in data["left"][0]
+
+
+def test_the_merge_button_goes_once_the_branch_is_merged_by_hand(board, repo):
+    task, tip = finished_task(board, repo)
+    assert [a["label"] for a in merge_actions(repo, task.ref)]
+    git(repo, *IDENTITY, "merge", "-q", "--no-ff", "--no-edit", task.branch)
+    assert merge_actions(repo, task.ref) == []
+
+
+def test_the_worker_never_commits_a_board_folder(repo):
+    folder = repo / ".handoff" / "worktrees" / "T-9"
+    git(repo, "worktree", "add", "-q", "-b", "handoff/T-9", str(folder))
+    worktree = gitwork.Worktree(folder, "handoff/T-9", gitwork.common_dir(repo) / "worktrees" / "T-9", head(repo))
+    (folder / ".handoff").mkdir()
+    (folder / ".handoff" / "board.db").write_text("forged\n", encoding="utf-8")
+    (folder / ".HANDOFF2").write_text("fine\n", encoding="utf-8")
+    (folder / "app.txt").write_text("work\n", encoding="utf-8")
+    staged = gitwork.stage_all(repo, worktree)
+    assert "app.txt" in staged and not any(name.casefold().startswith(".handoff/") for name in staged)

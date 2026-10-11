@@ -1433,17 +1433,30 @@ def cmd_merge(argv: list[str]) -> int:
     ref = task.ref
     if task.branch is None:
         raise CommandError(f"{ref} has no branch, so there's nothing to merge.")
+    blocked = Board.merge_blocker(task, events)
+    if blocked:
+        raise CommandError(blocked)
     commit = Board.run_commit(events)
     if commit is None:
         raise CommandError(f"No worker run recorded a commit for {ref}, so there's nothing of its to merge.")
     if Board.merged_commit(events) == commit:
         raise CommandError(f"{task.branch} is already merged: the board has it merged at the run's commit.")
     root = _root(args)
+    try:
+        into = gitwork.current_branch(root)
+    except gitwork.GitError as exc:
+        raise CommandError(str(exc)) from None
+    if into is None:
+        raise CommandError("Your checkout isn't on a branch (HEAD is detached). Check out the branch to merge into "
+                           "first, such as: git checkout main")
+    if into.startswith("handoff/"):
+        raise CommandError(f"Your checkout has {escape(into)} out, a task's own branch. Check out your project's "
+                           "branch first, such as: git checkout main")
     if not args.yes:
         if not _interactive():
             raise CommandError(f"Say you want it merged, like: handoff merge {ref} --yes")
-        console.print(f"\n  Merge {escape(task.branch)} ({escape(clean_line(task.title))}) into the branch you have "
-                      "checked out, as one merge commit; nothing is pushed.", soft_wrap=True)
+        console.print(f"\n  Merge {escape(task.branch)} ({escape(clean_line(task.title))}) into {escape(into)}, in "
+                      f"{escape(str(root))}, as one merge commit; nothing is pushed.", soft_wrap=True)
         answer = console.input(f"  Merge {escape(ref)}? [y/N] ")
         if not answer.strip().lower().startswith("y"):
             _hint("Not merged.")
@@ -1456,6 +1469,7 @@ def cmd_merge(argv: list[str]) -> int:
                            f"changed:\n{listed}") from None
     except (Changed, gitwork.AlreadyMerged, gitwork.GitError) as exc:
         raise CommandError(str(exc)) from None
+    board = _board(args)  # read again where it is: the merge changed the checkout it lives in
     board.record_merge(HUMAN, task_id, into, sha, short, commit)
     _ok(f"Merged {task.branch} into {into} at {short}. {ref} is done.")
     note = gitwork.remove_worktree(root, task_id)

@@ -1556,6 +1556,21 @@ class Board:
         return None
 
     @staticmethod
+    def merge_blocker(task: Task, events: list[Event]) -> str | None:
+        """Why the task's branch can't be merged now, in words; None when it can be tried. Only a finished task's
+        (handed off, in review or done), and never while a run is under way or approved and waiting: a merge
+        removes the worktree that run works in."""
+        if task.status not in ("handed_off", "in_review", "done"):
+            return (f"{task.ref} is {task.status.replace('_', ' ')}: merge a task once its work is handed back "
+                    "(handed off, in review or done).")
+        state = next((e for e in reversed(events) if e.kind in STATE_EVENTS), None)
+        if state is not None and state.kind == "worker" and state.data.get("state") == "started":
+            return f"A run of {task.ref} is under way. Merge it when the run is over."
+        if state is not None and state.kind == "approved":
+            return f"{task.ref} is approved for another run. Withdraw that approval first, or let it run."
+        return None
+
+    @staticmethod
     def merged_commit(events: list[Event]) -> str | None:
         """The run's commit the task's latest merge took in. Merged when it's run_commit()."""
         for event in reversed(events):

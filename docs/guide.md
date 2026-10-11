@@ -173,8 +173,11 @@ handoff worker --agent codex             # runs it, then waits for your next app
    commit anything that looks like a secret; a JSON Web Token, often a test's sample, is committed and
    named in the handback for you to check) and hands the task back to you, or to whoever you named with
    `--return-to`, with what was done, what's left, and how to check it.
-4. You review the branch, run the tests and merge it yourself: `git merge handoff/T-7`, then
-   `git worktree remove .handoff/worktrees/T-7`.
+4. You review the branch and run the tests, then merge it: `handoff merge T-7` (or Merge in the Ixel
+   window). That's one merge commit on the branch you have out, never pushed; the task is done and its
+   worktree removed (the branch stays). It refuses, changing nothing, when the merge could touch files of
+   yours git doesn't track or the board; SECURITY.md lists when. Merged by hand with git instead, mark the
+   task done yourself.
 
 `handoff approve` shows you the task first, as the agent will get it (its history too, notes and handoffs
 included), and asks before approving (`--yes` skips the question). For an answer, review or picture, it
