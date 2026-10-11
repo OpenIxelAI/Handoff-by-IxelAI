@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Mapping
 
-from handoff import approvals
+from handoff import approvals, usage
 from handoff.globs import PathError, normalize_path, overlaps
 from handoff.project import BOARD_DIR, BOARD_FILE, OUTPUTS_DIR
 from handoff.sanitize import clean_line, clean_text, find_secret
@@ -391,6 +391,11 @@ def run_kind(approval: "Event") -> str:
     """What an approval lets the worker do (approvals made before there were kinds are edits)."""
     kind = approval.data.get("kind", "edit")
     return kind if kind in RUN_KINDS else "unknown"
+
+
+def run_models(approval: "Event") -> list[str]:
+    """The models an approval runs on, biggest first ([]: the agent's own default)."""
+    return (approvals.check_models(approval.data.get("models")) or []) if "models" in approval.data else []
 
 
 def safe_name(value: object) -> str | None:
@@ -1299,7 +1304,7 @@ class Board:
         return None if used else event
 
     def approve(self, actor: str, task_id: int, worker: str, return_to: str = HUMAN, kind: str = "edit",
-                target: Mapping | None = None, shown: str | None = None) -> Task:
+                target: Mapping | None = None, shown: str | None = None, models: list[str] | None = None) -> Task:
         """The person lets the worker run `worker` on this task, once, for one kind of run (RUN_KINDS).
         Results go to `return_to`. A review or a change can be of two given commits (`target`:
         approvals.check_target), such as a pull request fetched into the project: a review reads them
@@ -1307,7 +1312,9 @@ class Board:
         Approved again without one, the task keeps the commits it was last approved for (a pull request's
         review run again reads that pull request, not your own changes). `shown` is content_of() the task
         and history the person was shown: if anything changed since (a note added while they read it), it's
-        refused with Changed, so what's sealed is what they saw."""
+        refused with Changed, so what's sealed is what they saw. An edit can name its `models`
+        (approvals.check_models): one model runs it, or a chain, biggest first, where the first plans and the
+        others do the steps."""
         actor = check_name(actor, "actor")
         self._require_human(actor, "approve tasks for the worker")
         worker = check_name(worker, "worker")
@@ -1324,6 +1331,13 @@ class Board:
             target = approvals.check_target(target)
             if target is None:
                 raise BoardError("The commits are two full commit ids and a few words saying what they are.")
+        if models is not None:
+            if kind not in approvals.MODEL_KINDS:
+                raise BoardError("Only a change can name the models it runs on.")
+            models = approvals.check_models(models)
+            if models is None:
+                raise BoardError(f"Models are 1 to {approvals.MAX_MODELS} model names, like claude-opus-5-5 or "
+                                 "haiku, each named once.")
         try:
             key = approvals.load_key(create=True)
         except OSError as exc:
@@ -1352,10 +1366,12 @@ class Board:
             else:
                 task = self._update(conn, task)
             content = self._content(conn, task)  # the task and its history, as the agent will get them
-            sealed = approvals.seal(key, self.path, task.id, worker, return_to, at, kind, target, content)
+            sealed = approvals.seal(key, self.path, task.id, worker, return_to, at, kind, target, content, models)
             data = {"worker": worker, "kind": kind, "return_to": return_to, "content": content, **sealed}
             if target is not None:
                 data["target"] = target
+            if models is not None:
+                data["models"] = models
             self._event(conn, task.id, actor, "approved", data=data, at=at)
             return task
 
@@ -1474,25 +1490,31 @@ class Board:
     def finish_run(self, worker: str, task_id: int, return_to: str, done: str, left: str = "", verify: str = "",
                    files: Iterable[str] | None = None, branch: str | None = None,
                    extra: dict | None = None) -> Task:
-        """Record a finished run and hand the task on. `extra` keeps the run's base and commit (ids only)."""
+        """Record a finished run and hand the task on. `extra` keeps the run's base and commit (ids only) and
+        what it used (usage.check)."""
         worker = check_name(worker, "worker")
         fields = self._handoff_fields(worker, return_to, done, left, verify, files, branch)
         ids = {k: v for k, v in (extra or {}).items()
                if k in ("base", "commit") and isinstance(v, str) and v.isalnum() and len(v) <= 64}
+        used = usage.check((extra or {}).get("usage"))
+        if used:
+            ids["usage"] = used
         with self._write() as conn:
             task = self._get(conn, task_id)
             self._require_running(conn, task, worker)
             self._event(conn, task.id, worker, "worker", data={"state": "finished", **ids})
             return self._hand_off(conn, task, worker, fields)
 
-    def fail_run(self, worker: str, task_id: int, return_to: str, reason: str) -> Task:
+    def fail_run(self, worker: str, task_id: int, return_to: str, reason: str, used: dict | None = None) -> Task:
+        """Record a run that failed. `used`: what it used before it stopped (usage.check)."""
         worker = check_name(worker, "worker")
         return_to = check_name(return_to, "return_to")
         reason = _text(reason, "The reason", required=True)
+        used = usage.check(used)
         with self._write() as conn:
             task = self._get(conn, task_id)
             self._require_running(conn, task, worker)
-            self._event(conn, task.id, worker, "worker", data={"state": "failed"})
+            self._event(conn, task.id, worker, "worker", data={"state": "failed", **({"usage": used} if used else {})})
             before = task.status
             task = self._update(conn, task, status="blocked", waiting_on=return_to)
             self._event(conn, task.id, worker, "status", reason,

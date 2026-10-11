@@ -35,7 +35,7 @@ import sys
 from itertools import chain, combinations
 from pathlib import Path
 
-from handoff import __version__
+from handoff import __version__, usage
 from handoff.board import (
     ACTIVE,
     HUMAN,
@@ -323,10 +323,13 @@ def _event(event: Event) -> dict:
         detail = "\n".join(string_list(event.data.get("paths")))
     elif event.kind == "review" and checks_text(event.data.get("checks")):
         detail = checks_text(event.data["checks"])
+    elif event.kind == "worker" and usage.check(event.data.get("usage")):
+        detail = "\n".join(usage.lines(event.data["usage"]))
     panel = event.data.get("panel")
+    used = usage.check(event.data.get("usage")) if event.kind == "worker" else None
     return {"id": event.id, "at": event.at, "actor": event.actor, "kind": event.kind, "summary": describe(event, _who),
             "text": event.text, "detail": detail,
-            "panel": panel_text(panel) if isinstance(panel, dict) else ""}
+            "panel": panel_text(panel) if isinstance(panel, dict) else "", "usage": used}
 
 
 def board_summary(board: Board, root: Path, tasks: list[Task], revision: str | None = None) -> dict:
@@ -347,8 +350,10 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
     summary = _summaries(board, [task])[0]
     # Per kind of run, what approving it again is of (Board.approve keeps it, while its approval checks out)
     targets = board.approval_targets(task.id)
+    used = usage.merge(*(e.data.get("usage") for e in events if e.kind == "worker"))
     return {"task": {**summary, "body": task.body, "acceptance": task.acceptance, "targets": targets,
-                     "content": content_of(task, events)},  # (approve's `shown`)
+                     "content": content_of(task, events),  # (approve's `shown`)
+                     "usage": used, "cost": usage.total_cost(used)},  # (every run's, model by model)
             "events": [_event(e) for e in events], "claims": [c.path_glob for c in claims],
             "overlaps": [o.describe() for o in board.overlaps_for(task.id)],
             "children": _summaries(board, children), "outputs": _outputs(root, task),
@@ -360,7 +365,9 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
 # What this Handoff can do beyond the ops, for a window that needs it. run-target: a review or a change can
 # be approved for a pull request's commits (approve's args.target), which an older Handoff would ignore.
 # approve-shown: approve's args.shown (task's `content`) refuses an approval of a task that changed since.
-FEATURES = ("run-target", "approve-shown")
+# run-models: an edit can name its models (approve's args.models: one model, or a chain, biggest first, where the
+# first plans and the others do the steps). run-usage: worker runs say what they used (events' and tasks' usage).
+FEATURES = ("run-target", "approve-shown", "run-models", "run-usage")
 
 
 def op_hello(request: dict) -> dict:
@@ -496,7 +503,7 @@ def _work_left(root: Path, ref: str) -> list[str]:
 
 
 def op_approve(request: dict) -> dict:
-    from handoff.worker import AGENTS
+    from handoff.worker import AGENTS, CHAIN_AGENTS
     board = _board(_project(request))
     args = request.get("args", {})
     agent = _name(args.get("agent"), "agent")
@@ -512,8 +519,14 @@ def op_approve(request: dict) -> dict:
     target = args.get("target")
     if target is not None and not isinstance(target, dict):
         raise ApiError("usage", "args.target must be an object: base, head and label.")
+    models = args.get("models")
+    if models is not None and not isinstance(models, list):
+        raise ApiError("usage", "args.models must be a list of model names, biggest first.")
+    if models is not None and len(models) > 1 and agent not in CHAIN_AGENTS:
+        raise BoardError(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}; {agent} takes one model.")
     shown = _arg(args, "shown", str, required=False, default=None)  # the `content` of the task you showed
-    return _task_reply(board, board.approve(HUMAN, _task_arg(args), agent, return_to, kind, target, shown))
+    return _task_reply(board, board.approve(HUMAN, _task_arg(args), agent, return_to, kind, target, shown,
+                                            models or None))
 
 
 def op_revoke(request: dict) -> dict:

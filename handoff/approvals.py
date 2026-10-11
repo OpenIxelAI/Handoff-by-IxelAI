@@ -16,6 +16,8 @@ or turned from an answer into an edit, either. It also seals a hash of what the 
 task's title, body and checks, and its history up to the approval), so that can't be changed afterwards
 by writing to the board. A review or a change of a pull request also seals its two commits (its
 `target`: a review reads them, a change starts from its head), so it can't be pointed at other code.
+An edit can name the models it runs on (its `models`: one model, or a chain where the first plans and the
+rest do the steps), sealed too, so a board can't move a run to a bigger, dearer model.
 
 Each approval is good for one run. When a run starts, its nonce is added to a list next to the key
 (approvals-used), and an approval whose nonce is on it never runs again, even if it's copied back into
@@ -110,6 +112,20 @@ def board_identity(board_path: Path) -> str:
 
 
 TARGET_KINDS = ("review", "edit")  # the runs that can be of given commits
+MODEL_KINDS = ("edit",)  # the runs that can name their models
+MAX_MODELS = 4  # a planner and up to three models for its steps
+_MODEL = re.compile(r"^[a-z0-9][a-z0-9.\-]{0,63}$")
+
+
+def check_models(models: object) -> list[str] | None:
+    """A run's models as an approval keeps them: 1 to MAX_MODELS model names (claude-opus-5-5, or an alias the
+    agent knows, like opus), no repeats. One model runs the task; more make a chain, biggest first: the first
+    plans the steps and gives each to one of the others. None when it isn't one."""
+    if not isinstance(models, list) or not 0 < len(models) <= MAX_MODELS:
+        return None
+    if not all(isinstance(m, str) and _MODEL.fullmatch(m) for m in models) or len(set(models)) != len(models):
+        return None
+    return list(models)
 
 
 def check_target(target: object) -> dict[str, str] | None:
@@ -126,28 +142,31 @@ def check_target(target: object) -> dict[str, str] | None:
 
 
 def _message(board_path: Path, task_id: int, worker: str, kind: str, return_to: str, at: str, nonce: str,
-             target: Mapping | None = None, content: str | None = None) -> bytes:
+             target: Mapping | None = None, content: str | None = None, models: list[str] | None = None) -> bytes:
     fields = {"board": board_identity(board_path), "task": task_id, "worker": worker, "kind": kind,
               "return_to": return_to, "at": at, "nonce": nonce}
     if target is not None:  # (approvals without one seal what they always did)
         fields["target"] = dict(target)
+    if models is not None:
+        fields["models"] = list(models)
     if content is not None:  # (approvals from before Handoff sealed it don't run: see Board._sealed)
         fields["content"] = content
     return json.dumps(fields, sort_keys=True, ensure_ascii=True).encode("ascii")
 
 
 def seal(key: bytes, board_path: Path, task_id: int, worker: str, return_to: str, at: str,
-         kind: str = "edit", target: Mapping | None = None, content: str | None = None) -> dict[str, str]:
+         kind: str = "edit", target: Mapping | None = None, content: str | None = None,
+         models: list[str] | None = None) -> dict[str, str]:
     """The fields an approval event stores: a fresh nonce and the seal over everything it approves."""
     nonce = secrets.token_hex(16)
-    mac = hmac.new(key, _message(board_path, task_id, worker, kind, return_to, at, nonce, target, content),
+    mac = hmac.new(key, _message(board_path, task_id, worker, kind, return_to, at, nonce, target, content, models),
                    hashlib.sha256).hexdigest()
     return {"nonce": nonce, "seal": mac}
 
 
 def is_sealed(key: bytes | None, board_path: Path, task_id: int, data: Mapping, at: str) -> bool:
     """Was this approval made here, by `handoff approve`, for exactly this board, task and kind of run (and
-    the commits it's of, and the content it sealed)?"""
+    the commits it's of, the models it runs on, and the content it sealed)?"""
     nonce, mac, worker, return_to = (data.get(k) for k in ("nonce", "seal", "worker", "return_to"))
     kind = data.get("kind", "edit")  # approvals for an edit didn't always say so
     if key is None or not all(isinstance(v, str) and v for v in (nonce, mac, worker, return_to, kind)):
@@ -157,9 +176,14 @@ def is_sealed(key: bytes | None, board_path: Path, task_id: int, data: Mapping, 
         target = check_target(data["target"])
         if target is None or kind not in TARGET_KINDS:
             return False
+    models = None
+    if "models" in data:
+        models = check_models(data["models"])
+        if models is None or kind not in MODEL_KINDS:
+            return False
     content = data.get("content")
     if content is not None and not (isinstance(content, str) and _HEX.fullmatch(content)):
         return False
-    expected = hmac.new(key, _message(board_path, task_id, worker, kind, return_to, at, nonce, target, content),
-                        hashlib.sha256).hexdigest()
+    expected = hmac.new(key, _message(board_path, task_id, worker, kind, return_to, at, nonce, target, content,
+                                      models), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, mac)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from handoff import approvals, usage
 from handoff.board import CHECK_RESULTS as _CHECK_RESULTS
 from handoff.board import STATUSES as _STATUSES
 from handoff.board import Event, safe_name
@@ -104,12 +105,21 @@ def describe(event: Event, who: Callable[[str], str] | None = None) -> str:
             what = f" to {'review' if kind == 'review' else 'work on'} {clean_line(target['label'])[:300]}"
         runs = (f"the {name('worker', 'unknown')} worker" if kind == "edit" else
                 f"{name('worker', 'unknown')}, through Ixel MAT,")  # (answers and the like run no worker)
+        models = approvals.check_models(data.get("models")) if kind == "edit" and "models" in data else None
+        if models and len(models) == 1:
+            runs += f" on {models[0]}"
+        elif models:
+            runs += f" as a chain ({models[0]} plans; {', '.join(models[1:])} do the steps)"
         return f"approved it for {runs}{what} (results go to {name('return_to', 'human')})"
     if event.kind == "worker":
         ixel = data.get("kind") in ("answer", "review", "image")
-        return {"started": "started an Ixel MAT run" if ixel else "started a worker run",
+        said = {"started": "started an Ixel MAT run" if ixel else "started a worker run",
                 "finished": "finished the run", "failed": "stopped: the run failed",
                 "revoked": "revoked the approval"}.get(data.get("state"), "did something to the run")
+        used = usage.check(data.get("usage"))
+        if used:
+            said += f" (used about ${usage.total_cost(used):.4f} on {', '.join(used['models'])})"
+        return said
     return "did something this version of Handoff doesn't know"
 
 
