@@ -243,7 +243,7 @@ claude's edits in a dispatch.
 
 **How hard each model thinks.** `--effort` sets it, in the agent's own words: claude (Claude Code's
 `--effort`) takes low, medium, high, xhigh or max; codex (its `model_reasoning_effort`) takes minimal, low,
-medium, high or xhigh. Leave it out and each model thinks as hard as it does by default. In a chain, give one
+medium, high, xhigh, max or ultra (the newest GPT models take them all; older ones fewer). Leave it out and each model thinks as hard as it does by default. In a chain, give one
 model its own after a colon (`claude-fable-5-1:max`); `--effort` covers the models that don't have one. Effort
 costs tokens: the biggest model at max effort is the dearest part of a chain, so save it for the planning that
 needs it. Claude Code's "ultracode" isn't an effort level (it's how a session runs several agents at once), so

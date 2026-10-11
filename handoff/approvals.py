@@ -135,7 +135,7 @@ _EFFORT = re.compile(r"^[a-z]{1,16}$")
 def check_efforts(efforts: object, models: list[str] | None) -> dict[str, str] | None:
     """A run's thinking levels as an approval keeps them: {model: level} for some of the models it names, or
     {"": level} for the agent's own model when it names none. A level is a word in the agent's own scale (Claude
-    Code's low … max, Codex's minimal … xhigh); the worker checks its agent takes it. None when it isn't one."""
+    Code's low … max, Codex's minimal … ultra); the worker checks its agent takes it. None when it isn't one."""
     if not isinstance(efforts, dict) or not efforts:
         return None
     names = set(models) if models else {""}

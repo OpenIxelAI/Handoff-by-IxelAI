@@ -334,8 +334,9 @@ def test_each_agent_is_told_its_effort_its_own_way(board, repo):
     codex = Worker(board, repo, "codex", runner=Agent({}), command="codex")
     assert codex.argv(model="gpt-5.5", effort="xhigh")[-5:] == ["--model", "gpt-5.5", "-c",
                                                                   'model_reasoning_effort="xhigh"', "-"]
-    with pytest.raises(WorkerUnavailable, match="codex worker can't think at max effort: it takes minimal"):
-        codex.argv(effort="max")
+    assert codex.argv(effort="ultra")[-3:] == ["-c", 'model_reasoning_effort="ultra"', "-"]
+    with pytest.raises(WorkerUnavailable, match="codex worker can't think at ultracode effort: it takes minimal"):
+        codex.argv(effort="ultracode")
 
 
 def test_the_api_takes_efforts_and_says_what_each_worker_takes(board, repo):
@@ -346,7 +347,8 @@ def test_the_api_takes_efforts_and_says_what_each_worker_takes(board, repo):
     assert approval.data["efforts"] == {"gpt-5.5": "xhigh"}
     workers = api.task_detail(board, repo, t.id)["task"]["workers"]
     assert workers["claude"] == {"efforts": ["low", "medium", "high", "xhigh", "max"], "chain": True}
-    assert workers["codex"] == {"efforts": ["minimal", "low", "medium", "high", "xhigh"], "chain": False}
+    assert workers["codex"] == {"efforts": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                                "chain": False}
     assert "run-effort" in api.op_hello({})["features"]
     with pytest.raises(api.ApiError, match="args.efforts must be an object"):
         api.op_approve({"project": str(repo), "args": {"task": t.ref, "agent": "claude", "efforts": "high"}})

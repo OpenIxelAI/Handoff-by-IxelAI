@@ -604,8 +604,8 @@ def test_approve_a_chain_with_an_effort_for_each_model(project, capsys):
     assert approval.data["efforts"] == {"claude-fable-5-1": "max", "claude-opus-5-5": "low", "claude-haiku-5-5": "low"}
     for args, said in ((["claude", "--model", "opus", "--effort", "ultracode"],
                         "claude takes effort low, medium, high, xhigh or max, not ultracode"),
-                       (["codex", "--effort", "max"],
-                        "codex takes effort minimal, low, medium, high or xhigh, not max")):
+                       (["codex", "--effort", "ludicrous"],
+                        "codex takes effort minimal, low, medium, high, xhigh, max or ultra, not ludicrous")):
         with pytest.raises(SystemExit) as exited:
             run(capsys, "approve", "T-1", *args, "--yes")
         assert exited.value.code == 2 and said in capsys.readouterr().err

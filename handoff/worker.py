@@ -56,9 +56,10 @@ CLAUDE_SANDBOX_TOOLS = CLAUDE_TOOLS + ("Bash",)
 PLANNER_TOOLS = ("Read", "Glob", "Grep")  # a chain's planner reads; the models it gives the steps to change files
 MAX_STEPS = 6
 # How hard each agent's model thinks, in the agent's own words, least first: Claude Code's --effort (as its --help
-# lists them) and Codex's model_reasoning_effort
+# lists them) and Codex's model_reasoning_effort (the newest GPT models go up to max and ultra; older ones take
+# fewer, and the Ixel app's Board offers only those a model takes)
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
-CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 WORKER_RULES = ("You're running headlessly for Handoff's worker, with nobody watching. You can read and edit "
                 "files in the current folder only, and you can't run commands or use the network.")

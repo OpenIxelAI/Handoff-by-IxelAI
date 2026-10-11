@@ -1445,8 +1445,8 @@ def cmd_approve(argv: list[str]) -> int:
                              "with a colon: claude-fable-5-1:max")
     parser.add_argument("--effort", metavar="LEVEL",
                         help="for an edit, how hard the model thinks, in the agent's own levels: claude takes low, "
-                             "medium, high, xhigh or max; codex minimal, low, medium, high or xhigh (default: the "
-                             "model's own). With --chain, for each model that has no effort of its own")
+                             "medium, high, xhigh or max; codex minimal, low, medium, high, xhigh, max or ultra "
+                             "(default: the model's own). With --chain, for each model that has no effort of its own")
     parser.add_argument("--revoke", action="store_true", help="withdraw an approval the worker hasn't used yet")
     parser.add_argument("--yes", action="store_true", help="don't ask; approve the task as shown")
     args = parser.parse_args(argv)
