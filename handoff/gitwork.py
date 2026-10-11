@@ -17,7 +17,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from handoff.board import task_of_name
 from handoff.proc import find_on_path
@@ -242,9 +242,48 @@ def unstage_all(root: Path, worktree: Worktree) -> None:
     _git(root, ["reset", "-q"], worktree=worktree)
 
 
-def secrets_in(worktree: Worktree, paths: list[str], tokens: list[str] | None = None) -> list[tuple[str, str]]:
-    """Staged files that look like they contain a secret: (path, what it looks like). Given a `tokens` list,
-    a file whose only one is a JSON Web Token goes on it instead (such as a test's sample token)."""
+# A file the worktree's last commit had is compared with that version, line by line, when it's at most this big;
+# a bigger one is checked whole
+MAX_COMPARE_BYTES = 8 * MAX_SCAN_BYTES
+
+
+def _known_lines(root: Path, worktree: Worktree, name: str) -> set[str] | None:
+    """The lines a file had at the worktree's last commit, or None: it's new, or too big to compare."""
+    spec = f"HEAD:{name}"
+    size = _git(root, ["cat-file", "-s", spec], worktree=worktree, check=False).stdout.strip()
+    if not size.isdigit() or int(size) > MAX_COMPARE_BYTES:
+        return None
+    blob = _git(root, ["cat-file", "blob", spec], worktree=worktree, check=False)
+    return set(blob.stdout.splitlines()) if blob.returncode == 0 else None
+
+
+def _chunks(file) -> Iterator[bytes]:
+    while chunk := file.read(MAX_SCAN_BYTES):
+        yield chunk
+
+
+def _added(file, known: set[str]) -> Iterator[bytes]:
+    """The lines of a file that its last commit didn't have anywhere, in chunks of about MAX_SCAN_BYTES. Lines
+    are compared as text, as git gives the old ones; a line too long to read at once is always checked, whole."""
+    piece, long = bytearray(), False
+    while line := file.readline(MAX_SCAN_BYTES):
+        whole = line.endswith(b"\n") or len(line) < MAX_SCAN_BYTES  # (else the rest of it comes next)
+        if long or not whole or any(part not in known for part in line.decode("utf-8", "replace").splitlines()):
+            piece += line
+            if len(piece) >= MAX_SCAN_BYTES:
+                yield bytes(piece)
+                piece.clear()
+        long = not whole
+    if piece:
+        yield bytes(piece)
+
+
+def secrets_in(root: Path, worktree: Worktree, paths: list[str],
+               tokens: list[str] | None = None) -> list[tuple[str, str]]:
+    """Staged files that look like they add a secret: (path, what it looks like). A file the worktree's last
+    commit already had is checked only for the lines it adds, so a secret that was already committed there (such
+    as a test's fake key) doesn't hold up the changes around it; a new file is checked whole. Given a `tokens`
+    list, a file whose only one is a JSON Web Token goes on it instead (such as a test's sample token)."""
     found = []
     for name in paths:
         path = worktree.path / name
@@ -252,9 +291,10 @@ def secrets_in(worktree: Worktree, paths: list[str], tokens: list[str] | None = 
         try:
             if path.is_symlink() or not path.is_file():
                 continue
+            known = _known_lines(root, worktree, name)
             with path.open("rb") as file:
                 overlap = b""
-                while chunk := file.read(MAX_SCAN_BYTES):
+                for chunk in (_chunks(file) if known is None else _added(file, known)):
                     combined = overlap + chunk
                     text = combined.decode("utf-8", "replace")
                     what = find_secret(text, tokens=tokens is None)

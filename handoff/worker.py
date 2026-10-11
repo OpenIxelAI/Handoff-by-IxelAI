@@ -36,10 +36,10 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from handoff import approvals, gitwork, sandbox, usage
-from handoff.board import HUMAN, Board, BoardError, Event, Task, run_kind, run_models, safe_name
+from handoff.board import HUMAN, Board, BoardError, Event, Task, run_efforts, run_kind, run_models, safe_name
 from handoff.describe import describe
 from handoff.fence import Reply, numbered, quote_event
 from handoff.ixel import DEPTH_VAR, depth
@@ -55,6 +55,10 @@ CLAUDE_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
 CLAUDE_SANDBOX_TOOLS = CLAUDE_TOOLS + ("Bash",)
 PLANNER_TOOLS = ("Read", "Glob", "Grep")  # a chain's planner reads; the models it gives the steps to change files
 MAX_STEPS = 6
+# How hard each agent's model thinks, in the agent's own words, least first: Claude Code's --effort (as its --help
+# lists them) and Codex's model_reasoning_effort
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 WORKER_RULES = ("You're running headlessly for Handoff's worker, with nobody watching. You can read and edit "
                 "files in the current folder only, and you can't run commands or use the network.")
@@ -80,7 +84,9 @@ BRIEF = ("You're {agent}, working on task {ref} through Handoff's worker. The pe
 
 PLAN_BRIEF = ("You're {planner}, planning task {ref} for Handoff's worker. The person approved this task to be done "
               "as a chain: you plan, and other models do the steps, one after another, in this folder (a git "
-              "worktree of their project). Don't change any files yourself. Read what you need, then split the "
+              "worktree of their project). Don't change any files yourself. Read only what you need to split the "
+              "task well, such as the files it names: the models doing the steps read the files themselves, so "
+              "don't read the whole project, and name files in the steps rather than copying them. Then split the "
               "task into 1 to {max_steps} steps, in order, that together finish it.\n"
               "\n"
               "Give each step to one of these models, biggest first: {tiers}. Give a step to the smallest model "
@@ -116,6 +122,8 @@ class AgentSpec:
     fallback: "AgentSpec | None" = None  # what runs where the sandbox can't; None: refuse
     model_flag: str = ""             # how it's told which model to use ("" : it can't be)
     reports_usage: bool = False      # its output is Claude Code's JSON result, with what it used
+    effort_args: tuple[str, ...] = ()    # how it's told how hard to think, with {effort} for the level
+    effort_levels: tuple[str, ...] = ()  # the levels it takes, least first (none: it can't be told)
 
 
 _CLAUDE_FLAGS = ("--restricted", "--tools", "--strict-mcp-config", "--permission-mode", "--no-session-persistence",
@@ -132,7 +140,7 @@ CLAUDE_EDIT_ONLY = AgentSpec(
     powers=("You can read and edit files in this folder and nowhere else. You can't run commands, tests or "
             "builds, and you can't use the network, so don't try."),
     note="The worker ran claude edit-only: no commands or tests were run.",
-    model_flag="--model", reports_usage=True,
+    model_flag="--model", reports_usage=True, effort_args=("--effort", "{effort}"), effort_levels=CLAUDE_EFFORTS,
 )
 
 # What any agent may see of the environment: enough to run, find its login, and reach its API
@@ -178,6 +186,11 @@ class _Withheld(Exception):
     """The changes look like they hold a secret, so nothing was committed; the message says where."""
 
 
+def _on(agent: str, model: str | None, effort: str | None) -> str:
+    """What ran a run, as its commit says: "claude, claude-opus-5-5, high effort"."""
+    return ", ".join([agent, *([model] if model else []), *([f"{effort} effort"] if effort else [])])
+
+
 def _token_note(tokens: list[str]) -> str | None:
     if not tokens:
         return None
@@ -205,10 +218,12 @@ def build_prompt(spec: AgentSpec, task: Task, history: list[Event], branch: str,
 
 
 def plan_prompt(spec: AgentSpec, task: Task, history: list[Event], models: list[str],
-                target: dict | None = None) -> str:
+                target: dict | None = None, efforts: dict[str, str] | None = None) -> str:
     """What a chain's planner (models[0]) is given: how to plan for the others, then the task."""
     powers = "run commands and tests here" if spec.sandboxed else "only read and edit files (no commands or tests)"
-    brief = PLAN_BRIEF.format(planner=models[0], ref=task.ref, max_steps=MAX_STEPS, tiers=", ".join(models[1:]),
+    efforts = efforts or {}
+    tiers = ", ".join(f"{m} ({efforts[m]} effort)" if m in efforts else m for m in models[1:])
+    brief = PLAN_BRIEF.format(planner=models[0], ref=task.ref, max_steps=MAX_STEPS, tiers=tiers,
                               powers_short=powers)
     return brief + "\n\n" + task_text(task, history, target)
 
@@ -544,7 +559,7 @@ CLAUDE = AgentSpec(
     note=("The worker ran claude in a sandbox: it could run commands in the worktree, with no network and nothing "
           "else of yours visible. Dependencies installed only in your home or your own checkout weren't there."),
     sandboxed=True, login=ClaudeLogin, needs=("socat",), fallback=CLAUDE_EDIT_ONLY,
-    model_flag="--model", reports_usage=True,
+    model_flag="--model", reports_usage=True, effort_args=("--effort", "{effort}"), effort_levels=CLAUDE_EFFORTS,
 )
 
 CODEX = AgentSpec(
@@ -564,10 +579,23 @@ CODEX = AgentSpec(
     note=("The worker ran codex in a sandbox: it could run commands in the worktree, with no network and nothing "
           "else of yours visible. Dependencies installed only in your home or your own checkout weren't there."),
     sandboxed=True, login=CodexLogin, model_flag="--model",
+    effort_args=("-c", 'model_reasoning_effort="{effort}"'), effort_levels=CODEX_EFFORTS,
 )
 
 AGENTS = {"claude": CLAUDE, "codex": CODEX}
 CHAIN_AGENTS = ("claude",)  # the agents a chain of models can run on (its planner needs read-only tools)
+
+
+def effort_problem(agent: str, efforts: Mapping[str, str] | None) -> str | None:
+    """Why the agent's worker can't be told these efforts (None: it can, or there are none)."""
+    spec = AGENTS.get(agent)
+    levels = spec.effort_levels if spec else ()
+    for level in (efforts or {}).values():
+        if level not in levels:
+            if not levels:
+                return f"The {agent} worker can't be told how hard to think."
+            return f"{agent} takes effort {', '.join(levels[:-1])} or {levels[-1]}, not {level}."
+    return None
 
 
 def _read_only(args: list[str]) -> list[str]:
@@ -623,6 +651,7 @@ class Worker:
         self.fallback_reason: str | None = None  # why it's running edit-only, when its sandbox can't run here
         self.command = command or find_on_path(self.spec.command)
         self.bwrap: str | None = None
+        self.help = ""  # what `<command> --help` said, once check() has run
         # Tasks that couldn't start (task id: its approval, and the login problem then): run_pending passes
         # them by until the approval or the login changes, so a worker doesn't retry one every few seconds
         self._waiting: dict[int, tuple[int, str | None]] = {}
@@ -653,7 +682,8 @@ class Worker:
             raise WorkerUnavailable("The check was stopped before it finished.") from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise WorkerUnavailable(f"Couldn't run `{self.spec.command} --help`: {exc}") from exc
-        missing = [flag for flag in self.spec.required_flags if flag not in proc.stdout + proc.stderr]
+        self.help = proc.stdout + proc.stderr
+        missing = [flag for flag in self.spec.required_flags if flag not in self.help]
         if missing:
             raise WorkerUnavailable(f"This version of {self.spec.command} doesn't have {', '.join(missing)}, which "
                                     "the worker needs to keep the agent in its worktree. Update it and try again.")
@@ -670,9 +700,11 @@ class Worker:
             return self.spec.login.missing(agent_env(self.spec))
         return None
 
-    def argv(self, values: dict[str, str] | None = None, model: str | None = None, plan: bool = False) -> list[str]:
+    def argv(self, values: dict[str, str] | None = None, model: str | None = None, plan: bool = False,
+             effort: str | None = None) -> list[str]:
         """The agent's command line, with its login's values in place of the placeholders (in one pass). `model`:
-        the model to run on (the agent's default if None). `plan`: a chain's planner, with read-only tools."""
+        the model to run on (the agent's default if None). `plan`: a chain's planner, with read-only tools.
+        `effort`: how hard the model thinks, one of the agent's effort_levels (its default if None)."""
         command = os.path.realpath(self.command) if self.spec.sandboxed else str(self.command)
         values = values or {}
         pattern = re.compile("|".join(re.escape(k) for k in values)) if values else None
@@ -684,7 +716,21 @@ class Worker:
                 raise WorkerUnavailable(f"The {self.spec.name} worker can't be told to use {model}.")
             at = len(args) - 1 if args and args[-1] == "-" else len(args)  # (codex reads the prompt from "-")
             args[at:at] = [self.spec.model_flag, model]
+        if effort:
+            at = len(args) - 1 if args and args[-1] == "-" else len(args)
+            args[at:at] = self._effort_args(effort)
         return [command, *args]
+
+    def _effort_args(self, effort: str) -> list[str]:
+        levels, name = self.spec.effort_levels, self.spec.name
+        if effort not in levels:
+            takes = f"takes {', '.join(levels[:-1])} or {levels[-1]}" if levels else "can't be told one"
+            raise WorkerUnavailable(f"The {name} worker can't think at {effort} effort: it {takes}.")
+        flag = self.spec.effort_args[0]
+        if flag.startswith("--") and self.help and flag not in self.help:
+            raise WorkerUnavailable(f"This version of {self.spec.command} has no {flag}. Update it, or approve the "
+                                    "task again without an effort.")
+        return [a.replace("{effort}", effort) for a in self.spec.effort_args]
 
     def run_pending(self, on_start: Callable[[Task, str], None] | None = None,
                     on_done: Callable[[RunResult], None] | None = None) -> list[RunResult]:
@@ -714,14 +760,16 @@ class Worker:
         return results
 
     def _launch(self, worktree: gitwork.Worktree, prompt: str, model: str | None = None, plan: bool = False,
-                timeout: float | None = None) -> tuple["subprocess.CompletedProcess[str]", str | None]:
+                timeout: float | None = None,
+                effort: str | None = None) -> tuple["subprocess.CompletedProcess[str]", str | None]:
         """Run the agent, in the sandbox with a private login if it has one. Returns its result and a login note."""
         if self.spec.sandboxed and self.bwrap is None:
             self.check()  # may fall back to edit-only
         env = agent_env(self.spec)
         timeout = self.timeout if timeout is None else timeout
         if not self.spec.sandboxed:
-            return self.runner(self.argv(model=model, plan=plan), prompt, env, timeout, str(worktree.path)), None
+            return self.runner(self.argv(model=model, plan=plan, effort=effort), prompt, env, timeout,
+                               str(worktree.path)), None
         assert self.spec.login is not None and self.bwrap is not None
         home = Path.home()
         login = self.spec.login(env)
@@ -732,8 +780,8 @@ class Worker:
             env = {k: v for k, v in env.items() if not _looks_secret(k)}
             env[login.home_var] = str(inside)
             env["HOME"] = str(home)
-            argv = sandbox.wrap(self.bwrap, self.argv(login.values(inside), model, plan), worktree=worktree.path,
-                                home=home, private={login.home: inside},
+            argv = sandbox.wrap(self.bwrap, self.argv(login.values(inside), model, plan, effort),
+                                worktree=worktree.path, home=home, private={login.home: inside},
                                 read_only=[*sandbox.install_dirs(self.command), *self.shared],
                                 env=env, hidden=self.hidden)
             proc = self.runner(argv, prompt, env, timeout, str(worktree.path))
@@ -806,14 +854,15 @@ class Worker:
             return fail(f"The worktree has links pointing outside it ({shown}), so Handoff won't run an agent "
                         f"there. Remove them from {branch}, then approve the task again.", branch=branch)
 
-        models = run_models(approval)
+        models, efforts = run_models(approval), run_efforts(approval)
         if len(models) > 1:
-            return self._chain(task, history, branch, return_to, target, worktree, models, fail)
+            return self._chain(task, history, branch, return_to, target, worktree, models, efforts, fail)
         model = models[0] if models else None
+        effort = efforts.get(model or "")
         prompt = build_prompt(self.spec, task, history, branch, target)
         login_note, used, reply = None, None, ""
         try:
-            proc, login_note = self._launch(worktree, prompt, model)
+            proc, login_note = self._launch(worktree, prompt, model, effort=effort)
             reply, used, error = self._read(proc)
             problem = None if proc.returncode == 0 and not error else self._exit_problem(proc, error)
         except subprocess.TimeoutExpired:
@@ -823,8 +872,8 @@ class Worker:
 
         try:  # keep whatever it changed, even from a run that failed, unless it holds a secret
             commit, tokens = self._commit(worktree, f"{task.ref}: {task.title}\n\nMade by the Handoff worker "
-                                          f"({agent}{f', {model}' if model else ''}) from the task as the person "
-                                          "approved it.\n")
+                                          f"({_on(agent, model, effort)}) from the task as the person approved "
+                                          "it.\n")
             files = gitwork.changed_files(self.root, worktree)
         except _Withheld as exc:
             return fail(f"{problem + ' ' if problem else ''}{exc}", used, branch=branch)
@@ -842,16 +891,22 @@ class Worker:
                             used, fail)
 
     def _chain(self, task: Task, history: list[Event], branch: str, return_to: str, target: dict | None,
-               worktree: gitwork.Worktree, models: list[str], fail: Callable[..., RunResult]) -> RunResult:
+               worktree: gitwork.Worktree, models: list[str], efforts: dict[str, str],
+               fail: Callable[..., RunResult]) -> RunResult:
         """A chain of models, biggest first: models[0] reads the task and plans the steps, giving each to one of the
         others; then each step runs in turn, in the same worktree, and is committed on its own, so the branch shows
-        which model made what. The whole chain gets the run's time limit."""
+        which model made what. `efforts`: how hard each model thinks. The whole chain gets the run's time limit.
+        If a step fails, the chain stops there: the steps before it stay committed, and the reason says what they
+        did."""
         agent, planner = self.spec.name, models[0]
         if not self.spec.reports_usage:
             return fail(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}, not {agent}.")
         deadline = time.monotonic() + self.timeout
         notes: list[str] = []
         spent: list[dict | None] = []
+        done_parts: list[str] = []
+        commit: str | None = None
+        tokens: list[str] = []
 
         def left_time() -> float:
             return max(deadline - time.monotonic(), 1.0)
@@ -859,7 +914,8 @@ class Worker:
         def launch(prompt: str, model: str, plan: bool = False) -> tuple[str, str | None]:
             """Run one model; its reply, and what went wrong (None if nothing did)."""
             try:
-                proc, note = self._launch(worktree, prompt, model, plan=plan, timeout=left_time())
+                proc, note = self._launch(worktree, prompt, model, plan=plan, timeout=left_time(),
+                                          effort=efforts.get(model))
             except subprocess.TimeoutExpired:
                 return "", f"{model} was stopped: the chain ran past its {duration(self.timeout)}."
             except (OSError, WorkerUnavailable) as exc:
@@ -870,36 +926,47 @@ class Worker:
             spent.append(used)
             return reply, (None if proc.returncode == 0 and not error else self._exit_problem(proc, error))
 
-        reply, problem = launch(plan_prompt(self.spec, task, history, models, target), planner, plan=True)
+        def stop(reason: str) -> RunResult:
+            """The chain stops here: why, and what the steps before it did and where their work is."""
+            if done_parts:
+                kept = (f"What they changed is committed on {branch}, up to {commit[:12]}." if commit else
+                        "They changed no files.")
+                reason += "\n\n" + _clip(f"The steps before it finished. {kept}\n\n" + "\n\n".join(done_parts))
+            token = _token_note(sorted(set(tokens))) if commit else None
+            return fail(reason + (f"\n\n{token}" if token else ""), usage.merge(*spent), branch=branch,
+                        commit=commit)
+
+        reply, problem = launch(plan_prompt(self.spec, task, history, models, target, efforts), planner, plan=True)
         if problem:
-            return fail(f"{planner} couldn't plan it: {problem}", usage.merge(*spent), branch=branch)
+            return stop(f"{planner} couldn't plan it: {problem}")
         steps = parse_plan(reply, models[1:])
         if steps is None:
             steps = [Step(models[1], "the whole task", "Do the whole task.")]
             notes.append(f"{planner} didn't write a plan the worker could read, so {models[1]} did the whole task.")
-        done_parts, verify_parts, left, tokens, commit = [], [], "", [], None
+        verify_parts, left = [], ""
         for number, step in enumerate(steps, 1):
             before = len(spent)
             reply, problem = launch(step_prompt(self.spec, task, history, branch, target, planner, steps, number),
                                     step.model)
             cost = usage.total_cost(usage.merge(*spent[before:]))
+            effort = efforts.get(step.model)
             try:
                 made, found = self._commit(worktree, f"{task.ref} step {number}/{len(steps)}: {step.title}\n\nMade by "
-                                           f"the Handoff worker ({agent}, {step.model}), planned by {planner}, "
-                                           "from the task as the person approved it.\n")
+                                           f"the Handoff worker ({_on(agent, step.model, effort)}), planned by "
+                                           f"{planner}, from the task as the person approved it.\n")
             except _Withheld as exc:
-                return fail(f"{problem + ' ' if problem else ''}{exc}", usage.merge(*spent), branch=branch,
-                            commit=commit)
+                return stop(f"Step {number} of {len(steps)} ({step.model}: {step.title}): "
+                            f"{problem + ' ' if problem else ''}{exc}")
             except gitwork.GitError as exc:
-                return fail(f"Committing step {number} failed: {exc}", usage.merge(*spent), branch=branch,
-                            commit=commit)
-            commit, tokens = made or commit, tokens + found
+                return stop(f"Committing step {number} of {len(steps)} ({step.model}: {step.title}) failed: {exc}")
             if problem:
-                kept = f" What the steps changed is committed on {branch}." if commit else ""
-                return fail(f"Step {number} of {len(steps)} ({step.model}: {step.title}) failed: {problem}{kept}",
-                            usage.merge(*spent), branch=branch, commit=commit)
+                kept = f" What it changed is committed on {branch}." if made else ""
+                commit, tokens = made or commit, tokens + found
+                return stop(f"Step {number} of {len(steps)} ({step.model}: {step.title}) failed: {problem}{kept}")
+            commit, tokens = made or commit, tokens + found
             step_done, step_left, step_verify = parse_reply(reply)
-            done_parts.append(f"Step {number} of {len(steps)}, by {step.model} (about ${cost:.4f}): {step.title}"
+            by = f"{step.model}, {effort} effort" if effort else step.model
+            done_parts.append(f"Step {number} of {len(steps)}, by {by} (about ${cost:.4f}): {step.title}"
                               f"{'' if made else ' (changed no files)'}\n{step_done}")
             if step_verify and step_verify not in verify_parts:
                 verify_parts.append(step_verify)
@@ -907,7 +974,7 @@ class Worker:
         try:
             files = gitwork.changed_files(self.root, worktree)
         except gitwork.GitError as exc:
-            return fail(f"Reading what the chain changed failed: {exc}", usage.merge(*spent), branch=branch)
+            return stop(f"Reading what the chain changed failed: {exc}")
         done = _clip(f"{planner} planned {len(steps)} step{'s' if len(steps) > 1 else ''}.\n\n"
                      + "\n\n".join(done_parts))
         if commit is None:
@@ -928,7 +995,7 @@ class Worker:
         Web Token (committed, and said: it's often a sample). _Withheld if anything looks like a secret."""
         staged = gitwork.stage_all(self.root, worktree)
         tokens: list[str] = []
-        found = gitwork.secrets_in(worktree, staged, tokens)
+        found = gitwork.secrets_in(self.root, worktree, staged, tokens)
         if found:
             gitwork.unstage_all(self.root, worktree)
             where = ", ".join(f"{path} ({what})" for path, what in found[:5])

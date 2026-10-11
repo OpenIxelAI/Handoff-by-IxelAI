@@ -398,6 +398,14 @@ def run_models(approval: "Event") -> list[str]:
     return (approvals.check_models(approval.data.get("models")) or []) if "models" in approval.data else []
 
 
+def run_efforts(approval: "Event") -> dict[str, str]:
+    """How hard each of an approval's models thinks: {model: level}, or {"": level} for the agent's own model
+    ({}: each model's default)."""
+    if "efforts" not in approval.data:
+        return {}
+    return approvals.check_efforts(approval.data["efforts"], run_models(approval) or None) or {}
+
+
 def safe_name(value: object) -> str | None:
     """A stored name if it's a valid one, 'unknown' if it isn't, None if there's none."""
     if value is None:
@@ -1304,7 +1312,8 @@ class Board:
         return None if used else event
 
     def approve(self, actor: str, task_id: int, worker: str, return_to: str = HUMAN, kind: str = "edit",
-                target: Mapping | None = None, shown: str | None = None, models: list[str] | None = None) -> Task:
+                target: Mapping | None = None, shown: str | None = None, models: list[str] | None = None,
+                efforts: Mapping | None = None) -> Task:
         """The person lets the worker run `worker` on this task, once, for one kind of run (RUN_KINDS).
         Results go to `return_to`. A review or a change can be of two given commits (`target`:
         approvals.check_target), such as a pull request fetched into the project: a review reads them
@@ -1314,7 +1323,8 @@ class Board:
         and history the person was shown: if anything changed since (a note added while they read it), it's
         refused with Changed, so what's sealed is what they saw. An edit can name its `models`
         (approvals.check_models): one model runs it, or a chain, biggest first, where the first plans and the
-        others do the steps."""
+        others do the steps. Its `efforts` say how hard they think (approvals.check_efforts): a level for each
+        model it names, or for the agent's own model when it names none."""
         actor = check_name(actor, "actor")
         self._require_human(actor, "approve tasks for the worker")
         worker = check_name(worker, "worker")
@@ -1338,6 +1348,13 @@ class Board:
             if models is None:
                 raise BoardError(f"Models are 1 to {approvals.MAX_MODELS} model names, like claude-opus-5-5 or "
                                  "haiku, each named once.")
+        if efforts is not None:
+            if kind not in approvals.MODEL_KINDS:
+                raise BoardError("Only a change can say how hard its models think.")
+            efforts = approvals.check_efforts(efforts, models)
+            if efforts is None:
+                raise BoardError("Each effort is one word, like high, for one of the models the run names (or for the "
+                                 "agent's own model when it names none).")
         try:
             key = approvals.load_key(create=True)
         except OSError as exc:
@@ -1366,12 +1383,15 @@ class Board:
             else:
                 task = self._update(conn, task)
             content = self._content(conn, task)  # the task and its history, as the agent will get them
-            sealed = approvals.seal(key, self.path, task.id, worker, return_to, at, kind, target, content, models)
+            sealed = approvals.seal(key, self.path, task.id, worker, return_to, at, kind, target, content, models,
+                                    efforts)
             data = {"worker": worker, "kind": kind, "return_to": return_to, "content": content, **sealed}
             if target is not None:
                 data["target"] = target
             if models is not None:
                 data["models"] = models
+            if efforts is not None:
+                data["efforts"] = efforts
             self._event(conn, task.id, actor, "approved", data=data, at=at)
             return task
 

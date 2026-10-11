@@ -592,6 +592,27 @@ def test_me_means_you(project, capsys, word):
     assert board.get(1).waiting_on == "human"
 
 
+def test_approve_a_chain_with_an_effort_for_each_model(project, capsys):
+    run(capsys, "add", "Task")
+    code, out, err = run(capsys, "approve", "T-1", "claude", "--chain",
+                         "claude-fable-5-1:max,claude-opus-5-5,claude-haiku-5-5", "--effort", "low", "--yes")
+    assert code == 0, err
+    assert ("as a chain: claude-fable-5-1 at max effort plans, then claude-opus-5-5 at low effort, claude-haiku-5-5 "
+            "at low effort do the steps") in out
+    approval = Board.open(project).events(1)[-1]
+    assert approval.data["models"] == ["claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"]
+    assert approval.data["efforts"] == {"claude-fable-5-1": "max", "claude-opus-5-5": "low", "claude-haiku-5-5": "low"}
+    for args, said in ((["claude", "--model", "opus", "--effort", "ultracode"],
+                        "claude takes effort low, medium, high, xhigh or max, not ultracode"),
+                       (["codex", "--effort", "max"],
+                        "codex takes effort minimal, low, medium, high or xhigh, not max")):
+        with pytest.raises(SystemExit) as exited:
+            run(capsys, "approve", "T-1", *args, "--yes")
+        assert exited.value.code == 2 and said in capsys.readouterr().err
+    code, out, err = run(capsys, "approve", "T-1", "claude", "--effort", "high", "--yes")
+    assert code == 0 and "Approved T-1 for the claude worker, at high effort." in out
+
+
 def test_approve_return_to_me(project, capsys):
     run(capsys, "add", "Task")
     assert run(capsys, "approve", "T-1", "claude", "--return-to", "me", "--yes")[0] == 0

@@ -353,7 +353,8 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
     used = usage.merge(*(e.data.get("usage") for e in events if e.kind == "worker"))
     return {"task": {**summary, "body": task.body, "acceptance": task.acceptance, "targets": targets,
                      "content": content_of(task, events),  # (approve's `shown`)
-                     "usage": used, "cost": usage.total_cost(used)},  # (every run's, model by model)
+                     "usage": used, "cost": usage.total_cost(used),  # (every run's, model by model)
+                     "workers": _workers()},
             "events": [_event(e) for e in events], "claims": [c.path_glob for c in claims],
             "overlaps": [o.describe() for o in board.overlaps_for(task.id)],
             "children": _summaries(board, children), "outputs": _outputs(root, task),
@@ -367,7 +368,15 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
 # approve-shown: approve's args.shown (task's `content`) refuses an approval of a task that changed since.
 # run-models: an edit can name its models (approve's args.models: one model, or a chain, biggest first, where the
 # first plans and the others do the steps). run-usage: worker runs say what they used (events' and tasks' usage).
-FEATURES = ("run-target", "approve-shown", "run-models", "run-usage")
+# run-effort: an edit can say how hard each model thinks (approve's args.efforts: {model: level}, or {"": level}
+# for the agent's own model), in the levels each worker takes (a task's `workers`).
+FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort")
+
+
+def _workers() -> dict:
+    """What each worker's edits can be given: its effort levels, least first, and whether it runs a chain."""
+    from handoff.worker import AGENTS, CHAIN_AGENTS
+    return {name: {"efforts": list(spec.effort_levels), "chain": name in CHAIN_AGENTS} for name, spec in AGENTS.items()}
 
 
 def op_hello(request: dict) -> dict:
@@ -503,7 +512,7 @@ def _work_left(root: Path, ref: str) -> list[str]:
 
 
 def op_approve(request: dict) -> dict:
-    from handoff.worker import AGENTS, CHAIN_AGENTS
+    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem
     board = _board(_project(request))
     args = request.get("args", {})
     agent = _name(args.get("agent"), "agent")
@@ -524,9 +533,15 @@ def op_approve(request: dict) -> dict:
         raise ApiError("usage", "args.models must be a list of model names, biggest first.")
     if models is not None and len(models) > 1 and agent not in CHAIN_AGENTS:
         raise BoardError(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}; {agent} takes one model.")
+    efforts = args.get("efforts")
+    if efforts is not None and not isinstance(efforts, dict):
+        raise ApiError("usage", 'args.efforts must be an object: a level for each model, like {"claude-opus-5-5": '
+                                '"high"}, or {"": "high"} for the agent\'s own model.')
+    if efforts and effort_problem(agent, efforts):
+        raise BoardError(effort_problem(agent, efforts))
     shown = _arg(args, "shown", str, required=False, default=None)  # the `content` of the task you showed
     return _task_reply(board, board.approve(HUMAN, _task_arg(args), agent, return_to, kind, target, shown,
-                                            models or None))
+                                            models or None, efforts or None))
 
 
 def op_revoke(request: dict) -> dict:

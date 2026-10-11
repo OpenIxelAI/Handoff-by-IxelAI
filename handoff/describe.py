@@ -106,10 +106,16 @@ def describe(event: Event, who: Callable[[str], str] | None = None) -> str:
         runs = (f"the {name('worker', 'unknown')} worker" if kind == "edit" else
                 f"{name('worker', 'unknown')}, through Ixel MAT,")  # (answers and the like run no worker)
         models = approvals.check_models(data.get("models")) if kind == "edit" and "models" in data else None
+        efforts = (approvals.check_efforts(data.get("efforts"), models) or {}) if kind == "edit" else {}
+
+        def at(model: str) -> str:
+            return f"{model} ({efforts[model]} effort)" if model in efforts else model
         if models and len(models) == 1:
-            runs += f" on {models[0]}"
+            runs += f" on {at(models[0])}"
         elif models:
-            runs += f" as a chain ({models[0]} plans; {', '.join(models[1:])} do the steps)"
+            runs += f" as a chain ({at(models[0])} plans; {', '.join(at(m) for m in models[1:])} do the steps)"
+        elif "" in efforts:
+            runs += f" at {efforts['']} effort"
         return f"approved it for {runs}{what} (results go to {name('return_to', 'human')})"
     if event.kind == "worker":
         ixel = data.get("kind") in ("answer", "review", "image")

@@ -11,7 +11,8 @@ import pytest
 
 from handoff import api, approvals, usage
 from handoff.board import HUMAN, Board, BoardError
-from handoff.worker import PLANNER_TOOLS, Worker, parse_plan
+from handoff.describe import describe
+from handoff.worker import PLANNER_TOOLS, Worker, WorkerUnavailable, parse_plan
 
 FABLE, OPUS, HAIKU = "claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"
 
@@ -51,7 +52,8 @@ class Agent:
 
     def __call__(self, argv, stdin, env, timeout, cwd):
         model = argv[argv.index("--model") + 1] if "--model" in argv else "default"
-        self.calls.append({"argv": argv, "stdin": stdin, "model": model})
+        effort = argv[argv.index("--effort") + 1] if "--effort" in argv else None
+        self.calls.append({"argv": argv, "stdin": stdin, "model": model, "effort": effort})
         if model in self.actions:
             self.actions[model](Path(cwd), stdin)
         reply = self.replies[model]
@@ -211,6 +213,24 @@ def test_a_failed_step_stops_the_chain_and_keeps_what_came_before(board, repo):
     assert set(failed.data["usage"]["models"]) == {FABLE, OPUS, HAIKU}
 
 
+def test_a_chain_that_stops_on_a_secret_says_what_the_steps_before_it_did(board, repo):
+    t = task(board)
+    board.approve(HUMAN, t.id, "claude", models=[FABLE, OPUS, HAIKU])
+
+    def leak(folder, _stdin=""):
+        (folder / "config.py").write_text("KEY = 'sk-proj-" + "a" * 40 + "'\n", encoding="utf-8")
+    agent = Agent({FABLE: plan_reply(), OPUS: result("DONE: wrote calc.py", OPUS), HAIKU: result("DONE: tests", HAIKU)},
+                  {OPUS: write_calc, HAIKU: leak})
+    [ran] = worker(board, repo, agent).run_pending()
+    assert not ran.ok and "Step 2 of 2 (claude-haiku-5-5: test it)" in ran.message
+    assert "looks like a secret: config.py" in ran.message
+    assert "The steps before it finished. What they changed is committed on handoff/T-1, up to" in ran.message
+    assert f"Step 1 of 2, by {OPUS} (about $0.0100): write calc.py\nwrote calc.py" in ran.message
+    # and that's what the board keeps, for handoff show and the Board
+    reason = [e for e in board.events(t.id) if e.kind == "status"][-1].text
+    assert f"Step 1 of 2, by {OPUS}" in reason and git(repo, "show", "handoff/T-1:calc.py").stdout
+
+
 def test_a_chain_runs_on_claude_only(board, repo):
     t = task(board)
     with pytest.raises(BoardError, match="chain of models runs on claude"):
@@ -229,6 +249,107 @@ def test_parse_plan():
     assert parse_plan('```json\n{"steps": []}\n```', [OPUS]) is None
     many = {"steps": [{"model": HAIKU, "title": str(n), "instructions": "x"} for n in range(20)]}
     assert len(parse_plan(f"```json\n{json.dumps(many)}\n```", [HAIKU])) == 6
+
+
+# ── Effort ───────────────────────────────────────────────────────────────────
+
+def test_each_models_effort_is_sealed(board):
+    t = task(board)
+    board.approve(HUMAN, t.id, "claude", models=[FABLE, HAIKU], efforts={FABLE: "max", HAIKU: "low"})
+    [(_, approval)] = board.pending_runs("claude")
+    assert approval.data["efforts"] == {FABLE: "max", HAIKU: "low"}
+    key = approvals.load_key()
+    assert approvals.is_sealed(key, board.path, t.id, approval.data, approval.at)
+    # a board can't turn a model up, or drop the levels the person picked
+    for efforts in ({FABLE: "max", HAIKU: "max"}, {FABLE: "max"}):
+        assert not approvals.is_sealed(key, board.path, t.id, {**approval.data, "efforts": efforts}, approval.at)
+    dropped = {k: v for k, v in approval.data.items() if k != "efforts"}
+    assert not approvals.is_sealed(key, board.path, t.id, dropped, approval.at)
+    assert "as a chain (claude-fable-5-1 (max effort) plans; claude-haiku-5-5 (low effort) do the steps)" in \
+        describe(approval)
+
+
+@pytest.mark.parametrize("models,efforts", [([OPUS], {HAIKU: "high"}), (None, {OPUS: "high"}), ([OPUS], {"": "high"}),
+                                            ([OPUS], {OPUS: "very high"}), ([OPUS], {}), ([OPUS], {OPUS: 3}),
+                                            ([OPUS], "high")])
+def test_each_effort_is_one_word_for_one_of_the_runs_models(board, models, efforts):
+    t = task(board)
+    with pytest.raises(BoardError, match="Each effort is one word"):
+        board.approve(HUMAN, t.id, "claude", models=models, efforts=efforts)
+
+
+def test_a_run_on_a_model_thinks_at_its_effort(board, repo):
+    t = task(board)
+    board.approve(HUMAN, t.id, "claude", models=[OPUS], efforts={OPUS: "xhigh"})
+    agent = Agent({OPUS: result("DONE: wrote calc.py", OPUS)}, {OPUS: write_calc})
+    [ran] = worker(board, repo, agent).run_pending()
+    assert ran.ok and agent.calls[0]["effort"] == "xhigh"
+    assert f"(claude, {OPUS}, xhigh effort)" in git(repo, "log", "-1", "--format=%B", "handoff/T-1").stdout
+
+
+def test_the_agents_own_model_can_be_given_an_effort(board, repo):
+    t = task(board)
+    board.approve(HUMAN, t.id, "claude", efforts={"": "low"})
+    agent = Agent({"default": "DONE: did it"}, {"default": write_calc})
+    [ran] = worker(board, repo, agent).run_pending()
+    assert ran.ok and "--model" not in agent.calls[0]["argv"] and agent.calls[0]["effort"] == "low"
+    approval = [e for e in board.events(t.id) if e.kind == "approved"][0]
+    assert describe(approval).startswith("approved it for the claude worker at low effort")
+
+
+def test_each_model_in_a_chain_thinks_at_its_own_effort(board, repo):
+    t = task(board)
+    board.approve(HUMAN, t.id, "claude", models=[FABLE, OPUS, HAIKU], efforts={FABLE: "max", OPUS: "high"})
+    agent = Agent({FABLE: plan_reply(), OPUS: result("DONE: wrote calc.py", OPUS), HAIKU: result("DONE: tests", HAIKU)},
+                  {OPUS: write_calc, HAIKU: write_test})
+    [ran] = worker(board, repo, agent).run_pending()
+    assert ran.ok, ran.message
+    assert [(c["model"], c["effort"]) for c in agent.calls] == [(FABLE, "max"), (OPUS, "high"), (HAIKU, None)]
+    planner = agent.calls[0]["stdin"]
+    assert f"{OPUS} (high effort), {HAIKU}" in planner  # it knows how hard each one thinks
+    assert "Read only what you need" in planner and "don't read the whole project" in planner
+    assert f"Step 1 of 2, by {OPUS}, high effort (about $0.0100)" in board.events(t.id)[-1].data["done"]
+    assert f"(claude, {OPUS}, high effort)" in git(repo, "log", "-1", "--format=%B", "handoff/T-1~1").stdout
+
+
+def test_a_level_the_agent_doesnt_take_never_reaches_it(board, repo):
+    t = task(board)
+    board.approve(HUMAN, t.id, "claude", models=[OPUS], efforts={OPUS: "ultracode"})  # (one word, so a board takes it)
+    agent = Agent({OPUS: result("DONE", OPUS)})
+    [ran] = worker(board, repo, agent).run_pending()
+    assert not ran.ok and agent.calls == []
+    assert "can't think at ultracode effort: it takes low, medium, high, xhigh or max" in ran.message
+    with pytest.raises(BoardError, match="claude takes effort low, medium, high, xhigh or max, not minimal"):
+        api.op_approve({"project": str(repo), "args": {"task": t.ref, "agent": "claude", "models": [OPUS],
+                                                         "efforts": {OPUS: "minimal"}}})
+
+
+def test_each_agent_is_told_its_effort_its_own_way(board, repo):
+    claude = worker(board, repo, Agent({}))
+    assert claude.argv(model=OPUS, effort="max")[-4:] == ["--model", OPUS, "--effort", "max"]
+    claude.help = "Usage: claude [options]\n  --model <model>\n"  # a Claude Code from before --effort
+    with pytest.raises(WorkerUnavailable, match="has no --effort. Update it"):
+        claude.argv(model=OPUS, effort="max")
+    assert "--effort" not in claude.argv(model=OPUS)
+    codex = Worker(board, repo, "codex", runner=Agent({}), command="codex")
+    assert codex.argv(model="gpt-5.5", effort="xhigh")[-5:] == ["--model", "gpt-5.5", "-c",
+                                                                  'model_reasoning_effort="xhigh"', "-"]
+    with pytest.raises(WorkerUnavailable, match="codex worker can't think at max effort: it takes minimal"):
+        codex.argv(effort="max")
+
+
+def test_the_api_takes_efforts_and_says_what_each_worker_takes(board, repo):
+    t = task(board)
+    api.op_approve({"project": str(repo), "args": {"task": t.ref, "agent": "codex", "models": ["gpt-5.5"],
+                                                     "efforts": {"gpt-5.5": "xhigh"}}})
+    [(_, approval)] = board.pending_runs("codex")
+    assert approval.data["efforts"] == {"gpt-5.5": "xhigh"}
+    workers = api.task_detail(board, repo, t.id)["task"]["workers"]
+    assert workers["claude"] == {"efforts": ["low", "medium", "high", "xhigh", "max"], "chain": True}
+    assert workers["codex"] == {"efforts": ["minimal", "low", "medium", "high", "xhigh"], "chain": False}
+    assert "run-effort" in api.op_hello({})["features"]
+    with pytest.raises(api.ApiError, match="args.efforts must be an object"):
+        api.op_approve({"project": str(repo), "args": {"task": t.ref, "agent": "claude", "efforts": "high"}})
 
 
 # ── Usage ────────────────────────────────────────────────────────────────────

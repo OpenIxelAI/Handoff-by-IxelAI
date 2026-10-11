@@ -229,6 +229,8 @@ An edit runs on the agent's own default model unless you name one when you appro
 ```bash
 handoff approve T-7 claude --model claude-haiku-5-5        # one model (an alias like haiku works too)
 handoff approve T-7 claude --chain claude-fable-5-1,claude-opus-5-5,claude-haiku-5-5
+handoff approve T-7 claude --chain claude-fable-5-1:max,claude-opus-5-5:high,claude-haiku-5-5
+handoff approve T-7 codex --model gpt-5.5 --effort xhigh
 ```
 
 A **chain** lists models biggest first, for claude. The first one reads the task (it can read files, not change
@@ -239,8 +241,16 @@ If a step fails, the chain stops there and keeps what the steps before it commit
 run's time limit. `handoff dispatch "claude finish the next step" --chain ...` (or `--model`) does the same for
 claude's edits in a dispatch.
 
-The model, or the chain, is sealed into the approval with the rest, so a board can't move a run to a bigger,
-dearer model. Codex takes `--model` too; a chain runs on claude only.
+**How hard each model thinks.** `--effort` sets it, in the agent's own words: claude (Claude Code's
+`--effort`) takes low, medium, high, xhigh or max; codex (its `model_reasoning_effort`) takes minimal, low,
+medium, high or xhigh. Leave it out and each model thinks as hard as it does by default. In a chain, give one
+model its own after a colon (`claude-fable-5-1:max`); `--effort` covers the models that don't have one. Effort
+costs tokens: the biggest model at max effort is the dearest part of a chain, so save it for the planning that
+needs it. Claude Code's "ultracode" isn't an effort level (it's how a session runs several agents at once), so
+the worker doesn't take it.
+
+The model, or the chain, and each model's effort are sealed into the approval with the rest, so a board can't
+move a run to a bigger, dearer model or turn one up. Codex takes `--model` too; a chain runs on claude only.
 
 **What it used.** Every claude run reports, per model, its tokens and an estimated cost at API prices (on a
 subscription, that's what it would have cost; it counts toward your plan's limits instead). It's the proof of
