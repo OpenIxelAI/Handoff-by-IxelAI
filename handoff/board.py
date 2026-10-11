@@ -785,28 +785,28 @@ class Board:
                                 f"WHERE {where} GROUP BY task_id)", ids + skipped + (only or [])).fetchall()
         return {r["task_id"]: _event_from_row(r) for r in rows}
 
-    def worker_usage(self, task_ids: Iterable[int]) -> dict[int, dict]:
-        """Each listed task's worker runs' usage added up, model by model, in one query (tasks with none are left
-        out)."""
-        ids = list(task_ids)
-        if not ids:
-            return {}
-        marks = ", ".join("?" for _ in ids)
+    def run_usage(self, task_ids: Iterable[int] | None = None) -> dict[int, tuple[float, dict | None]]:
+        """What each task's worker runs used (every task's, or those of `task_ids`), as the agents reported it
+        (checked again, since a board can come from somewhere else): what they cost, added up, and their usage,
+        model by model. Tasks whose runs reported nothing aren't in it."""
+        query, args = "SELECT task_id, data FROM events WHERE kind = 'worker' AND data LIKE '%\"usage\"%'", []
+        if task_ids is not None:
+            args = list(task_ids)
+            if not args:
+                return {}
+            query += f" AND task_id IN ({', '.join('?' for _ in args)})"
         with self._read() as conn:
-            rows = conn.execute(f"SELECT * FROM events WHERE task_id IN ({marks}) AND kind = 'worker' ORDER BY id",
-                                ids).fetchall()
-        runs: dict[int, list[dict]] = {}
+            rows = conn.execute(query, args).fetchall()
+        runs: dict[int, list[object]] = {}
         for row in rows:
-            try:
-                event = _event_from_row(row)
-            except (BoardError, ValueError, TypeError):
-                continue  # a damaged row is left out, not the whole board
-            runs.setdefault(event.task_id, []).append(event.data.get("usage"))
-        found = {}
-        for task_id, usages in runs.items():
-            total = usage.merge(*usages)  # (check() drops what's malformed)
-            if total is not None:
-                found[task_id] = total
+            runs.setdefault(row["task_id"], []).append(_json(row["data"], dict).get("usage"))
+        found: dict[int, tuple[float, dict | None]] = {}
+        for task_id, used in runs.items():
+            # Each run's cost is added up, not the merged usage's: that keeps only the first models (usage.MAX_MODELS)
+            cost = round(min(sum(usage.total_cost(u) for u in used), usage.MAX_COST), 6)
+            models = usage.merge(*used)
+            if models is not None:
+                found[task_id] = (cost, models)
         return found
 
     def revision(self) -> str:

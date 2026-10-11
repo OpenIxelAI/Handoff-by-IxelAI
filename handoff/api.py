@@ -191,12 +191,14 @@ def _run_state(task: Task, state: Event | None, approved: dict[int, Event]) -> d
 
 
 def _summary(task: Task, last: Event | None, state: Event | None, approved: dict[int, Event],
-             overlaps: int) -> dict:
+             overlaps: int, used: tuple[float, dict | None]) -> dict:
+    cost, models = used
     return {"ref": task.ref, "id": task.id, "title": task.title, "status": task.status, "assignee": task.assignee,
             "waiting_on": task.waiting_on, "branch": task.branch,
             "parent": task_ref(task.parent_id) if task.parent_id else None, "created_by": task.created_by,
             "created_at": task.created_at, "updated_at": task.updated_at, "last_event": _when(last),
-            "run": _run_state(task, state, approved), "overlaps": overlaps}
+            "run": _run_state(task, state, approved), "overlaps": overlaps,
+            "cost": cost, "usage": models}  # (what its runs used: their cost, and model by model)
 
 
 def _overlap_counts(board: Board, tasks: list[Task]) -> dict[int, int]:
@@ -229,18 +231,15 @@ def _overlap_counts(board: Board, tasks: list[Task]) -> dict[int, int]:
     return counts
 
 
-def _summaries(board: Board, tasks: list[Task]) -> list[dict]:
+def _summaries(board: Board, tasks: list[Task], used: dict[int, tuple[float, dict | None]] | None = None) -> list[dict]:
     ids = [t.id for t in tasks]
     last = board.last_events(ids, skip=("claim_paths", "release_paths"))
     states = board.last_events(ids, kinds=STATE_EVENTS)
     approved = {task.id: approval for task, approval in board.pending_runs(None, ids)}
     counts = _overlap_counts(board, tasks)
-    used = board.worker_usage(ids)
-    summaries = [_summary(t, last.get(t.id), states.get(t.id), approved, counts.get(t.id, 0)) for t in tasks]
-    for summary, task in zip(summaries, tasks):
-        if task.id in used:
-            summary["usage"] = used[task.id]  # (left out when none, so older readers see no change)
-    return summaries
+    used = board.run_usage(ids) if used is None else used
+    return [_summary(t, last.get(t.id), states.get(t.id), approved, counts.get(t.id, 0), used.get(t.id, (0.0, None)))
+            for t in tasks]
 
 
 def actions(task: Task, run: dict | None, merge_into: str | None = None) -> list[dict]:
@@ -345,15 +344,14 @@ def board_summary(board: Board, root: Path, tasks: list[Task], revision: str | N
     """The board as the window and `handoff board --json` show it: `tasks` are the ones the caller chose, in the
     order it wants them. `revision` is one the caller read before it fetched the tasks (so a change in between
     shows up on its next poll); left out, it's read now."""
-    # counts has only the statuses Handoff knows; a task it can't read is only counted, never listed
-    summaries = _summaries(board, tasks)
-    result = {"project": str(root), "revision": board.revision() if revision is None else revision,
-              "counts": board.counts(), "unreadable": board.unreadable(), "done_rule": board.done_rule,
-              "tasks": summaries}
-    total = usage.merge(*(s.get("usage") for s in summaries))
-    if total is not None:
-        result["usage"] = total  # (the listed tasks' runs together; left out when none)
-    return result
+    # counts has only the statuses Handoff knows; a task it can't read is only counted, never listed. spent and
+    # usage are what every run on the board used, the tasks it doesn't list included (at API prices, as the
+    # agents said): spent in all, usage model by model
+    used = board.run_usage()
+    return {"project": str(root), "revision": board.revision() if revision is None else revision,
+            "counts": board.counts(), "unreadable": board.unreadable(), "done_rule": board.done_rule,
+            "spent": round(min(sum(cost for cost, _ in used.values()), usage.MAX_COST), 6),
+            "usage": usage.merge(*(models for _, models in used.values())), "tasks": _summaries(board, tasks, used)}
 
 
 def task_detail(board: Board, root: Path, task_id: int) -> dict:
@@ -367,7 +365,7 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
     used = usage.merge(*(e.data.get("usage") for e in events if e.kind == "worker"))
     return {"task": {**summary, "body": task.body, "acceptance": task.acceptance, "targets": targets,
                      "content": content_of(task, events),  # (approve's `shown`)
-                     "usage": used, "cost": usage.total_cost(used),  # (every run's, model by model)
+                     "usage": used,  # (every run's, model by model, as the summary's, from this snapshot)
                      "workers": _workers()},
             "events": [_event(e) for e in events], "claims": [c.path_glob for c in claims],
             "overlaps": [o.describe() for o in board.overlaps_for(task.id)],
@@ -395,13 +393,12 @@ def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
 # be approved for a pull request's commits (approve's args.target), which an older Handoff would ignore.
 # approve-shown: approve's args.shown (task's `content`) refuses an approval of a task that changed since.
 # run-models: an edit can name its models (approve's args.models: one model, or a chain, biggest first, where the
-# first plans and the others do the steps). run-usage: worker runs say what they used (events' and tasks' usage).
+# first plans and the others do the steps). run-usage: worker runs say what they used (events' and tasks' usage
+# and `cost`, on the board too, and the board's `usage` and `spent`: what all its runs used and cost).
 # run-effort: an edit can say how hard each model thinks (approve's args.efforts: {model: level}, or {"": level}
 # for the agent's own model), in the levels each worker takes (a task's `workers`). run-merge: the person can merge a
 # task's branch into their current branch (op merge: args.task, and optional args.shown as approve's).
-# board-usage: the board list says what each task's worker runs used (a task's `usage`, left out when none) and
-# the listed tasks' total (the board's `usage`, left out when none).
-FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge", "board-usage")
+FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge")
 
 
 def _workers() -> dict:

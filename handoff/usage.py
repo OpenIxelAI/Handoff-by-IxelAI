@@ -49,6 +49,8 @@ def _count(value: object) -> int | None:
 def _cost(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
+    if isinstance(value, int) and not 0 <= value <= MAX_COST:  # (one too big for a float raises in float())
+        return None
     value = float(value)
     return round(value, 6) if math.isfinite(value) and 0 <= value <= MAX_COST else None
 
