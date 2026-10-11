@@ -126,6 +126,10 @@ def describe(event: Event, who: Callable[[str], str] | None = None) -> str:
         if used:
             said += f" (used about ${usage.total_cost(used):.4f} on {', '.join(used['models'])})"
         return said
+    if event.kind == "merged":
+        branch, into, sha = (clean_line(text_field(data.get(key)))[:200] or default for key, default in
+                             (("branch", "its branch"), ("into", "the project"), ("sha", "?")))
+        return f"merged {branch} into {into} at {sha}"
     return "did something this version of Handoff doesn't know"
 
 
