@@ -394,6 +394,12 @@ def test_the_board_says_what_each_task_and_all_its_runs_cost(board, repo):
     shown = api.op_board({"project": str(repo)})
     assert {t["ref"]: t["cost"] for t in shown["tasks"]} == {calc.ref: 0.0042, clock.ref: 0.25, idle.ref: 0.0}
     assert shown["spent"] == 0.2542
+    # and model by model, for each task and the whole board
+    tasks = {t["ref"]: t for t in shown["tasks"]}
+    assert list(tasks[calc.ref]["usage"]["models"]) == [HAIKU]
+    assert tasks[clock.ref]["usage"]["models"][OPUS]["cost"] == 0.25
+    assert tasks[idle.ref]["usage"]["models"][OPUS]["cost"] == 0.0  # (its runs' usage, with no cost that counts)
+    assert {name: m["cost"] for name, m in shown["usage"]["models"].items()} == {HAIKU: 0.0042, OPUS: 0.25}
     board.cancel(HUMAN, calc.id)
     # the tasks a board doesn't list still count toward what it spent
     shown = api.op_board({"project": str(repo), "args": {"done": 0}})

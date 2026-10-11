@@ -255,8 +255,8 @@ move a run to a bigger, dearer model or turn one up. Codex takes `--model` too; 
 **What it used.** Every claude run reports, per model, its tokens and an estimated cost at API prices (on a
 subscription, that's what it would have cost; it counts toward your plan's limits instead). It's the proof of
 which model did the work. `handoff show T-7` lists it under each run, the handback ends with it, and `handoff
-run --json` and the API (`usage` and `cost` on the task and on its runs, each task's `cost` on the board, and
-the board's `spent`, what its tasks' runs cost in all) carry it for the Ixel app. A run that was stopped (by its
+run --json` and the API (`usage` and `cost` on the task and on its runs, each task's on the board too, and the
+board's `usage` and `spent`, what its tasks' runs used and cost in all) carry it for the Ixel app. A run that was stopped (by its
 time limit or Ctrl+C) has no report, so what it used isn't counted.
 
 ## What the agents can do

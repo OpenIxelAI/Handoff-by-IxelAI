@@ -783,10 +783,10 @@ class Board:
                                 f"WHERE {where} GROUP BY task_id)", ids + skipped + (only or [])).fetchall()
         return {r["task_id"]: _event_from_row(r) for r in rows}
 
-    def run_costs(self, task_ids: Iterable[int] | None = None) -> dict[int, float]:
-        """What each task's worker runs cost (every task's, or those of `task_ids`), added up, as the agents
-        reported it (checked again, since a board can come from somewhere else). Tasks whose runs reported
-        nothing aren't in it."""
+    def run_usage(self, task_ids: Iterable[int] | None = None) -> dict[int, tuple[float, dict | None]]:
+        """What each task's worker runs used (every task's, or those of `task_ids`), as the agents reported it
+        (checked again, since a board can come from somewhere else): what they cost, added up, and their usage,
+        model by model. Tasks whose runs reported nothing aren't in it."""
         query, args = "SELECT task_id, data FROM events WHERE kind = 'worker' AND data LIKE '%\"usage\"%'", []
         if task_ids is not None:
             args = list(task_ids)
@@ -795,12 +795,17 @@ class Board:
             query += f" AND task_id IN ({', '.join('?' for _ in args)})"
         with self._read() as conn:
             rows = conn.execute(query, args).fetchall()
-        costs: dict[int, float] = {}
+        runs: dict[int, list[object]] = {}
         for row in rows:
-            cost = usage.total_cost(_json(row["data"], dict).get("usage"))
-            if cost:
-                costs[row["task_id"]] = round(min(costs.get(row["task_id"], 0.0) + cost, usage.MAX_COST), 6)
-        return costs
+            runs.setdefault(row["task_id"], []).append(_json(row["data"], dict).get("usage"))
+        found: dict[int, tuple[float, dict | None]] = {}
+        for task_id, used in runs.items():
+            # Each run's cost is added up, not the merged usage's: that keeps only the first models (usage.MAX_MODELS)
+            cost = round(min(sum(usage.total_cost(u) for u in used), usage.MAX_COST), 6)
+            models = usage.merge(*used)
+            if models is not None:
+                found[task_id] = (cost, models)
+        return found
 
     def revision(self) -> str:
         """Changes whenever anything on the board does, its settings included (the done rule, how long it
