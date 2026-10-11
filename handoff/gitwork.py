@@ -582,6 +582,10 @@ def remove_worktree(root: Path, task_id: int) -> str | None:
             return f"{where} is a link, not the worker's worktree, so Handoff left it."
         if not path.exists():
             return None
+        # Only a worktree git has on record: a plain folder there (yours) would read as clean, from the repository
+        # around it, and go
+        if _registered_git_dir(root, path) is None:
+            return f"{where} isn't a worktree git has on record, so Handoff left it."
         status = _git(root, ["status", "--porcelain", "--untracked-files=all"], cwd=path, check=False)
         if status.returncode != 0 or status.stdout.strip():
             return (f"{where} still has uncommitted changes, so Handoff left it. When you don't need them: "

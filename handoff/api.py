@@ -611,10 +611,14 @@ def op_merge(request: dict) -> dict:
         raise BoardError(str(exc)) from None
     # Read the board again where it is: the merge changed the checkout it lives in
     board = _board(root)
-    task = board.record_merge(HUMAN, task_id, into, sha, short, expected)
-    note = gitwork.remove_worktree(root, task_id)
+    task, settled = board.record_merge(HUMAN, task_id, into, sha, short, expected)
+    note = gitwork.remove_worktree(root, task_id) if settled else MOVED_WHILE_MERGING.format(ref=task.ref)
     return {**_task_reply(board, task), "merged": {"branch": task.branch, "into": into, "sha": short},
             "left": [note] if note else []}
+
+
+MOVED_WHILE_MERGING = ("{ref} changed while git merged it (a run was approved or started, or a newer run finished), "
+                       "so it stays as it is and its worktree is kept. The merge itself stands.")
 
 
 def run_command(root: Path, ref: str) -> list[str]:

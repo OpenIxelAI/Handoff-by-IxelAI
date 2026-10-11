@@ -1603,10 +1603,13 @@ class Board:
                 return commit if isinstance(commit, str) and commit else None
         return None
 
-    def record_merge(self, actor: str, task_id: int, into: str, sha: str, short: str, commit: str) -> Task:
+    def record_merge(self, actor: str, task_id: int, into: str, sha: str, short: str,
+                     commit: str) -> tuple[Task, bool]:
         """Record that the person merged the task's branch into `into` (as merge commit `sha`, `short`), taking in
         the run's `commit`, and mark the task done if it wasn't: a merge is the person's own review, so the done
-        rule doesn't apply."""
+        rule doesn't apply. Returns the task and whether it was settled so. Not when the task moved while git
+        merged (a run approved or started, or a newer run's commit): the merge is recorded, as it happened, but
+        the task stays as it is, and its worktree must stay too."""
         actor = check_name(actor, "actor")
         self._require_human(actor, "merge a task's branch")
 
@@ -1616,11 +1619,15 @@ class Board:
 
         with self._write() as conn:
             task = self._get(conn, task_id)
+            events = self._history(conn, task.id)
+            settled = self.merge_blocker(task, events) is None and self.run_commit(events) == commit
             data = {"branch": clean_line(task.branch)[:MAX_BRANCH_CHARS],
                     "into": clean_line(into)[:MAX_BRANCH_CHARS],
                     "sha": commit_id(short), "merge": commit_id(sha), "commit": commit_id(commit)}
             task = self._update(conn, task)
             self._event(conn, task.id, actor, "merged", data=data)
+            if not settled:
+                return task, False
             if task.status != "done":
                 self._release_claims(conn, task, actor)
                 before = task.status
@@ -1630,7 +1637,7 @@ class Board:
                     changes["assignee"] = done["assignee"] = self._review_author(conn, task)
                 task = self._update(conn, task, **changes)
                 self._event(conn, task.id, actor, "status", "merged", data={**done, "waiting_on": None})
-            return task
+            return task, True
 
     # ── Removing tasks for good ──
 

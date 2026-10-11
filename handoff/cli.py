@@ -1470,7 +1470,12 @@ def cmd_merge(argv: list[str]) -> int:
     except (Changed, gitwork.AlreadyMerged, gitwork.GitError) as exc:
         raise CommandError(str(exc)) from None
     board = _board(args)  # read again where it is: the merge changed the checkout it lives in
-    board.record_merge(HUMAN, task_id, into, sha, short, commit)
+    _, settled = board.record_merge(HUMAN, task_id, into, sha, short, commit)
+    if not settled:
+        from handoff.api import MOVED_WHILE_MERGING
+        _ok(f"Merged {task.branch} into {into} at {short}.")
+        _hint(MOVED_WHILE_MERGING.format(ref=ref))
+        return 0
     _ok(f"Merged {task.branch} into {into} at {short}. {ref} is done.")
     note = gitwork.remove_worktree(root, task_id)
     if note:

@@ -194,6 +194,59 @@ def test_a_task_with_no_run_has_nothing_to_merge(board, repo):
     assert code == "invalid" and "no branch" in message
 
 
+@pytest.mark.parametrize("meanwhile", ["approved", "started"])
+def test_a_run_approved_or_started_while_git_merges_keeps_the_task_and_its_worktree(board, repo, monkeypatch,
+                                                                                   meanwhile):
+    task, tip = finished_task(board, repo)
+    merge_branch = gitwork.merge_branch
+
+    def slow_merge(*args, **kwargs):
+        done = merge_branch(*args, **kwargs)
+        # Between the checks before git ran and the board recording it, the person approves another run
+        board.approve(HUMAN, task.id, "claude")
+        if meanwhile == "started":
+            [(_, approval)] = board.pending_runs("claude", [task.id])
+            board.start_run("claude", task.id, approval.id, {"branch": task.branch})
+        return done
+
+    monkeypatch.setattr(gitwork, "merge_branch", slow_merge)
+    status = board.get(task.id).status
+    data = ok("merge", repo, task=task.ref)
+    assert git(repo, "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()[2] == tip  # the merge stands
+    assert data["task"]["status"] != "done" and board.get(task.id).status != "done"
+    assert status != "done" and [e.data["commit"] for e in board.events(task.id) if e.kind == "merged"] == [tip]
+    assert len(data["left"]) == 1 and "worktree is kept" in data["left"][0]
+    assert (repo / ".handoff" / "worktrees" / task.ref).is_dir()
+
+
+def test_a_newer_run_finishing_while_git_merges_leaves_the_task_as_it_is(board, repo, monkeypatch):
+    task, tip = finished_task(board, repo)
+    merge_branch = gitwork.merge_branch
+
+    def slow_merge(*args, **kwargs):
+        done = merge_branch(*args, **kwargs)
+        board.approve(HUMAN, task.id, "claude")
+        [(_, approval)] = board.pending_runs("claude", [task.id])
+        board.start_run("claude", task.id, approval.id, {"branch": task.branch})
+        board.finish_run("claude", task.id, HUMAN, "did more", branch=task.branch, extra={"commit": "f" * 40})
+        return done
+
+    monkeypatch.setattr(gitwork, "merge_branch", slow_merge)
+    data = ok("merge", repo, task=task.ref)
+    assert data["task"]["status"] == "handed_off" and "worktree is kept" in data["left"][0]
+    assert (repo / ".handoff" / "worktrees" / task.ref).is_dir()
+    events = board.events(task.id)  # the newer run's work isn't counted as merged
+    assert Board.merged_commit(events) == tip and Board.run_commit(events) == "f" * 40
+
+
+def test_a_plain_folder_where_the_worktree_was_is_never_deleted(board, repo):
+    folder = repo / ".handoff" / "worktrees" / "T-1"
+    folder.mkdir(parents=True)
+    (folder / "notes.txt").write_text("mine\n", encoding="utf-8")
+    note = gitwork.remove_worktree(repo, 1)
+    assert note and "on record" in note and (folder / "notes.txt").read_text(encoding="utf-8") == "mine\n"
+
+
 # ── The person only ──────────────────────────────────────────────────────────
 
 def test_agents_can_t_merge(board, repo, monkeypatch):
