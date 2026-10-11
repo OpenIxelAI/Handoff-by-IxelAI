@@ -235,7 +235,12 @@ def _summaries(board: Board, tasks: list[Task]) -> list[dict]:
     states = board.last_events(ids, kinds=STATE_EVENTS)
     approved = {task.id: approval for task, approval in board.pending_runs(None, ids)}
     counts = _overlap_counts(board, tasks)
-    return [_summary(t, last.get(t.id), states.get(t.id), approved, counts.get(t.id, 0)) for t in tasks]
+    used = board.worker_usage(ids)
+    summaries = [_summary(t, last.get(t.id), states.get(t.id), approved, counts.get(t.id, 0)) for t in tasks]
+    for summary, task in zip(summaries, tasks):
+        if task.id in used:
+            summary["usage"] = used[task.id]  # (left out when none, so older readers see no change)
+    return summaries
 
 
 def actions(task: Task, run: dict | None, merge_into: str | None = None) -> list[dict]:
@@ -341,9 +346,14 @@ def board_summary(board: Board, root: Path, tasks: list[Task], revision: str | N
     order it wants them. `revision` is one the caller read before it fetched the tasks (so a change in between
     shows up on its next poll); left out, it's read now."""
     # counts has only the statuses Handoff knows; a task it can't read is only counted, never listed
-    return {"project": str(root), "revision": board.revision() if revision is None else revision,
-            "counts": board.counts(), "unreadable": board.unreadable(), "done_rule": board.done_rule,
-            "tasks": _summaries(board, tasks)}
+    summaries = _summaries(board, tasks)
+    result = {"project": str(root), "revision": board.revision() if revision is None else revision,
+              "counts": board.counts(), "unreadable": board.unreadable(), "done_rule": board.done_rule,
+              "tasks": summaries}
+    total = usage.merge(*(s.get("usage") for s in summaries))
+    if total is not None:
+        result["usage"] = total  # (the listed tasks' runs together; left out when none)
+    return result
 
 
 def task_detail(board: Board, root: Path, task_id: int) -> dict:
@@ -389,7 +399,9 @@ def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
 # run-effort: an edit can say how hard each model thinks (approve's args.efforts: {model: level}, or {"": level}
 # for the agent's own model), in the levels each worker takes (a task's `workers`). run-merge: the person can merge a
 # task's branch into their current branch (op merge: args.task, and optional args.shown as approve's).
-FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge")
+# board-usage: the board list says what each task's worker runs used (a task's `usage`, left out when none) and
+# the listed tasks' total (the board's `usage`, left out when none).
+FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge", "board-usage")
 
 
 def _workers() -> dict:

@@ -785,6 +785,30 @@ class Board:
                                 f"WHERE {where} GROUP BY task_id)", ids + skipped + (only or [])).fetchall()
         return {r["task_id"]: _event_from_row(r) for r in rows}
 
+    def worker_usage(self, task_ids: Iterable[int]) -> dict[int, dict]:
+        """Each listed task's worker runs' usage added up, model by model, in one query (tasks with none are left
+        out)."""
+        ids = list(task_ids)
+        if not ids:
+            return {}
+        marks = ", ".join("?" for _ in ids)
+        with self._read() as conn:
+            rows = conn.execute(f"SELECT * FROM events WHERE task_id IN ({marks}) AND kind = 'worker' ORDER BY id",
+                                ids).fetchall()
+        runs: dict[int, list[dict]] = {}
+        for row in rows:
+            try:
+                event = _event_from_row(row)
+            except (BoardError, ValueError, TypeError):
+                continue  # a damaged row is left out, not the whole board
+            runs.setdefault(event.task_id, []).append(event.data.get("usage"))
+        found = {}
+        for task_id, usages in runs.items():
+            total = usage.merge(*usages)  # (check() drops what's malformed)
+            if total is not None:
+                found[task_id] = total
+        return found
+
     def revision(self) -> str:
         """Changes whenever anything on the board does, its settings included (the done rule, how long it
         keeps finished tasks), and never comes back to an earlier value for the tasks themselves (ids only
