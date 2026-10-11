@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
-from handoff.board import task_of_name
+from handoff.board import Changed, task_of_name
 from handoff.proc import find_on_path
 from handoff.sanitize import clean_line, find_secret, find_token
 
@@ -32,6 +32,18 @@ _REPO_LOCK = threading.RLock()
 
 class GitError(Exception):
     """Git couldn't do what the worker needs; the message says what to do."""
+
+
+class MergeConflict(GitError):
+    """A merge stopped on conflicts; it was aborted, so nothing changed. `files`: the conflicting ones."""
+
+    def __init__(self, message: str, files: list[str]):
+        super().__init__(message)
+        self.files = files
+
+
+class AlreadyMerged(GitError):
+    """The branch has nothing the current branch lacks."""
 
 
 @dataclass
@@ -387,6 +399,88 @@ def _default_branch(root: Path) -> str | None:
     for name in candidates:
         if name and _git(root, ["rev-parse", "--verify", "-q", f"{name}^{{commit}}"], check=False).returncode == 0:
             return name
+    return None
+
+
+def current_branch(root: Path) -> str | None:
+    """The branch the project's own checkout has out; None when HEAD is detached. Only looks."""
+    proc = _git(root, ["symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
+    if proc.returncode != 0:
+        return None
+    return clean_line(proc.stdout)[:200] or None
+
+
+def merge_branch(root: Path, branch: str, message: str, expected_tip: str) -> tuple[str, str, str]:
+    """Merge `branch` (a task's, such as handoff/T-3) into the branch the project's own checkout has out, as one
+    merge commit (--no-ff), on the person's say-so. Returns that branch's name, the merge commit and its short id.
+    Refuses, changing nothing, when the checkout isn't on a branch of its own or has uncommitted changes to
+    tracked files, when `branch` is gone, isn't at `expected_tip` (the commit the worker's run recorded: Changed)
+    or has nothing to add (AlreadyMerged). A conflict is aborted (MergeConflict). Never fetches or pushes."""
+    if not branch or not set(branch) <= _SAFE_REF or branch.startswith("-") or ".." in branch:
+        raise GitError(f"{clean_line(branch)[:80]!r} isn't a branch name Handoff merges.")
+    with _REPO_LOCK:
+        return _merge_branch(root, branch, message, expected_tip)
+
+
+def _merge_branch(root: Path, branch: str, message: str, expected_tip: str) -> tuple[str, str, str]:
+    ref = f"refs/heads/{branch}"
+    if not _branch_exists(root, branch):
+        raise GitError(f"{branch} isn't in this repository any more, so there's nothing to merge.")
+    proc = _git(root, ["symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
+    current = proc.stdout.strip()
+    if proc.returncode != 0 or not current:
+        raise GitError("Your checkout isn't on a branch (HEAD is detached). Check out the branch to merge into "
+                       "first, such as: git checkout main")
+    shown = clean_line(current)[:200]
+    if current.startswith("handoff/"):
+        raise GitError(f"Your checkout has {shown} out, a task's own branch. Check out your project's branch "
+                       "first, such as: git checkout main")
+    if _git(root, ["status", "--porcelain", "--untracked-files=no"], cwd=root).stdout.strip():
+        raise GitError(f"{shown} has uncommitted changes to tracked files. Commit or stash them first, then "
+                       "merge.")
+    tip = _git(root, ["rev-parse", ref], cwd=root).stdout.strip()
+    if tip != expected_tip:
+        raise Changed(f"{branch} changed since the worker's run: its tip ({tip[:12]}) isn't the commit the run "
+                      f"recorded ({clean_line(expected_tip)[:12]}). Look at it before merging.")
+    ahead = _git(root, ["rev-list", "--count", f"HEAD..{ref}"], cwd=root).stdout.strip()
+    if ahead == "0":
+        raise AlreadyMerged(f"{branch} is already merged into {shown}: it has nothing {shown} lacks.")
+    named = _git(root, ["config", "user.email"], cwd=root, check=False).stdout.strip()
+    identity = [] if named else ["-c", "user.name=Handoff worker", "-c", "user.email=handoff@localhost"]
+    merged = _git(root, [*identity, "merge", "--no-ff", "--no-edit", "--no-gpg-sign", "-m", message, ref],
+                  cwd=root, check=False)
+    if merged.returncode != 0:
+        out = _git(root, ["diff", "--name-only", "--diff-filter=U", "-z"], cwd=root, check=False,
+                   errors="surrogateescape").stdout
+        files = sorted(_shown(name) for name in out.split("\0") if name)
+        _git(root, ["merge", "--abort"], cwd=root, check=False)
+        if files:
+            raise MergeConflict(f"Merging {branch} into {shown} conflicts in: {', '.join(files[:50])}. The merge "
+                                "was aborted, so nothing changed.", files)
+        lines = (merged.stderr or merged.stdout).strip().splitlines()
+        said = f": {clean_line(lines[-1])[:300]}" if lines else ""
+        raise GitError(f"git merge of {branch} into {shown} failed{said}. Nothing was merged.")
+    sha = _git(root, ["rev-parse", "HEAD"], cwd=root).stdout.strip()
+    short = _git(root, ["rev-parse", "--short", "HEAD"], cwd=root).stdout.strip()
+    return shown, sha, short
+
+
+def remove_worktree(root: Path, task_id: int) -> str | None:
+    """Remove the task's worktree, .handoff/worktrees/T-N, keeping its branch. A note in words if it couldn't
+    be, else None."""
+    path = root / WORKTREES / f"T-{task_id}"
+    where = (WORKTREES / f"T-{task_id}").as_posix()
+    with _REPO_LOCK:
+        if is_link(path):
+            return f"{where} is a link, not the worker's worktree, so Handoff left it."
+        if not path.exists():
+            return None
+        _git(root, ["worktree", "remove", "--force", str(path)], cwd=root, check=False)
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+            _git(root, ["worktree", "prune"], cwd=root, check=False)
+    if path.exists():
+        return f"Couldn't remove {where}; remove it with: git worktree remove --force {where}"
     return None
 
 

@@ -45,11 +45,13 @@ STATUSES = ("open", "claimed", "in_progress", "handed_off", "in_review", "blocke
 ACTIVE = frozenset(STATUSES[:6])
 TERMINAL = frozenset({"done", "cancelled"})
 EVENT_KINDS = ("created", "claimed", "note", "handoff", "review_requested", "review", "status", "assigned",
-               "claim_paths", "release_paths", "approved", "worker")
+               "claim_paths", "release_paths", "approved", "worker", "merged")
 # Events that change who has a task or where it stands. An approval for the worker
 # holds only while it's the latest of these: any handoff, review, reassignment or
-# status change after it means the person approved something that's no longer there.
-STATE_EVENTS = ("claimed", "handoff", "review_requested", "review", "status", "assigned", "approved", "worker")
+# status change after it means the person approved something that's no longer there
+# (and after a merge, the work it was approved for is already in).
+STATE_EVENTS = ("claimed", "handoff", "review_requested", "review", "status", "assigned", "approved", "worker",
+                "merged")
 WORKER_STATES = ("started", "finished", "failed", "revoked")
 # What an approved run does: edit (the worker runs claude or codex in its own worktree), or, through
 # Ixel MAT, answer (one model replies), review (one model reads your changes) or image (pictures)
@@ -1539,6 +1541,56 @@ class Board:
             task = self._update(conn, task, status="blocked", waiting_on=return_to)
             self._event(conn, task.id, worker, "status", reason,
                         data={"from": before, "to": "blocked", "waiting_on": return_to})
+            return task
+
+    # ── Merging a task's branch: the person only ──
+
+    @staticmethod
+    def run_commit(events: list[Event]) -> str | None:
+        """The commit the task's latest finished worker run that made one recorded on its branch."""
+        for event in reversed(events):
+            commit = event.data.get("commit")
+            finished = event.kind == "worker" and event.data.get("state") == "finished"
+            if finished and isinstance(commit, str) and commit:
+                return commit
+        return None
+
+    @staticmethod
+    def merged_commit(events: list[Event]) -> str | None:
+        """The run's commit the task's latest merge took in. Merged when it's run_commit()."""
+        for event in reversed(events):
+            if event.kind == "merged":
+                commit = event.data.get("commit")
+                return commit if isinstance(commit, str) and commit else None
+        return None
+
+    def record_merge(self, actor: str, task_id: int, into: str, sha: str, short: str, commit: str) -> Task:
+        """Record that the person merged the task's branch into `into` (as merge commit `sha`, `short`), taking in
+        the run's `commit`, and mark the task done if it wasn't: a merge is the person's own review, so the done
+        rule doesn't apply."""
+        actor = check_name(actor, "actor")
+        self._require_human(actor, "merge a task's branch")
+
+        def commit_id(value: object) -> str:
+            text = clean_line(value)
+            return text if text.isalnum() and len(text) <= 64 else ""
+
+        with self._write() as conn:
+            task = self._get(conn, task_id)
+            data = {"branch": clean_line(task.branch)[:MAX_BRANCH_CHARS],
+                    "into": clean_line(into)[:MAX_BRANCH_CHARS],
+                    "sha": commit_id(short), "merge": commit_id(sha), "commit": commit_id(commit)}
+            task = self._update(conn, task)
+            self._event(conn, task.id, actor, "merged", data=data)
+            if task.status != "done":
+                self._release_claims(conn, task, actor)
+                before = task.status
+                changes: dict = {"status": "done", "waiting_on": None}
+                done: dict = {"from": before, "to": "done"}
+                if before == "in_review":  # out of review: its author has it again, as set_status does
+                    changes["assignee"] = done["assignee"] = self._review_author(conn, task)
+                task = self._update(conn, task, **changes)
+                self._event(conn, task.id, actor, "status", "merged", data={**done, "waiting_on": None})
             return task
 
     # ── Removing tasks for good ──
