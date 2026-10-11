@@ -108,7 +108,7 @@ commands as you is close to that: see [Agents with a shell](#agents-with-a-shell
   reviewer can review, and nobody can review their own work (an agent that claimed the task, handed it over
   or ran it through the worker can't be its reviewer, whoever asks; one that only reviewed it can). A review that marks an acceptance check not met
   can't be an approval. By default `done` needs an approving review or a stated reason. Only you can
-  reassign, cancel, delete, clean or reopen.
+  reassign, cancel, delete, clean, reopen or merge a task's branch.
 - Every change is recorded in `events`. SQLite triggers refuse edits to the history, and refuse deletes
   while the task exists. Agents have no delete tool at all.
 
@@ -119,14 +119,35 @@ run commands as you (Claude Code's Bash tool, Codex's shell) can run the `handof
 is you: it could approve a task, run it, or delete one. Handoff can't tell it apart from you at a terminal.
 
 - Anything Handoff started (`HANDOFF_DEPTH` is set) is refused the CLI's writes (add, assign, note, status,
-  review, approve, delete, clean, keep and the like, plus `setup` when it would change an app's config or
+  review, approve, merge, delete, clean, keep and the like, plus `setup` when it would change an app's config or
   hook, and `update` other than `--check`), `handoff api`'s writes, and `handoff run`, `dispatch` and
   `worker`. It can still look. This is a guard against an agent doing it by accident, not a wall: a shell
   can unset the variable (`env -u HANDOFF_DEPTH`, or `HANDOFF_DEPTH=0`), and Handoff can't stop that.
 - So for every agent with a shell, deny those commands in its app's permission settings too. In Claude
   Code, add `Bash(handoff approve:*)`, `Bash(handoff delete:*)`, `Bash(handoff clean:*)`,
-  `Bash(handoff keep:*)` and `Bash(handoff run:*)` to `permissions.deny` in `~/.claude/settings.json`.
+  `Bash(handoff keep:*)`, `Bash(handoff merge:*)` and `Bash(handoff run:*)` to `permissions.deny` in `~/.claude/settings.json`.
   Where an app can't deny single commands, have it ask you before it runs any.
+
+### Merging a task's branch
+
+`handoff merge T-N` (or Merge in the Ixel window) is the one time an agent's work reaches your own checkout
+through Handoff, so it runs only for you and checks what it brings in first. It merges the commit the
+worker's run recorded (never whatever the branch points at by then), as one merge commit, and never pushes.
+It refuses, changing nothing, when:
+
+- a run of the task is under way or approved and waiting, or the task isn't handed back yet;
+- your checkout is detached, has a task's branch out, has uncommitted changes to tracked files, or is in
+  the middle of a merge, rebase, cherry-pick or revert (a failed merge is aborted only when it's Handoff's own);
+- the branch would change Handoff's board folder (`.handoff`); the worker never commits one either;
+- it would replace a file of yours git doesn't track. Git overwrites ignored files (an `.env`, local app
+  settings) without asking, so Handoff checks each one first;
+- it writes through a link in your checkout;
+- it changes `.gitattributes`, `.lfsconfig` or `.gitmodules`, which tell git what to run on your computer.
+  Merge those yourself after a look. The merge itself never runs Git LFS's download, so a branch can't make
+  it fetch from a server of its choosing.
+
+After a merge the task is done and its worktree goes, unless the worktree has uncommitted files: then it
+stays, and Handoff says so. The branch always stays.
 
 ### No secrets on the board
 
@@ -269,6 +290,7 @@ shell or network access of its own.
 | `tests/test_worker_live.py` | **The attack test for Claude's edit-only mode**, where the sandbox can't run (below) |
 | `tests/test_sandbox.py` | The sandbox's command line (what's hidden, what's shown, in what order); which folders can be shared and what's hidden inside them; Claude's sandbox settings; each agent's private login and when a refreshed one is copied back; which environment variables count as credentials |
 | `tests/test_worker.py` | Approvals (the person only; one run; lapse when the task moves; sealed to this computer and board, so a cloned or edited board carries none); the worktree, branch and commit; a rewritten `.git` file and the repository's own hooks can't make the worker's git run anything; links out of the worktree are refused; the agent's environment and command line; a secret added to a new or committed file is never committed, while one the branch already had doesn't block the change; deleting or cleaning a task leaves its worktree and branch, and says so |
+| `tests/test_merge.py` | Merging a task's branch: the person only (an agent's tools and anything Handoff started are refused); only the commit the run recorded, so a branch that changed since is refused; not while a run is under way or approved; refused, changing nothing, with uncommitted changes, a detached HEAD, a task's branch out or your own merge in progress; a branch that touches the board folder, replaces an ignored or untracked file of yours, or changes `.gitattributes`/`.lfsconfig` is refused; a conflict is aborted; the worker never commits a `.handoff` folder; a worktree with uncommitted files is kept; never pushes |
 | `tests/test_models_usage.py` | The model or chain of models an edit runs on, and how hard each one thinks, are sealed into its approval, so a board can't move a run to a dearer model or turn one up; a level the agent doesn't take never reaches it; a chain's planner gets read-only tools; a chain that stops keeps what its steps did in the reason; usage read back from a board is checked before it's shown |
 | `tests/test_dispatch.py` | How a request splits and which kind of run each part gets; nothing is added before a yes; the runs really happen at once; the kind is sealed, so a run can't be turned into an edit; only claude and codex edit; the files a run reads stay inside the project; pictures saved anywhere else are refused; one failing part blocks only its own task; the loop guard |
 | `tests/test_update.py` | Update never overwrites local changes, and runs the installer again until the latest is installed; git, bash and PowerShell never come from the folder it's run in |

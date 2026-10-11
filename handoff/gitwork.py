@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
-from handoff.board import task_of_name
+from handoff.board import Changed, task_of_name
 from handoff.proc import find_on_path
 from handoff.sanitize import clean_line, find_secret, find_token
 
@@ -32,6 +32,18 @@ _REPO_LOCK = threading.RLock()
 
 class GitError(Exception):
     """Git couldn't do what the worker needs; the message says what to do."""
+
+
+class MergeConflict(GitError):
+    """A merge stopped on conflicts; it was aborted, so nothing changed. `files`: the conflicting ones."""
+
+    def __init__(self, message: str, files: list[str]):
+        super().__init__(message)
+        self.files = files
+
+
+class AlreadyMerged(GitError):
+    """The branch has nothing the current branch lacks."""
 
 
 @dataclass
@@ -53,7 +65,8 @@ def no_hooks() -> Path:
 
 
 def _git(root: Path, args: list[str], *, cwd: Path | None = None, worktree: Worktree | None = None,
-         stdin: str | None = None, check: bool = True, errors: str = "replace") -> "subprocess.CompletedProcess[str]":
+         stdin: str | None = None, check: bool = True, errors: str = "replace",
+         extra_env: dict[str, str] | None = None) -> "subprocess.CompletedProcess[str]":
     hooks = no_hooks()
     # From PATH only: Windows would run a git.exe in the project folder first
     git = find_on_path("git")
@@ -67,7 +80,7 @@ def _git(root: Path, args: list[str], *, cwd: Path | None = None, worktree: Work
     # Filters, such as Git LFS's, still run when files are staged, as they would for you.
     argv += ["-c", f"core.hooksPath={hooks}", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", *args]
     # (no replace refs: a commit approved by its id is that commit, whatever refs/replace says it is)
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1"}
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1", **(extra_env or {})}
     try:
         proc = subprocess.run(argv, cwd=cwd or (worktree.path if worktree else root), input=stdin,
                               capture_output=True, text=True, encoding="utf-8", errors=errors, env=env,
@@ -232,8 +245,10 @@ SCAN_OVERLAP_BYTES = 8 * 1024
 
 def stage_all(root: Path, worktree: Worktree) -> list[str]:
     """Stage everything the agent changed. Returns the added, modified or retyped paths (a link that's now a file,
-    say), each naming its file even where the name isn't UTF-8."""
+    say), each naming its file even where the name isn't UTF-8. Never a .handoff folder the agent made: merged, it
+    would land on the person's own board."""
     _git(root, ["add", "-A"], worktree=worktree)
+    _git(root, ["reset", "-q", "--", ":(icase).handoff"], worktree=worktree, check=False)
     out = _git(root, ["diff", "--no-ext-diff", "--cached", "--name-only", "--diff-filter=ACMRT", "-z"],
                worktree=worktree, errors="surrogateescape").stdout
     return [name for name in out.split("\0") if name]
@@ -387,6 +402,187 @@ def _default_branch(root: Path) -> str | None:
     for name in candidates:
         if name and _git(root, ["rev-parse", "--verify", "-q", f"{name}^{{commit}}"], check=False).returncode == 0:
             return name
+    return None
+
+
+def current_branch(root: Path) -> str | None:
+    """The branch the project's own checkout has out; None when HEAD is detached. Only looks."""
+    proc = _git(root, ["symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
+    if proc.returncode != 0:
+        return None
+    return clean_line(proc.stdout)[:200] or None
+
+
+# Files that tell git (or a program it runs, such as Git LFS) what to do: a task's branch may not bring these into
+# your checkout through a merge, since they'd act outside the worker's sandbox, on your computer (an .lfsconfig can
+# point Git LFS at any server, a .gitattributes can turn a filter on). Merge such a branch yourself, after a look.
+_GIT_CONTROL_FILES = frozenset({".gitattributes", ".lfsconfig", ".gitmodules"})
+# What the merge itself never runs: Git LFS's download (a pointer file stays a pointer; `git lfs pull` fetches it)
+_MERGE_CONFIG = ["-c", "filter.lfs.process=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false"]
+_MERGE_ENV = {"GIT_LFS_SKIP_SMUDGE": "1"}
+
+
+def merge_branch(root: Path, branch: str, message: str, expected_tip: str) -> tuple[str, str, str]:
+    """Merge a task's branch (such as handoff/T-3) into the branch the project's own checkout has out, as one merge
+    commit (--no-ff), on the person's say-so. What's merged is `expected_tip`, the commit the worker's run recorded,
+    never whatever the branch points at by then. Returns that branch's name, the merge commit and its short id.
+    Refuses, changing nothing (GitError), when the checkout isn't on a branch of its own, has uncommitted changes
+    to tracked files or is in the middle of a merge, rebase or cherry-pick; when `branch` is gone, isn't at
+    `expected_tip` (Changed) or has nothing to add (AlreadyMerged); and when what it brings in would touch the
+    board (.handoff), replace a file of yours git doesn't track (one it ignores, such as .env, which git would
+    otherwise overwrite without a word), go through a link, or change a file that tells git what to run
+    (.gitattributes, .lfsconfig, .gitmodules). A conflict is aborted (MergeConflict). Never fetches or pushes."""
+    if not branch or not set(branch) <= _SAFE_REF or branch.startswith("-") or ".." in branch:
+        raise GitError(f"{clean_line(branch)[:80]!r} isn't a branch name Handoff merges.")
+    if not expected_tip or not expected_tip.isalnum() or len(expected_tip) > 64:
+        raise GitError("The run's commit isn't a commit id, so Handoff won't merge it.")
+    with _REPO_LOCK:
+        return _merge_branch(root, branch, message, expected_tip)
+
+
+def merge_ready(root: Path, branch: str, expected_tip: str) -> str | None:
+    """The branch a merge of `branch` at `expected_tip` would go into, when it could be tried now: the branch is
+    still at that commit, the checkout is on a branch of its own (not a task's) and lacks the commit. Else None.
+    Only looks; merge_branch checks everything again when it's asked."""
+    if not branch or not set(branch) <= _SAFE_REF or branch.startswith("-") or ".." in branch:
+        return None
+    try:
+        with _REPO_LOCK:
+            if _git(root, ["rev-parse", "-q", "--verify", f"refs/heads/{branch}"], cwd=root,
+                    check=False).stdout.strip() != expected_tip:
+                return None
+            current = current_branch(root)
+            if current is None or current.startswith("handoff/"):
+                return None
+            ahead = _git(root, ["rev-list", "--count", f"HEAD..{expected_tip}"], cwd=root, check=False)
+            return current if ahead.returncode == 0 and ahead.stdout.strip() not in ("", "0") else None
+    except GitError:
+        return None
+
+
+def _busy_with(root: Path) -> str | None:
+    """What the checkout is in the middle of (a merge, a rebase…), in words; None when nothing."""
+    for name, what in (("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"),
+                       ("REVERT_HEAD", "a revert")):
+        if _git(root, ["rev-parse", "-q", "--verify", name], cwd=root, check=False).returncode == 0:
+            return what
+    for name in ("rebase-merge", "rebase-apply"):
+        found = _git(root, ["rev-parse", "--git-path", name], cwd=root, check=False).stdout.strip()
+        if found and (root / found if not Path(found).is_absolute() else Path(found)).exists():
+            return "a rebase"
+    return None
+
+
+def _incoming_problem(root: Path, commit: str) -> str | None:
+    """Why what `commit` brings into the checkout (since it left it) mustn't be merged by Handoff; None when it's
+    fine. See merge_branch."""
+    base = _git(root, ["merge-base", "HEAD", commit], cwd=root, check=False).stdout.strip()
+    if not base:
+        return "It shares no history with your branch, so Handoff won't merge it. Merge it yourself if you mean to."
+    out = _git(root, ["diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", base, commit], cwd=root,
+               errors="surrogateescape").stdout
+    paths = [name for name in out.split("\0") if name]
+    tracked = set(_git(root, ["ls-files", "-z"], cwd=root, errors="surrogateescape").stdout.split("\0"))
+    board, control, mine, links = [], [], [], []
+    for name in paths:
+        parts = name.split("/")
+        if parts[0].casefold() == ".handoff":
+            board.append(name)
+            continue
+        if parts[-1].casefold() in _GIT_CONTROL_FILES:
+            control.append(name)
+        # A folder on the way that's a link would take the merge's write somewhere else
+        if any(is_link(root.joinpath(*parts[:i])) for i in range(1, len(parts))):
+            links.append(name)
+        elif name not in tracked and os.path.lexists(root / name):
+            mine.append(name)
+    if board:
+        return (f"It would change Handoff's own board folder ({', '.join(_shown(n) for n in board[:5])}), which a "
+                "task's branch never may. Look at the branch; don't merge it.")
+    if links:
+        return (f"It writes through a link in your checkout ({', '.join(_shown(n) for n in links[:5])}). Look at "
+                "it, and merge it yourself if it's right.")
+    if mine:
+        return (f"It would replace files of yours that git doesn't track ({', '.join(_shown(n) for n in mine[:10])}"
+                "), such as ignored ones git overwrites without asking. Move them aside or look at the branch first.")
+    if control:
+        return (f"It changes {', '.join(_shown(n) for n in control[:5])}, which tell git what to run on your "
+                "computer. Look at that, then merge it yourself with git if it's right.")
+    return None
+
+
+def _merge_branch(root: Path, branch: str, message: str, expected_tip: str) -> tuple[str, str, str]:
+    ref = f"refs/heads/{branch}"
+    if not _branch_exists(root, branch):
+        raise GitError(f"{branch} isn't in this repository any more, so there's nothing to merge.")
+    proc = _git(root, ["symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
+    current = proc.stdout.strip()
+    if proc.returncode != 0 or not current:
+        raise GitError("Your checkout isn't on a branch (HEAD is detached). Check out the branch to merge into "
+                       "first, such as: git checkout main")
+    shown = clean_line(current)[:200]
+    if current.startswith("handoff/"):
+        raise GitError(f"Your checkout has {shown} out, a task's own branch. Check out your project's branch "
+                       "first, such as: git checkout main")
+    busy = _busy_with(root)
+    if busy:
+        raise GitError(f"Your checkout is in the middle of {busy}. Finish it or abort it first, then merge.")
+    if _git(root, ["status", "--porcelain", "--untracked-files=no"], cwd=root).stdout.strip():
+        raise GitError(f"{shown} has uncommitted changes to tracked files. Commit or stash them first, then "
+                       "merge.")
+    tip = _git(root, ["rev-parse", ref], cwd=root).stdout.strip()
+    if tip != expected_tip:
+        raise Changed(f"{branch} changed since the worker's run: its tip ({tip[:12]}) isn't the commit the run "
+                      f"recorded ({clean_line(expected_tip)[:12]}). Look at it before merging.")
+    ahead = _git(root, ["rev-list", "--count", f"HEAD..{expected_tip}"], cwd=root).stdout.strip()
+    if ahead == "0":
+        raise AlreadyMerged(f"{branch} is already merged into {shown}: it has nothing {shown} lacks.")
+    problem = _incoming_problem(root, expected_tip)
+    if problem:
+        raise GitError(f"Handoff won't merge {branch}: {problem}")
+    named = _git(root, ["config", "user.email"], cwd=root, check=False).stdout.strip()
+    identity = [] if named else ["-c", "user.name=Handoff worker", "-c", "user.email=handoff@localhost"]
+    # The commit that was checked, by its id: a commit landing on the branch meanwhile isn't taken in unseen
+    merged = _git(root, [*identity, *_MERGE_CONFIG, "merge", "--no-ff", "--no-edit", "--no-gpg-sign", "-m",
+                         message, expected_tip], cwd=root, check=False, extra_env=_MERGE_ENV)
+    if merged.returncode != 0:
+        out = _git(root, ["diff", "--name-only", "--diff-filter=U", "-z"], cwd=root, check=False,
+                   errors="surrogateescape").stdout
+        files = sorted(_shown(name) for name in out.split("\0") if name)
+        # Only this merge's own: the checkout wasn't in the middle of one before (checked above)
+        if _git(root, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=root, check=False).returncode == 0:
+            _git(root, [*_MERGE_CONFIG, "merge", "--abort"], cwd=root, check=False, extra_env=_MERGE_ENV)
+        if files:
+            raise MergeConflict(f"Merging {branch} into {shown} conflicts in: {', '.join(files[:50])}. The merge "
+                                "was aborted, so nothing changed.", files)
+        lines = (merged.stderr or merged.stdout).strip().splitlines()
+        said = f": {clean_line(lines[-1])[:300]}" if lines else ""
+        raise GitError(f"git merge of {branch} into {shown} failed{said}. Nothing was merged.")
+    sha = _git(root, ["rev-parse", "HEAD"], cwd=root).stdout.strip()
+    short = _git(root, ["rev-parse", "--short", "HEAD"], cwd=root).stdout.strip()
+    return shown, sha, short
+
+
+def remove_worktree(root: Path, task_id: int) -> str | None:
+    """Remove the task's worktree, .handoff/worktrees/T-N, keeping its branch, when nothing in it is uncommitted
+    (a stopped run's files, or your own edits, stay). A note in words if it's left, else None."""
+    path = root / WORKTREES / f"T-{task_id}"
+    where = (WORKTREES / f"T-{task_id}").as_posix()
+    with _REPO_LOCK:
+        if is_link(path):
+            return f"{where} is a link, not the worker's worktree, so Handoff left it."
+        if not path.exists():
+            return None
+        status = _git(root, ["status", "--porcelain", "--untracked-files=all"], cwd=path, check=False)
+        if status.returncode != 0 or status.stdout.strip():
+            return (f"{where} still has uncommitted changes, so Handoff left it. When you don't need them: "
+                    f"git worktree remove --force {where}")
+        _git(root, ["worktree", "remove", "--force", str(path)], cwd=root, check=False)
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+            _git(root, ["worktree", "prune"], cwd=root, check=False)
+    if path.exists():
+        return f"Couldn't remove {where}; remove it with: git worktree remove --force {where}"
     return None
 
 

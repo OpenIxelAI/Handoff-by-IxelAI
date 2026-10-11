@@ -52,6 +52,7 @@ COMMANDS = [
     ('handoff note T-12 "text"', "Add a note to a task"),
     ("handoff done T-12 [--reason R]", "Mark a task done (no review needed)"),
     ("handoff reopen T-12", "Open a done, cancelled or blocked task again"),
+    ("handoff merge T-12 [--yes]", "Merge a finished task's branch into your branch (you only; never pushed)"),
     ('handoff block T-12 "why" [--waiting-on NAME]', "Mark a task blocked, and say why"),
     ("handoff cancel T-12 [--reason R]", "Cancel a task"),
     ("handoff delete T-12 [--yes]", "Delete a task, its history and its results for good"),
@@ -82,7 +83,7 @@ GROUPS = [
     ("See what's happening", ("board", "show")),
     ("Make and change tasks", ("add", "assign", "note", "done", "reopen", "block", "cancel", "delete", "clean",
                                "status")),
-    ("Review work", ("review",)),
+    ("Review work", ("review", "merge")),
     ("Hand work to agents", ("dispatch", "agents", "approve", "run", "worker")),
     ("Set up", ("setup", "doctor", "done-rule", "keep", "update", "version", "help")),
     ("For apps", ("mcp",)),
@@ -110,6 +111,7 @@ EXAMPLES = {
     "note": ['handoff note T-3 "The bug only happens on Safari"'],
     "done": ["handoff done T-3", 'handoff done T-3 --reason "Fixed in the last release"'],
     "reopen": ["handoff reopen T-3"],
+    "merge": ["handoff merge T-3", "handoff merge T-3 --yes"],
     "block": ['handoff block T-3 "Waiting for the API keys"',
               'handoff block T-3 "Needs a decision on the design" --waiting-on me'],
     "cancel": ["handoff cancel T-3", 'handoff cancel T-3 --reason "Not needed any more"'],
@@ -1413,6 +1415,69 @@ def _sandbox_word(agent: str) -> str | None:
         return "edit-only (no commands, since its sandbox can't run here)" if spec.fallback else None
 
 
+def cmd_merge(argv: list[str]) -> int:
+    from handoff import gitwork
+    from handoff.board import HUMAN, Board, Changed
+    from handoff.sanitize import clean_line
+
+    parser = _parser("merge", "Merge a finished task's branch into the branch your checkout has out, as one merge "
+                     "commit. Only you can do this, and nothing is pushed. Refused, changing nothing, when your "
+                     "checkout has uncommitted changes or is detached, or the branch changed since the worker's run.",
+                     needs={"task": "Say which task, like: handoff merge T-3"})
+    parser.add_argument("task", metavar="T-12")
+    parser.add_argument("--yes", action="store_true", help="don't ask; merge it")
+    args = parser.parse_args(argv)
+    board = _board(args)
+    task_id = _task_id(args.task)
+    task, events, _, _ = board.task_with_history(task_id)
+    ref = task.ref
+    if task.branch is None:
+        raise CommandError(f"{ref} has no branch, so there's nothing to merge.")
+    blocked = Board.merge_blocker(task, events)
+    if blocked:
+        raise CommandError(blocked)
+    commit = Board.run_commit(events)
+    if commit is None:
+        raise CommandError(f"No worker run recorded a commit for {ref}, so there's nothing of its to merge.")
+    if Board.merged_commit(events) == commit:
+        raise CommandError(f"{task.branch} is already merged: the board has it merged at the run's commit.")
+    root = _root(args)
+    try:
+        into = gitwork.current_branch(root)
+    except gitwork.GitError as exc:
+        raise CommandError(str(exc)) from None
+    if into is None:
+        raise CommandError("Your checkout isn't on a branch (HEAD is detached). Check out the branch to merge into "
+                           "first, such as: git checkout main")
+    if into.startswith("handoff/"):
+        raise CommandError(f"Your checkout has {escape(into)} out, a task's own branch. Check out your project's "
+                           "branch first, such as: git checkout main")
+    if not args.yes:
+        if not _interactive():
+            raise CommandError(f"Say you want it merged, like: handoff merge {ref} --yes")
+        console.print(f"\n  Merge {escape(task.branch)} ({escape(clean_line(task.title))}) into {escape(into)}, in "
+                      f"{escape(str(root))}, as one merge commit; nothing is pushed.", soft_wrap=True)
+        answer = console.input(f"  Merge {escape(ref)}? [y/N] ")
+        if not answer.strip().lower().startswith("y"):
+            _hint("Not merged.")
+            return 0
+    try:
+        into, sha, short = gitwork.merge_branch(root, task.branch, f"Merge {ref}: {task.title}", commit)
+    except gitwork.MergeConflict as exc:  # (it's a GitError, so it comes first)
+        listed = "\n".join(f"  {name}" for name in exc.files[:50])
+        raise CommandError(f"Merging {task.branch} conflicts in these files. The merge was aborted, so nothing "
+                           f"changed:\n{listed}") from None
+    except (Changed, gitwork.AlreadyMerged, gitwork.GitError) as exc:
+        raise CommandError(str(exc)) from None
+    board = _board(args)  # read again where it is: the merge changed the checkout it lives in
+    board.record_merge(HUMAN, task_id, into, sha, short, commit)
+    _ok(f"Merged {task.branch} into {into} at {short}. {ref} is done.")
+    note = gitwork.remove_worktree(root, task_id)
+    if note:
+        _hint(note)
+    return 0
+
+
 def cmd_approve(argv: list[str]) -> int:
     from handoff.board import HUMAN, RUN_KINDS, TERMINAL
     from handoff.crew import board_name
@@ -2333,6 +2398,7 @@ HANDLERS = {
     "note": cmd_note,
     "done": cmd_done,
     "reopen": cmd_reopen,
+    "merge": cmd_merge,
     "block": cmd_block,
     "review": cmd_review,
     "status": cmd_status,
@@ -2361,7 +2427,7 @@ HANDLERS = {
 # parsed options: _not_started_by_handoff). A guard against an agent doing it by accident, not a wall: a
 # shell can unset the variable, which is why SECURITY.md says to deny these in the agent's permissions too.
 PERSON_WRITES = {"add", "assign", "note", "done", "reopen", "block", "review", "status", "cancel", "delete",
-                 "clean", "done-rule", "keep", "approve"}
+                 "clean", "done-rule", "keep", "approve", "merge"}
 
 
 def _not_started_by_handoff() -> None:

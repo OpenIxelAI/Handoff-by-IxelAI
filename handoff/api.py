@@ -68,7 +68,8 @@ DONE_SHOWN = 20             # finished tasks on the board, newest first, unless 
 MAX_DONE_SHOWN = 500
 MAX_OUTPUTS = 50
 _OUTPUT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
-WRITE_OPS = ("init", "add", "assign", "note", "review", "status", "delete", "approve", "revoke", "run.start")
+WRITE_OPS = ("init", "add", "assign", "note", "review", "status", "delete", "approve", "revoke", "run.start",
+             "merge")
 READ_OPS = ("hello", "revision", "board", "task", "agents", "inbox")
 OPS = READ_OPS + WRITE_OPS
 
@@ -237,15 +238,18 @@ def _summaries(board: Board, tasks: list[Task]) -> list[dict]:
     return [_summary(t, last.get(t.id), states.get(t.id), approved, counts.get(t.id, 0)) for t in tasks]
 
 
-def actions(task: Task, run: dict | None) -> list[dict]:
+def actions(task: Task, run: dict | None, merge_into: str | None = None) -> list[dict]:
     """What the person can do with a task now, as the window's buttons, best first. Each names the op it
     runs; `needs` is what the person has to type or pick first. The board checks each again when it's
-    pressed, so this list is a guide, not the rule."""
+    pressed, so this list is a guide, not the rule. `merge_into`: the branch the project has out, when the
+    task's branch has a run's work that isn't merged yet."""
     found: list[dict] = []
 
     def add(op: str, label: str, primary: bool = False, **extra) -> None:
         found.append({"op": op, "label": label, "primary": primary, **extra})
 
+    if merge_into:
+        add("merge", f"Merge into {merge_into}", confirm=True)
     who = task.assignee
     if task.status in TERMINAL:
         add("status", "Reopen", True, args={"to": "open"})
@@ -358,7 +362,21 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
             "events": [_event(e) for e in events], "claims": [c.path_glob for c in claims],
             "overlaps": [o.describe() for o in board.overlaps_for(task.id)],
             "children": _summaries(board, children), "outputs": _outputs(root, task),
-            "actions": actions(task, summary["run"])}
+            "actions": actions(task, summary["run"], _merge_into(root, task, events))}
+
+
+def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
+    """The branch the project has out, when the task's branch has a finished run's work that isn't merged yet
+    (what the merge action's label names); else None."""
+    if not task.branch or Board.merge_blocker(task, events) is not None:
+        return None
+    commit = Board.run_commit(events)
+    if commit is None or Board.merged_commit(events) == commit:
+        return None
+    from handoff import gitwork
+    # Offered only when it could go through: the branch is still at the run's commit, the checkout is on a branch
+    # of its own and lacks it (merged by hand with git, it isn't offered any more)
+    return gitwork.merge_ready(root, task.branch, commit)
 
 
 # ── The ops ───────────────────────────────────────────────────────────────────
@@ -369,8 +387,9 @@ def task_detail(board: Board, root: Path, task_id: int) -> dict:
 # run-models: an edit can name its models (approve's args.models: one model, or a chain, biggest first, where the
 # first plans and the others do the steps). run-usage: worker runs say what they used (events' and tasks' usage).
 # run-effort: an edit can say how hard each model thinks (approve's args.efforts: {model: level}, or {"": level}
-# for the agent's own model), in the levels each worker takes (a task's `workers`).
-FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort")
+# for the agent's own model), in the levels each worker takes (a task's `workers`). run-merge: the person can merge a
+# task's branch into their current branch (op merge: args.task, and optional args.shown as approve's).
+FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge")
 
 
 def _workers() -> dict:
@@ -549,6 +568,46 @@ def op_revoke(request: dict) -> dict:
     return _task_reply(board, board.revoke_approval(HUMAN, _task_arg(request.get("args", {}))))
 
 
+def op_merge(request: dict) -> dict:
+    """Merge the task's branch into the branch the project has out, as one merge commit (never pushed), then
+    mark the task done and remove its worktree (the branch stays). Refused, changing nothing, when the branch
+    isn't the commit the worker's run recorded, or the checkout isn't ready (gitwork.merge_branch). `left`: what
+    of the worktree is still there, in words (as a rule, nothing)."""
+    from handoff import gitwork
+    root = _project(request)
+    board = _board(root)
+    args = request.get("args", {})
+    task_id = _task_arg(args)
+    shown = _arg(args, "shown", str, required=False, default=None)  # the `content` of the task you showed
+    task, events, _, _ = board.task_with_history(task_id)
+    if shown is not None and shown != content_of(task, events):
+        raise Changed(f"{task.ref} changed while you were reading it. Look at it again, then merge what's there "
+                      "now.")
+    if task.branch is None:
+        raise BoardError(f"{task.ref} has no branch: nothing to merge.")
+    blocked = Board.merge_blocker(task, events)
+    if blocked:
+        raise BoardError(blocked)
+    expected = Board.run_commit(events)
+    if expected is None:
+        raise BoardError(f"No worker run recorded a commit for {task.ref}, so there's nothing of its to merge.")
+    if Board.merged_commit(events) == expected:
+        raise BoardError(f"{task.branch} is already merged: the board has it merged at the run's commit.")
+    try:
+        into, sha, short = gitwork.merge_branch(root, task.branch, f"Merge {task.ref}: {task.title}", expected)
+    except gitwork.MergeConflict as exc:
+        raise BoardError(f"Merging {task.branch} conflicts in: {', '.join(exc.files[:50])}. "
+                         "The merge was aborted, so nothing was changed.") from None
+    except gitwork.GitError as exc:  # (AlreadyMerged too)
+        raise BoardError(str(exc)) from None
+    # Read the board again where it is: the merge changed the checkout it lives in
+    board = _board(root)
+    task = board.record_merge(HUMAN, task_id, into, sha, short, expected)
+    note = gitwork.remove_worktree(root, task_id)
+    return {**_task_reply(board, task), "merged": {"branch": task.branch, "into": into, "sha": short},
+            "left": [note] if note else []}
+
+
 def run_command(root: Path, ref: str) -> list[str]:
     return [sys.executable, "-I", "-m", "handoff", "run", ref, "--project", str(root), "--json"]
 
@@ -592,6 +651,7 @@ HANDLERS = {
     "hello": op_hello, "revision": op_revision, "board": op_board, "task": op_task, "agents": op_agents,
     "inbox": op_inbox, "init": op_init, "add": op_add, "assign": op_assign, "note": op_note, "review": op_review,
     "status": op_status, "delete": op_delete, "approve": op_approve, "revoke": op_revoke, "run.start": op_run_start,
+    "merge": op_merge,
 }
 assert set(HANDLERS) == set(OPS)
 
