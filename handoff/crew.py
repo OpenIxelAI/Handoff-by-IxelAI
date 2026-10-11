@@ -129,6 +129,7 @@ def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._ru
     nothing is sent to a model, and nothing reads the board (a plan needs none). The checks run side by
     side, since each starts a program (an agent's --help, its sandbox's probe, Ixel's lists) that takes a
     second or more on its own."""
+    from handoff import proc
     from handoff.worker import AGENTS, Worker, WorkerUnavailable
 
     def edit_check(name: str) -> tuple[str, str]:
@@ -142,9 +143,13 @@ def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._ru
         return "", note
 
     members: dict[str, Member] = {}
-    with ThreadPoolExecutor(max_workers=len(AGENTS) + 1) as pool:
+    command = asks.find_ixel()
+    pool = ThreadPoolExecutor(max_workers=len(AGENTS) + 2)
+    try:
         checks = {name: pool.submit(edit_check, name) for name in AGENTS} if check_edits else {}
-        listing = pool.submit(asks.ixel_roster, root, runner)
+        # Ixel's two lists side by side too: each can take a while (up to asks.LIST_TIMEOUT_SEC)
+        lists = [pool.submit(asks.ixel_list, command, which, root, runner) for which in ("ask", "image")] \
+            if command else []
         for name in AGENTS:
             member = members.setdefault(name, Member(name, name.capitalize()))
             if not check_edits:
@@ -153,7 +158,15 @@ def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._ru
             member.kinds["edit"], note = checks[name].result()
             if note:
                 member.notes["edit"] = note
-        ixel = listing.result()
+        listed, pictures = [job.result() for job in lists] if lists else (None, None)
+        ixel = asks.roster_from_lists(command, listed, pictures)
+    except BaseException:
+        # Ctrl+C reaches this thread only: stop Ixel's lists rather than wait out their timeout, and leave the
+        # rest (an agent's --help) to finish on its own instead of waiting for it here
+        proc.stop_all()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
     providers = {p["name"]: p for p in ixel.providers}
     for item in ixel.agents:
         name = board_name(item.get("name"))

@@ -94,22 +94,40 @@ def _json_out(runner: Runner, command: list[str], root: Path, timeout: float) ->
     return data if isinstance(data, dict) else None
 
 
-def ixel_roster(root: Path, runner: Runner = _run) -> IxelRoster:
-    """Who Ixel can ask, and which picture services have a key. Nothing is sent to a model."""
-    ixel = find_ixel()
+def ixel_list(ixel: str, which: str, root: Path, runner: Runner = _run) -> dict | None:
+    """One of Ixel's lists, as it printed it: `ixel ask --list` ("ask": who it can ask) or `ixel image --list`
+    ("image": which picture services have a key). None when it printed nothing readable."""
+    return _json_out(runner, [ixel, which, "--list", "--json"], root, LIST_TIMEOUT_SEC)
+
+
+def roster_from_lists(ixel: str | None, listed: dict | None, pictures: dict | None) -> IxelRoster:
+    """What Ixel's two lists say, put together. `ixel` is the command (None when there's none), `listed` what
+    `ixel ask --list` printed and `pictures` what `ixel image --list` did (ixel_list)."""
     if ixel is None:
         return IxelRoster([], [], "Ixel MAT isn't installed (no `ixel` command), so only claude and codex can "
                                   "take tasks, as edits. Install Ixel MAT to give answers, reviews and pictures to "
                                   "any model.")
-    listed = _json_out(runner, [ixel, "ask", "--list", "--json"], root, LIST_TIMEOUT_SEC)
     if listed is None or not isinstance(listed.get("agents"), list):
         return IxelRoster([], [], "This Ixel MAT can't take single tasks yet (`ixel ask` is missing). Update it "
                                   "with: ixel update")
-    pictures = _json_out(runner, [ixel, "image", "--list", "--json"], root, LIST_TIMEOUT_SEC) or {}
+    pictures = pictures or {}
     agents = [a for a in listed["agents"] if isinstance(a, dict) and isinstance(a.get("name"), str)]
     providers = [p for p in pictures.get("providers") or [] if isinstance(p, dict) and isinstance(p.get("name"), str)]
     features = tuple(f for f in listed.get("features") or [] if isinstance(f, str))
     return IxelRoster(agents, providers, features=features)
+
+
+def ixel_roster(root: Path, runner: Runner = _run) -> IxelRoster:
+    """Who Ixel can ask, and which picture services have a key, one list after the other (crew.build_roster
+    asks for both at once). Nothing is sent to a model."""
+    ixel = find_ixel()
+    if ixel is None:
+        return roster_from_lists(None, None, None)
+    listed = ixel_list(ixel, "ask", root, runner)
+    roster = roster_from_lists(ixel, listed, None)
+    if roster.problem:  # (no need for the pictures' list then)
+        return roster
+    return roster_from_lists(ixel, listed, ixel_list(ixel, "image", root, runner))
 
 
 # ── What a run reads ─────────────────────────────────────────────────────────

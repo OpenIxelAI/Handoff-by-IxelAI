@@ -321,22 +321,67 @@ def test_agents_says_who_can_do_what(repo, fake_ixel, run_cli):
 
 
 def test_the_roster_s_checks_run_side_by_side(tmp_path, monkeypatch):
-    """Each check starts a program (claude --help, codex exec --help, ixel ask --list), so one after another
-    they'd take seconds."""
-    monkeypatch.setattr(worker.Worker, "check", lambda self: time.sleep(0.3))  # both agents look ready
+    """Each check starts a program (claude --help, codex exec --help, ixel ask --list, ixel image --list), so
+    one after another they'd take seconds."""
+    monkeypatch.setattr(worker.Worker, "check", lambda self: time.sleep(0.5))  # both agents look ready
     monkeypatch.setattr(asks, "find_ixel", lambda: "ixel")
+    listed = []
 
     def runner(argv, stdin, env, timeout, cwd):
-        if argv[1:3] == ["ask", "--list"]:  # (the picture list comes back at once)
-            time.sleep(0.3)
+        listed.append(argv[1:3])
+        time.sleep(0.5)
         return subprocess.CompletedProcess(argv, 0, '{"agents": [], "providers": []}', "")
 
     started = time.perf_counter()
     roster = crew.build_roster(None, tmp_path, runner=runner)
     took = time.perf_counter() - started
-    assert took < 0.75, took  # three 0.3 s waits one after another would take 0.9 s
+    assert sorted(listed) == [["ask", "--list"], ["image", "--list"]]
+    assert took < 0.95, took  # any two of the four 0.5 s waits one after the other would take 1 s
     assert list(roster.members) == ["claude", "codex"] and roster.problems == []
     assert [m.kinds for m in roster.members.values()] == [{"edit": ""}, {"edit": ""}]
+
+
+def test_ctrl_c_while_building_the_roster_stops_ixel_s_lists(tmp_path, monkeypatch):
+    """Ctrl+C only reaches the main thread: the lists running on the pool's threads are stopped, not waited
+    for (each could take a minute)."""
+    from concurrent.futures import Future
+
+    from handoff import proc
+    monkeypatch.setattr(asks, "find_ixel", lambda: "ixel")
+    noticed = []
+
+    def runner(argv, stdin, env, timeout, cwd):  # like run_tree: runs until stop_all, then says it was stopped
+        give_up = time.monotonic() + 5
+        while not proc.stopping() and time.monotonic() < give_up:
+            time.sleep(0.01)
+        if proc.stopping():
+            noticed.append(argv[1])
+            raise proc.Stopped("it was stopped while it was running")
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    result = Future.result
+    calls = []
+
+    def ctrl_c(self, timeout=None):  # the person presses Ctrl+C while build_roster waits on the first result
+        calls.append(self)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return result(self, timeout)
+
+    monkeypatch.setattr(Future, "result", ctrl_c)
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            crew.build_roster(None, tmp_path, runner=runner, check_edits=False)
+        took = time.monotonic() - started
+        assert proc.stopping()
+        assert took < 1, took
+        give_up = time.monotonic() + 2
+        while len(noticed) < 2 and time.monotonic() < give_up:
+            time.sleep(0.01)
+        assert sorted(noticed) == ["ask", "image"]  # both lists were running, and both stopped
+    finally:
+        proc.allow_runs()
 
 
 def test_the_plan_shows_every_part_and_adds_nothing(repo, fake_ixel, run_cli):
