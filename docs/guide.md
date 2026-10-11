@@ -299,6 +299,7 @@ can't.
 | `handoff reopen T-12` | Open a done, cancelled or blocked task again |
 | `handoff block T-12 "why" [--waiting-on NAME]` | Mark a task blocked, and say why |
 | `handoff review T-12 [approve\|changes ["notes"]] [--check N=RESULT]… [--panel]` | Review a task that's waiting for you. With no verdict, it shows what came back and its checks, then asks. `--check "2=not_met:fails when empty"` marks check 2 |
+| `handoff merge T-12 [--yes]` | Merge a finished task's branch into the branch your checkout has out, as one merge commit. Only you can do it, nothing is pushed, and the task's worktree is removed (the branch stays) |
 | `handoff status T-12 open\|blocked\|done` | Set a status directly (`done`, `reopen` and `block` are the short ways). On a task in review, this or `cancel` ends the review and gives the task back to its author |
 | `handoff cancel T-12` · `handoff delete T-12` | Cancel (keeps the history), or delete for good with its results in `.handoff/outputs` (asks first) |
 | `handoff clean [--older-than DAYS] [--yes]` | Remove finished tasks that haven't changed in DAYS days (30 if you leave it out), with their history and results, after listing them and asking |
