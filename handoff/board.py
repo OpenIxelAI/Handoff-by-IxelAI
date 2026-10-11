@@ -977,11 +977,18 @@ class Board:
             if task.status in ("open", "handed_off"):
                 task = self._update(conn, task, status="claimed", assignee=actor)
                 self._event(conn, task.id, actor, "claimed")
-            elif task.assignee is None:
+            elif task.assignee is None and task.waiting_on in (None, actor):
                 # Blocked, with nobody to unblock it (the person blocked it unassigned, or took its assignee
-                # away). Taking it makes the agent the one who can set it open, so it's theirs, still blocked
+                # away), and waiting on nobody or on this agent. Taking it makes the agent the one who can set
+                # it open, so it's theirs, still blocked
                 task = self._update(conn, task, assignee=actor)
                 self._event(conn, task.id, actor, "claimed", data={"status": task.status})
+            elif task.assignee is None:
+                # Blocked waiting on somebody else: taking it would let this agent set it open behind their back
+                if task.waiting_on == HUMAN:
+                    raise Forbidden(f"{task.ref} is blocked waiting on the person; only the person can take it.")
+                raise Forbidden(f"{task.ref} is blocked waiting on {task.waiting_on}; "
+                                f"only {task.waiting_on} or the person can take it.")
             elif not claimed:
                 return task, []  # already yours: nothing to change
             found = self._add_claims(conn, task, actor, claimed)

@@ -337,8 +337,10 @@ def test_wait_returns_when_a_task_arrives(tmp_path, quick_poll, timeout):
         text = run(go())
     finally:
         arrival.finish()
-    assert re.match(r"Your inbox changed after \d+ seconds?\.\n\n", text)
-    assert "inbox changed" in text and "Write the tests" in text and "T-1 · open · from claude" in text
+    # It quotes the board, so it opens with the frame like every other response that does
+    assert text.startswith(FRAME)
+    assert re.search(r"^# Handoffs for codex\n\nYour inbox changed after \d+ seconds?\.\n", text, re.M)
+    assert "Write the tests" in text and "T-1 · open · from claude" in text
 
 
 def test_wait_gives_up_after_the_timeout(tmp_path, quick_poll):
@@ -369,6 +371,41 @@ def test_wait_ignores_changes_that_aren_t_for_you(tmp_path, quick_poll):
     (text, wait_ended), (board, board_answered) = run(go())
     assert text.startswith("Nothing new for codex after 1 second.")
     assert "| T-1 | in_progress | claude | Mine |" in board and board_answered < wait_ended
+
+
+def test_wait_ignores_another_agent_taking_a_task_from_the_pool(tmp_path, quick_poll):
+    # The task leaves codex's inbox, but nothing arrived for codex
+    Board.open(tmp_path).create("claude", "Anyone's task")
+    taken = Later(0.1, lambda: Board.open(tmp_path).claim("claude", 1))
+
+    async def go():
+        async with mcp.Client(build_server("codex", tmp_path)) as codex:
+            taken.start()
+            return await call(codex, "handoff_wait", {"timeout_seconds": 1})
+    try:
+        text = run(go())
+    finally:
+        taken.finish()
+    assert text.startswith("Nothing new for codex after 1 second.")
+    assert Board.open(tmp_path).get(1).assignee == "claude"
+
+
+def test_wait_sees_a_note_made_in_the_same_second(tmp_path, quick_poll):
+    # The clock never moves, so the task's updated_at doesn't either: the note's event is what shows it
+    def clock():
+        return "2026-01-01T00:00:00Z"
+    Board.open(tmp_path, clock=clock).create("claude", "Write the tests", assignee="codex")
+    noted = Later(0.1, lambda: Board.open(tmp_path, clock=clock).note("human", 1, "Use the staging data"))
+
+    async def go():
+        async with mcp.Client(build_server("codex", tmp_path, clock=clock)) as codex:
+            noted.start()
+            return await call(codex, "handoff_wait", {"timeout_seconds": 5})
+    try:
+        text = run(go())
+    finally:
+        noted.finish()
+    assert text.startswith(FRAME) and "Your inbox changed after" in text and "Use the staging data" in text
 
 
 def test_wait_timeout_is_clamped(tmp_path, quick_poll):

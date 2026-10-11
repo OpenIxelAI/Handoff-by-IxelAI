@@ -175,6 +175,29 @@ def test_claiming_an_unassigned_blocked_task_takes_it_but_keeps_it_blocked(board
     assert board.set_status("codex", task.id, "open", reason="The keys arrived").status == "open"
 
 
+def test_an_unassigned_block_waiting_on_the_person_cannot_be_claimed(board):
+    # The person blocked it waiting on themselves: an agent taking it could set it open behind their back
+    task = new(board, assignee=None)
+    board.set_status(HUMAN, task.id, "blocked", reason="I need to pick a vendor", waiting_on=HUMAN)
+    before = board.get(task.id)
+    with pytest.raises(Forbidden, match="waiting on the person"):
+        board.claim("codex", task.id)
+    assert board.get(task.id) == before
+    assert kinds(board, task.id) == ["created", "status"]
+
+
+def test_an_unassigned_block_waiting_on_an_agent_is_only_theirs_to_claim(board):
+    task = new(board, assignee=None)
+    board.set_status(HUMAN, task.id, "blocked", reason="Needs the schema", waiting_on="claude")
+    before = board.get(task.id)
+    with pytest.raises(Forbidden, match="waiting on claude; only claude or the person can take it"):
+        board.claim("codex", task.id)
+    assert board.get(task.id) == before
+    task, _ = board.claim("claude", task.id)
+    assert task.status == "blocked" and task.assignee == "claude" and task.waiting_on == "claude"
+    assert kinds(board, task.id) == ["created", "status", "claimed"]
+
+
 def test_claiming_a_blocked_task_of_your_own_changes_nothing(board):
     task = new(board, "codex", "codex")
     board.set_status("codex", task.id, "blocked", reason="Waiting")
@@ -853,6 +876,17 @@ def test_an_agent_whose_worker_run_edited_the_task_cant_review_it(board, finish)
     board.claim("claude", task.id)
     with pytest.raises(BoardError, match="codex worked on T-1"):
         board.request_review("claude", task.id, "codex", "Check it")
+
+
+def test_pending_runs_can_be_narrowed_to_given_tasks(board):
+    first, _ = board.create(HUMAN, "Ideas", assignee="gemini")
+    second, _ = board.create(HUMAN, "More ideas", assignee="gemini")
+    for task in (first, second):
+        board.approve(HUMAN, task.id, "gemini", kind="answer")
+    assert [t.id for t, _ in board.pending_runs(None)] == [first.id, second.id]
+    assert [t.id for t, _ in board.pending_runs(None, [first.id])] == [first.id]
+    assert board.pending_runs(None, []) == []
+    assert board.pending_runs(None, [True]) == []  # (True is 1 to Python, but it isn't a task id)
 
 
 # ── Deleting for good ────────────────────────────────────────────────────────

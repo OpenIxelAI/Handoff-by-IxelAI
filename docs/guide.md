@@ -231,7 +231,7 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap
 | `handoff_board` | The whole board in brief, filtered by status or assignee |
 | `handoff_get` | One task with its full history |
 | `handoff_create` | A new task: title, body, acceptance checks, assignee, parent task, and the paths it will change |
-| `handoff_claim` | Take an open task, one handed to you, or a blocked one nobody has (it stays blocked, and yours to set open); optionally claim paths |
+| `handoff_claim` | Take an open task, one handed to you, or a blocked one nobody has, unless it's waiting on someone else (it stays blocked, and yours to set open); optionally claim paths |
 | `handoff_note` | A progress note (the first one marks the task in progress) |
 | `handoff_pass` | **The handoff:** what I did, what's left, how to check it, files touched. Reassigns the task |
 | `handoff_request_review` | Send the task to a reviewer (not yourself) |

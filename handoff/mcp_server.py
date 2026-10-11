@@ -33,6 +33,7 @@ from handoff import __version__, ixel
 from handoff.board import (
     ACTIVE,
     HUMAN,
+    MAX_OPEN_TASKS,
     STATUSES,
     TERMINAL,
     Board,
@@ -154,15 +155,21 @@ def build_server(me: str, root: Path | None, project_error: str | None = None,
 
     # ── reading ──
 
-    def inbox_text(b: Board) -> str:
+    def inbox_text(b: Board, lead: str = "") -> str:
+        """The inbox, as handoff_inbox and handoff_wait answer it. `lead` is a line said first, after the frame
+        that opens every response quoting the board (handoff_wait's "Your inbox changed after …")."""
         inbox = b.inbox(me)
         reply = Reply()
         if not (inbox.mine or inbox.blocked_on_me or inbox.unassigned):
             total = sum(n for status, n in b.counts().items() if status in ACTIVE)
+            if lead:
+                reply.add(lead, "")
             reply.add(f"Nothing is waiting for you ({me}). The board has {total} active "
                       f"task{'s' if total != 1 else ''}; handoff_board lists them.")
             return reply.render()
         reply.add(f"# Handoffs for {me}", "")
+        if lead:
+            reply.add(lead, "")
         shown = inbox.mine[:INBOX_LIMIT]
         blocked = inbox.blocked_on_me[:INBOX_LIMIT]
         # What each entry quotes, read for all of them at once rather than a few reads per task
@@ -193,13 +200,18 @@ def build_server(me: str, root: Path | None, project_error: str | None = None,
             reply.quote("titles", "\n".join(f"{t.ref}: {t.title}" for t in inbox.unassigned))
         return reply.render()
 
-    def inbox_fingerprint(b: Board) -> tuple:
-        """What handoff_wait compares: it changes when a task enters or leaves the inbox, or when one in it is
-        touched (a note, a handoff, a review, a status change all set updated_at)."""
-        inbox = b.inbox(me)
-        return (tuple((t.id, t.status, t.updated_at) for t in inbox.mine),
-                tuple((t.id, t.status, t.updated_at) for t in inbox.blocked_on_me),
-                tuple(t.id for t in inbox.unassigned))
+    def inbox_fingerprint(b: Board) -> frozenset:
+        """What handoff_wait compares, as a set: each task assigned to this agent or blocked waiting on it, with
+        the id of its latest event, and each open task nobody has. Event ids only grow, so a note, a handoff, a
+        review or a status change gives a pair the set didn't have, even in the same second as the last look.
+        handoff_wait wakes on something the set gains, never on what it loses: another agent taking a task from
+        the pool brings nothing new to this one. The whole pool is read (not just the newest few the inbox
+        lists), so a claim there can't bring an older open task into view and look like an arrival."""
+        inbox = b.inbox(me, unassigned_limit=MAX_OPEN_TASKS)
+        ours = [t.id for t in (*inbox.mine, *inbox.blocked_on_me)]
+        latest = b.last_events(ours)
+        return frozenset([("task", i, latest[i].id if i in latest else 0) for i in ours]
+                         + [("pool", t.id) for t in inbox.unassigned])
 
     def waited(started: float) -> str:
         """How long handoff_wait has waited since `started`, in whole seconds: "1 second", "3 seconds"."""
@@ -318,14 +330,16 @@ def build_server(me: str, root: Path | None, project_error: str | None = None,
         # Sleeping with anyio hands the loop back to the server, so it keeps answering other requests meanwhile
         limit = min(max(timeout_seconds, 1), WAIT_MAX_SEC)
         started = time.monotonic()
-        before = act(lambda: inbox_fingerprint(board(ctx)))
+        seen = act(lambda: inbox_fingerprint(board(ctx)))
         while True:
             remaining = started + limit - time.monotonic()
             if remaining <= 0:
                 break
             await anyio.sleep(min(WAIT_POLL_SEC, remaining))
-            if act(lambda: inbox_fingerprint(board(ctx))) != before:
-                return f"Your inbox changed after {waited(started)}.\n\n" + act(lambda: inbox_text(board(ctx)))
+            current = act(lambda: inbox_fingerprint(board(ctx)))
+            if current - seen:  # something arrived; a task that only left (claimed by another agent) isn't news
+                return act(lambda: inbox_text(board(ctx), f"Your inbox changed after {waited(started)}."))
+            seen = current  # so a task that left and comes back counts as arriving again
         return (f"Nothing new for {me} after {waited(started)}. Call handoff_wait again to keep waiting, or "
                 "handoff_inbox to read what's there now.\n")
 
