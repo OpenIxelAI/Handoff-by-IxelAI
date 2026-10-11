@@ -53,7 +53,7 @@ def no_hooks() -> Path:
 
 
 def _git(root: Path, args: list[str], *, cwd: Path | None = None, worktree: Worktree | None = None,
-         stdin: str | None = None, check: bool = True) -> "subprocess.CompletedProcess[str]":
+         stdin: str | None = None, check: bool = True, errors: str = "replace") -> "subprocess.CompletedProcess[str]":
     hooks = no_hooks()
     # From PATH only: Windows would run a git.exe in the project folder first
     git = find_on_path("git")
@@ -70,7 +70,7 @@ def _git(root: Path, args: list[str], *, cwd: Path | None = None, worktree: Work
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1"}
     try:
         proc = subprocess.run(argv, cwd=cwd or (worktree.path if worktree else root), input=stdin,
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
+                              capture_output=True, text=True, encoding="utf-8", errors=errors, env=env,
                               timeout=120)
     except FileNotFoundError as exc:
         raise GitError("git isn't installed (no `git` command on PATH); the worker needs it.") from exc
@@ -231,11 +231,17 @@ SCAN_OVERLAP_BYTES = 8 * 1024
 
 
 def stage_all(root: Path, worktree: Worktree) -> list[str]:
-    """Stage everything the agent changed. Returns the added or modified paths."""
+    """Stage everything the agent changed. Returns the added, modified or retyped paths (a link that's now a file,
+    say), each naming its file even where the name isn't UTF-8."""
     _git(root, ["add", "-A"], worktree=worktree)
-    out = _git(root, ["diff", "--no-ext-diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"],
-               worktree=worktree).stdout
+    out = _git(root, ["diff", "--no-ext-diff", "--cached", "--name-only", "--diff-filter=ACMRT", "-z"],
+               worktree=worktree, errors="surrogateescape").stdout
     return [name for name in out.split("\0") if name]
+
+
+def _shown(name: str) -> str:
+    """A path as people see it (a name that isn't UTF-8 shows � where it isn't)."""
+    return clean_line(name.encode("utf-8", "surrogateescape").decode("utf-8", "replace"))
 
 
 def unstage_all(root: Path, worktree: Worktree) -> None:
@@ -262,18 +268,43 @@ def _chunks(file) -> Iterator[bytes]:
         yield chunk
 
 
+# A private key is found by its header line, which an old key in the file can share with a new one: a key's lines,
+# from its header to its end, are checked together whenever any of them is new
+_KEY_ENDS = ("-----END", "Private-MAC:")
+MAX_KEY_BLOCK_BYTES = 1024 * 1024
+
+
+def _is_key_header(text: str) -> bool:
+    return ("PRIVATE KEY" in text or "PuTTY-User-Key-File-" in text) and find_secret(text, tokens=False) is not None
+
+
 def _added(file, known: set[str]) -> Iterator[bytes]:
     """The lines of a file that its last commit didn't have anywhere, in chunks of about MAX_SCAN_BYTES. Lines
-    are compared as text, as git gives the old ones; a line too long to read at once is always checked, whole."""
-    piece, long = bytearray(), False
+    are compared as text, as git gives the old ones; a line too long to read at once is always checked, whole, and
+    so is a private key with any line that's new."""
+    piece, block = bytearray(), bytearray()
+    long = block_new = False
     while line := file.readline(MAX_SCAN_BYTES):
         whole = line.endswith(b"\n") or len(line) < MAX_SCAN_BYTES  # (else the rest of it comes next)
-        if long or not whole or any(part not in known for part in line.decode("utf-8", "replace").splitlines()):
-            piece += line
-            if len(piece) >= MAX_SCAN_BYTES:
-                yield bytes(piece)
-                piece.clear()
+        text = line.decode("utf-8", "replace")
+        new = long or not whole or any(part not in known for part in text.splitlines())
         long = not whole
+        if not block and _is_key_header(text):
+            block, block_new = bytearray(line), new
+        elif block:
+            block += line
+            block_new = block_new or new
+        elif new:
+            piece += line
+        if block and (any(end in text for end in _KEY_ENDS) or len(block) >= MAX_KEY_BLOCK_BYTES):
+            if block_new:
+                piece += block
+            block, block_new = bytearray(), False
+        if len(piece) >= MAX_SCAN_BYTES:
+            yield bytes(piece)
+            piece.clear()
+    if block_new:
+        piece += block
     if piece:
         yield bytes(piece)
 
@@ -282,14 +313,22 @@ def secrets_in(root: Path, worktree: Worktree, paths: list[str],
                tokens: list[str] | None = None) -> list[tuple[str, str]]:
     """Staged files that look like they add a secret: (path, what it looks like). A file the worktree's last
     commit already had is checked only for the lines it adds, so a secret that was already committed there (such
-    as a test's fake key) doesn't hold up the changes around it; a new file is checked whole. Given a `tokens`
-    list, a file whose only one is a JSON Web Token goes on it instead (such as a test's sample token)."""
+    as a test's fake key) doesn't hold up the changes around it; a new file is checked whole, and a link by what
+    it points to (git commits that). Given a `tokens` list, a file whose only one is a JSON Web Token goes on it
+    instead (such as a test's sample token)."""
     found = []
     for name in paths:
         path = worktree.path / name
         has_token = False
         try:
-            if path.is_symlink() or not path.is_file():
+            if path.is_symlink():
+                what = find_secret(os.readlink(path), tokens=tokens is None)
+                if what:
+                    found.append((_shown(name), what))
+                elif tokens is not None and find_token(os.readlink(path)):
+                    tokens.append(_shown(name))
+                continue
+            if not path.is_file():
                 continue
             known = _known_lines(root, worktree, name)
             with path.open("rb") as file:
@@ -299,13 +338,13 @@ def secrets_in(root: Path, worktree: Worktree, paths: list[str],
                     text = combined.decode("utf-8", "replace")
                     what = find_secret(text, tokens=tokens is None)
                     if what:
-                        found.append((clean_line(name), what))
+                        found.append((_shown(name), what))
                         break
                     has_token = has_token or (tokens is not None and find_token(text) is not None)
                     overlap = combined[-SCAN_OVERLAP_BYTES:]
                 else:
                     if has_token:
-                        tokens.append(clean_line(name))
+                        tokens.append(_shown(name))
         except OSError:
             continue
     return found

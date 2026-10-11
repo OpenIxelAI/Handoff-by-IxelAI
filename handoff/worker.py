@@ -291,6 +291,8 @@ def parse_plan(text: str, models: list[str]) -> list[Step] | None:
                 continue
             model = item.get("model") if item.get("model") in models else models[0]
             title = clean_line(item.get("title") if isinstance(item.get("title"), str) else "")[:200] or "a step"
+            if find_secret(title):  # (it goes in commit messages and on the board)
+                title = "a step (its title was withheld: it looked like it contained a secret)"
             steps.append(Step(model, title, instructions[:MAX_SECTION_BYTES]))
         if steps:
             return steps
@@ -817,8 +819,11 @@ class Worker:
         def fail(reason: str, used: dict | None = None, **extra) -> RunResult:
             try:
                 failed = self.board.fail_run(agent, task.id, return_to, reason, used)
-            except BoardError as exc:
-                return RunResult(task, False, f"{reason} ({exc})", used=used, **extra)
+            except BoardError:  # (it can't stay in progress: say it failed in words the board takes)
+                try:
+                    failed = self.board.fail_run(agent, task.id, return_to, _clip(reason), used)
+                except BoardError as exc:
+                    return RunResult(task, False, f"{reason} ({exc})", used=used, **extra)
             return RunResult(failed, False, reason, used=used, **extra)
 
         def stopped() -> str:
@@ -999,7 +1004,7 @@ class Worker:
         found = gitwork.secrets_in(self.root, worktree, staged, tokens)
         if found:
             gitwork.unstage_all(self.root, worktree)
-            where = ", ".join(f"{path} ({what})" for path, what in found[:5])
+            where = ", ".join(f"{path[:200]} ({what})" for path, what in found[:5])
             raise _Withheld(f"The changes include what looks like a secret: {where}. Nothing was committed; the "
                             f"files are in {worktree.path.relative_to(self.root).as_posix()}.")
         return gitwork.commit_staged(self.root, worktree, message), tokens

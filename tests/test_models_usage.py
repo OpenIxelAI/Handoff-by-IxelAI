@@ -231,6 +231,22 @@ def test_a_chain_that_stops_on_a_secret_says_what_the_steps_before_it_did(board,
     assert f"Step 1 of 2, by {OPUS}" in reason and git(repo, "show", "handoff/T-1:calc.py").stdout
 
 
+def test_a_step_title_holding_a_secret_never_reaches_the_board_or_git(board, repo):
+    """A chain that stops is still recorded as stopped, rather than left in progress by a refused reason."""
+    jwt = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2"
+           "MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+    plan = {"steps": [{"model": OPUS, "title": f"use {jwt}", "instructions": "Write calc.py."}]}
+    t = task(board)
+    board.approve(HUMAN, t.id, "claude", models=[FABLE, OPUS])
+
+    def leak(folder, _stdin=""):
+        (folder / "config.py").write_text("KEY = 'sk-proj-" + "a" * 40 + "'\n", encoding="utf-8")
+    agent = Agent({FABLE: plan_reply(plan), OPUS: result("DONE: x", OPUS)}, {OPUS: leak})
+    [ran] = worker(board, repo, agent).run_pending()
+    assert not ran.ok and board.get(t.id).status == "blocked" and jwt not in ran.message
+    assert "its title was withheld" in ran.message
+
+
 def test_a_chain_runs_on_claude_only(board, repo):
     t = task(board)
     with pytest.raises(BoardError, match="chain of models runs on claude"):

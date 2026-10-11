@@ -395,11 +395,13 @@ doesn't run. Findings from the reviews:
   certificate file your network settings name (`SSL_CERT_FILE` and the like). Everything else in a shared
   folder is readable by the agent's commands, so share tool folders, not work.
 - **Nothing secret is committed.** Before committing, the worker scans every added or changed file for
-  keys, tokens and private keys (the same check the board uses). A new file is scanned whole; in a file the
-  branch already had, the lines it didn't have anywhere are (a line too long to read at once is always
-  scanned, whole, and a file over 16 MB is scanned whole), so a test's fake key that was already committed
-  doesn't hold up a change around it, while one added anywhere still does. If it finds one, it commits
-  nothing and blocks the task, naming the file. The one exception is a JSON Web Token on its own: test fixtures often
+  keys, tokens and private keys (the same check the board uses), including a link that took a file's place
+  and what a link points to (git commits that text). A new file is scanned whole; in a file the branch
+  already had, the lines it didn't have anywhere are (a line too long to read at once is always scanned,
+  whole; a private key is scanned from its header to its end whenever any line of it is new; and a file over
+  16 MB is scanned whole), so a test's fake key that was already committed doesn't hold up a change around
+  it, while one added anywhere still does. If it finds one, it commits nothing and blocks the task, naming
+  the file. The one exception is a JSON Web Token on its own: test fixtures often
   hold a sample one (jwt.io's, say), and they expire, so the worker commits it and its handback names the
   file for you to check before you merge. On the board, a JSON Web Token is still refused.
 - **Git that can't be redirected.** The worker runs git with `--git-dir` taken from the main repository's
