@@ -549,8 +549,10 @@ def op_approve(request: dict) -> dict:
     if efforts and effort_problem(agent, efforts):
         raise BoardError(effort_problem(agent, efforts))
     shown = _arg(args, "shown", str, required=False, default=None)  # the `content` of the task you showed
+    # An empty list of models is refused (Board.approve), not taken as no choice: the run would go to the agent's
+    # own model, which may cost more than the ones the window meant to name
     return _task_reply(board, board.approve(HUMAN, _task_arg(args), agent, return_to, kind, target, shown,
-                                            models or None, efforts or None))
+                                            models, efforts or None))
 
 
 def op_revoke(request: dict) -> dict:

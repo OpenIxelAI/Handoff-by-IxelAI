@@ -255,6 +255,13 @@ def test_a_chain_runs_on_claude_only(board, repo):
                                                          "models": [OPUS, HAIKU]}})
 
 
+def test_an_empty_list_of_models_is_refused_not_taken_as_no_choice(board, repo):
+    t = task(board)
+    with pytest.raises(BoardError, match="Models are 1 to 4 model names"):
+        api.op_approve({"project": str(repo), "args": {"task": t.ref, "agent": "claude", "models": []}})
+    assert board.pending_runs("claude", [t.id]) == []  # nothing approved on the agent's own model
+
+
 def test_parse_plan():
     text = f"plan:\n```json\n{json.dumps(PLAN)}\n```"
     steps = parse_plan(text, [OPUS, HAIKU])
