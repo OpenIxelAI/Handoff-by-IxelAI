@@ -35,7 +35,7 @@ import sys
 from itertools import chain, combinations
 from pathlib import Path
 
-from handoff import __version__, usage
+from handoff import __version__, approvals, usage
 from handoff.board import (
     ACTIVE,
     HUMAN,
@@ -70,7 +70,7 @@ MAX_OUTPUTS = 50
 _OUTPUT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 WRITE_OPS = ("init", "add", "assign", "note", "review", "status", "delete", "approve", "revoke", "run.start",
              "merge", "agents.enable")
-READ_OPS = ("hello", "revision", "board", "task", "agents", "inbox", "models")
+READ_OPS = ("hello", "revision", "board", "task", "agents", "inbox", "models", "fallbacks", "rankings")
 OPS = READ_OPS + WRITE_OPS
 
 
@@ -401,7 +401,8 @@ def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
 # any-worker: the worker runs more agents than claude and codex (a board's `workers`, each with its `label`,
 # `access`, `local` and `needs_ok`/`enabled`: adapters.py), op models lists the models one can run, and op
 # agents.enable lets one run, or stops it (args.agent, args.on).
-FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge", "any-worker")
+FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge", "any-worker",
+            "run-fallback")
 
 
 def _workers() -> dict:
@@ -620,11 +621,41 @@ def op_approve(request: dict) -> dict:
                                 '"high"}, or {"": "high"} for the agent\'s own model.')
     if efforts and effort_problem(agent, efforts):
         raise BoardError(effort_problem(agent, efforts))
+    fallbacks = args.get("fallbacks")  # (the ones `fallbacks` suggested and the window showed you)
+    if fallbacks is not None and not isinstance(fallbacks, list):
+        raise ApiError("usage", 'args.fallbacks must be a list, like ["claude:claude-sonnet-5-5", "codex:gpt-6-sol"].')
     shown = _arg(args, "shown", str, required=False, default=None)  # the `content` of the task you showed
     # An empty list of models is refused (Board.approve), not taken as no choice: the run would go to the agent's
     # own model, which may cost more than the ones the window meant to name
     return _task_reply(board, board.approve(HUMAN, _task_arg(args), agent, return_to, kind, target, shown,
-                                            models, efforts or None))
+                                            models, efforts or None, fallbacks or None))
+
+
+def op_fallbacks(request: dict) -> dict:
+    """Who would take over a run, in turn, when a model is out of usage (rankings.py), for the window to show
+    before you approve it: `fallbacks` ("agent:model", best first; pass them back to approve) and `words`.
+    Nothing is approved and no model is asked; for an answer or a review, Ixel MAT is asked who it has."""
+    from handoff.cli import suggested_fallbacks
+    from handoff.rankings import shown
+    args = request.get("args", {})
+    agent = _name(args.get("agent"), "agent")
+    kind = _arg(args, "kind", str, required=False, default="edit")
+    if agent is None or kind not in RUN_KINDS:
+        raise ApiError("usage", f"args.agent is the agent, and args.kind one of: {', '.join(RUN_KINDS)}.")
+    models = args.get("models")
+    if models is not None and not (isinstance(models, list) and approvals.check_models(models)):
+        raise ApiError("usage", "args.models must be a list of model names, biggest first.")
+    found = suggested_fallbacks(kind, agent, models, _project(request))
+    return {"fallbacks": found, "words": shown(found)}
+
+
+def op_rankings(request: dict) -> dict:
+    """Which models are best at what (rankings.py): `ranks` per job, best first, what each job is, how current
+    they are, and where they come from."""
+    from handoff import rankings
+    ranks, updated = rankings.load()
+    return {"updated": updated, "jobs": dict(rankings.JOBS), "ranks": ranks,
+            "sources": [{"name": n, "url": u} for n, u in rankings.SOURCES]}
 
 
 def op_revoke(request: dict) -> dict:
@@ -719,7 +750,8 @@ HANDLERS = {
     "hello": op_hello, "revision": op_revision, "board": op_board, "task": op_task, "agents": op_agents,
     "inbox": op_inbox, "init": op_init, "add": op_add, "assign": op_assign, "note": op_note, "review": op_review,
     "status": op_status, "delete": op_delete, "approve": op_approve, "revoke": op_revoke, "run.start": op_run_start,
-    "merge": op_merge, "models": op_models, "agents.enable": op_agents_enable,
+    "merge": op_merge, "models": op_models, "agents.enable": op_agents_enable, "fallbacks": op_fallbacks,
+    "rankings": op_rankings,
 }
 assert set(HANDLERS) == set(OPS)
 

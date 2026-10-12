@@ -262,6 +262,32 @@ run --json` and the API (`usage` and `cost` on the task and on its runs, each ta
 board's `usage` and `spent`, what its tasks' runs used and cost in all) carry it for the Ixel app. A run that was stopped (by its
 time limit or Ctrl+C) has no report, so what it used isn't counted.
 
+### When a model hits its usage limit
+
+A run doesn't stop because a model ran out of usage. When you approve a change, an answer or a review, Handoff
+works out who takes over if a model hits its plan's limit, its quota or its credits: the models ranked just
+below it for that kind of work, from public benchmarks, that you have an agent for, ending with the free and
+local ones. It shows you that list before you say yes, and seals it into the approval with the rest, so a board
+can't add a model to it.
+
+If the model hits its limit mid-run, the worker benches it for the rest of that run and goes on with the next
+one in the same worktree, and the handback says so: "claude-opus-5-5 hit its usage limit, so claude-sonnet-5-5
+took over." In a chain, a benched planner hands the plan to the next best planner and a benched step model
+hands its steps to the next best coder. Any other failure (no login, a crash, a timeout) still stops the run,
+since the next model working would hide it. Answers and reviews go through Ixel (`ixel ask --agent a,b,c`),
+which asks the next agent in turn. `--no-fallback` approves a run without fallbacks.
+
+`handoff rankings` shows which models are best at what, best first: coding, planning, reviewing, writing,
+pictures and video, with the leaderboards they come from. `handoff rankings update` gets the newest from
+Handoff's own repository (a public file: nothing about you is sent), and you can keep your own in
+`rankings.json` next to `agents.toml`.
+
+```bash
+handoff approve T-7 claude --model claude-opus-5-5   # shows who takes over, then asks
+handoff approve T-7 claude --no-fallback             # stops at the limit, as before
+handoff rankings --job video
+```
+
 ### Every other agent and model you have
 
 The worker isn't only Claude Code and Codex. Handoff finds these on your computer and offers each one on the
@@ -362,6 +388,7 @@ can't.
 | `handoff dispatch "codex review my changes, gemini list …" [--yes] [--plan] [--no-run]` | Split one request across your agents and run the parts side by side ([dispatch](#hand-out-work-to-any-agent-dispatch)) |
 | `handoff agents` | Who can take tasks here, and what kind: change files, answer, review, make pictures |
 | `handoff approve T-12 AGENT [--kind edit\|answer\|review\|image] [--return-to NAME]` · `--revoke` | Let an agent run one task, once, through the [worker](#the-worker-preview) (or withdraw that). With no AGENT, at a terminal, it offers the task's assignee and asks |
+| `handoff rankings [update] [--job JOB] [--json]` | Which models are best at what, from public benchmarks: who takes over a run when a model hits its usage limit ([more](#when-a-model-hits-its-usage-limit)) |
 | `handoff run [T-12 …]` | Run approved tasks now, side by side (all of them, if you name none) |
 | `handoff worker --agent claude\|codex [--once] [--share FOLDER]` | Keep running the tasks you approve, each in its own git worktree |
 | `handoff setup [--write\|--remove]` · `handoff doctor [--json]` | Connect the apps (or take Handoff out of them); check everything |

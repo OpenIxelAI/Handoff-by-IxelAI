@@ -408,6 +408,11 @@ def run_efforts(approval: "Event") -> dict[str, str]:
     return approvals.check_efforts(approval.data["efforts"], run_models(approval) or None) or {}
 
 
+def run_fallbacks(approval: "Event") -> list[str]:
+    """Who takes over an approval's run, in turn, when a model is out of usage ([]: nobody; the run stops)."""
+    return (approvals.check_fallbacks(approval.data.get("fallbacks")) or []) if "fallbacks" in approval.data else []
+
+
 def safe_name(value: object) -> str | None:
     """A stored name if it's a valid one, 'unknown' if it isn't, None if there's none."""
     if value is None:
@@ -1339,7 +1344,7 @@ class Board:
 
     def approve(self, actor: str, task_id: int, worker: str, return_to: str = HUMAN, kind: str = "edit",
                 target: Mapping | None = None, shown: str | None = None, models: list[str] | None = None,
-                efforts: Mapping | None = None) -> Task:
+                efforts: Mapping | None = None, fallbacks: list[str] | None = None) -> Task:
         """The person lets the worker run `worker` on this task, once, for one kind of run (RUN_KINDS).
         Results go to `return_to`. A review or a change can be of two given commits (`target`:
         approvals.check_target), such as a pull request fetched into the project: a review reads them
@@ -1350,7 +1355,8 @@ class Board:
         refused with Changed, so what's sealed is what they saw. An edit can name its `models`
         (approvals.check_models): one model runs it, or a chain, biggest first, where the first plans and the
         others do the steps. Its `efforts` say how hard they think (approvals.check_efforts): a level for each
-        model it names, or for the agent's own model when it names none."""
+        model it names, or for the agent's own model when it names none. Its `fallbacks` take over, in turn, when
+        a model is out of usage (approvals.check_fallbacks; rankings.fallbacks works them out)."""
         actor = check_name(actor, "actor")
         self._require_human(actor, "approve tasks for the worker")
         worker = check_name(worker, "worker")
@@ -1381,6 +1387,13 @@ class Board:
             if efforts is None:
                 raise BoardError("Each effort is one word, like high, for one of the models the run names (or for the "
                                  "agent's own model when it names none).")
+        if fallbacks is not None:
+            if kind not in approvals.FALLBACK_KINDS:
+                raise BoardError("Only a change, an answer or a review can go on with another model.")
+            fallbacks = approvals.check_fallbacks(fallbacks)
+            if fallbacks is None:
+                raise BoardError(f"Fallbacks are 1 to {approvals.MAX_FALLBACKS} entries like claude:claude-sonnet-5-5 "
+                                 "or codex, each named once.")
         try:
             key = approvals.load_key(create=True)
         except OSError as exc:
@@ -1410,7 +1423,7 @@ class Board:
                 task = self._update(conn, task)
             content = self._content(conn, task)  # the task and its history, as the agent will get them
             sealed = approvals.seal(key, self.path, task.id, worker, return_to, at, kind, target, content, models,
-                                    efforts)
+                                    efforts, fallbacks)
             data = {"worker": worker, "kind": kind, "return_to": return_to, "content": content, **sealed}
             if target is not None:
                 data["target"] = target
@@ -1418,6 +1431,8 @@ class Board:
                 data["models"] = models
             if efforts is not None:
                 data["efforts"] = efforts
+            if fallbacks is not None:
+                data["fallbacks"] = fallbacks
             self._event(conn, task.id, actor, "approved", data=data, at=at)
             return task
 
