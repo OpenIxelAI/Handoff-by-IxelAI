@@ -2,8 +2,11 @@
 good: what's deleted, cleaned or past its keep leaves no trace in the board's files."""
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import sys
+import types
 
 import pytest
 
@@ -714,6 +717,252 @@ def test_board_is_private(tmp_path):
     new(board)
     for extra in board.path.parent.glob("board.db-*"):  # SQLite's WAL files follow the board's mode
         assert os.stat(extra).st_mode & 0o077 == 0, extra
+
+
+# Owner-only on Windows is an ACL on the folder (icacls), checked with whoami and icacls faked on every OS
+
+MY_NAME = "DESKTOP-1\\me"
+MY_SID = "S-1-5-21-1-2-3-1001"
+MY_GRANTEE = f"*{MY_SID}"
+WHOAMI_SAYS = f'"desktop-1\\me","{MY_SID}"\r\n'  # (whoami writes the name in lower case)
+ACL_FOLDER = "C:\\Users\\me\\my project\\.handoff"  # a space: the fix has to quote it
+
+
+def completed(argv, code=0, out="", err=""):
+    return subprocess.CompletedProcess(argv, code, out, err)
+
+
+def program_of(argv):
+    return str(argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def icacls_listing(folder, *entries, summary="Successfully processed 1 files; Failed processing 0 files"):
+    """What `icacls <folder>` prints: the folder and the first entry on one line, the others lined up under it, a
+    blank line, then its summary."""
+    lines = [f"{folder} {entries[0]}"] + [" " * (len(folder) + 1) + entry for entry in entries[1:]]
+    return "\r\n".join([*lines, "", summary, ""])
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    """Windows as far as board.py can tell: sys.platform says so, and whoami and icacls are fakes. Set
+    `windows.whoami` or `windows.icacls` to a function of the argv list; `windows.calls` has every call as
+    (argv, keyword arguments). Nothing real is started, and nothing is left patched afterwards."""
+    tools = types.SimpleNamespace(calls=[], whoami=lambda argv: completed(argv, out=WHOAMI_SAYS),
+                                  icacls=lambda argv: completed(argv))
+
+    def fake_run(argv, **kwargs):
+        tools.calls.append((argv, kwargs))
+        program = program_of(argv)
+        assert program in ("whoami.exe", "icacls.exe"), f"started {argv!r}"
+        return getattr(tools, program[:-4])(argv)
+
+    board_module._whoami.cache_clear()  # (it remembers what whoami said, for the process)
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "platform", "win32")
+        patch.setattr(board_module, "_ACL_SET", set())
+        patch.setattr(subprocess, "run", fake_run)
+        yield tools
+    board_module._whoami.cache_clear()
+
+
+def icacls_calls(tools):
+    return [(argv, kwargs) for argv, kwargs in tools.calls if program_of(argv) == "icacls.exe"]
+
+
+def _icacls_times_out(argv):
+    raise subprocess.TimeoutExpired(argv, 15)
+
+
+def _icacls_is_denied(argv):
+    return completed(argv, code=5, err="Access is denied.\r\n")
+
+
+def _icacls_is_missing(argv):
+    raise FileNotFoundError(2, "The system cannot find the file specified")
+
+
+FAILED_ICACLS = [pytest.param(_icacls_times_out, "timed out", id="times out"),
+                 pytest.param(_icacls_is_denied, "Access is denied", id="denied"),
+                 pytest.param(_icacls_is_missing, "cannot find", id="missing")]
+
+
+def test_the_acl_command_is_icacls_with_inheritance_off_and_only_the_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("SystemRoot", "D:\\Windows")
+    folder = tmp_path / ".handoff"
+    command = board_module._acl_command(folder, MY_GRANTEE)
+    assert command[0].replace("\\", "/") == "D:/Windows/System32/icacls.exe"
+    assert command[1:] == [str(folder), "/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+
+
+def test_a_folder_gets_one_quiet_icacls_command_and_a_file_in_it_none(tmp_path, windows, capsys):
+    folder = tmp_path / ".handoff"
+    folder.mkdir()
+    (folder / "board.db").write_bytes(b"")
+    board_module._secure(folder, 0o700)
+    board_module._secure(folder, 0o700)
+    board_module._secure(folder / "board.db", 0o600)
+    assert [program_of(argv) for argv, _ in windows.calls] == ["whoami.exe", "icacls.exe"]
+    (whoami, _), (argv, _) = windows.calls
+    assert whoami[1:] == ["/user", "/fo", "csv", "/nh"]
+    for command in (whoami, argv):  # by full path, so a program in the project folder isn't what runs
+        assert isinstance(command, list) and "/System32/" in command[0].replace("\\", "/")
+    assert argv[1:] == [str(folder), "/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+    for _, options in windows.calls:
+        assert not options.get("shell")
+        assert options["creationflags"] == 0x08000000  # CREATE_NO_WINDOW
+        assert 0 < options["timeout"] <= 30
+    assert capsys.readouterr().err == ""
+
+
+def test_each_folder_is_asked_about_once_and_whoami_once_for_all(tmp_path, windows):
+    folders = [tmp_path / "one", tmp_path / "two"]
+    for folder in folders:
+        folder.mkdir()
+        board_module._secure(folder, 0o700)
+        board_module._secure(folder, 0o700)
+    assert [program_of(argv) for argv, _ in windows.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
+    assert [argv[1] for argv, _ in icacls_calls(windows)] == [str(folder) for folder in folders]
+
+
+@pytest.mark.parametrize("icacls, said", FAILED_ICACLS)
+def test_an_acl_that_cant_be_set_is_said_on_stderr_and_never_raised(tmp_path, windows, capsys, icacls, said):
+    windows.icacls = icacls
+    folder = tmp_path / ".handoff"
+    folder.mkdir()
+    board_module._secure(folder, 0o700)  # (the board still works)
+    out, err = capsys.readouterr()
+    assert out == ""  # stdout is the MCP server's
+    assert "owner-only" in err and "handoff doctor" in err and said in err
+    assert len(err.splitlines()) == 1
+
+
+def test_without_whoami_the_account_comes_from_the_environment(tmp_path, windows, monkeypatch):
+    windows.whoami = lambda argv: completed(argv, code=1, err="ERROR: no")
+    monkeypatch.setenv("USERDOMAIN", "DESKTOP-1")
+    monkeypatch.setenv("USERNAME", "me")
+    folder = tmp_path / ".handoff"
+    folder.mkdir()
+    board_module._secure(folder, 0o700)
+    assert [argv[-1] for argv, _ in icacls_calls(windows)] == ["DESKTOP-1\\me:(OI)(CI)F"]
+
+
+def test_with_no_account_at_all_nothing_is_set_and_it_is_said(tmp_path, windows, monkeypatch, capsys):
+    windows.whoami = lambda argv: completed(argv, code=1, err="ERROR: no")
+    monkeypatch.delenv("USERNAME", raising=False)
+    folder = tmp_path / ".handoff"
+    folder.mkdir()
+    board_module._secure(folder, 0o700)
+    assert icacls_calls(windows) == []
+    err = capsys.readouterr().err
+    assert "owner-only" in err and "handoff doctor" in err
+
+
+@pytest.mark.parametrize("entries", [
+    pytest.param([f"{MY_NAME}:(OI)(CI)(F)"], id="just you"),
+    pytest.param(["desktop-1\\ME:(OI)(CI)(F)"], id="the name in other case"),
+    pytest.param([f"{MY_NAME}:(OI)(CI)(F)", "BUILTIN\\Users:(OI)(CI)(DENY)(W)"], id="another account's deny"),
+    pytest.param([f"{MY_SID}:(OI)(CI)(F)"], id="by SID, when Windows can't name it"),
+])
+def test_a_folder_only_you_can_open_has_no_problem(entries):
+    listing = icacls_listing(ACL_FOLDER, *entries)
+    assert board_module._acl_problem(listing, ACL_FOLDER, MY_NAME, MY_GRANTEE) is None
+
+
+def test_whatever_language_icacls_summarises_in_is_skipped():
+    listing = icacls_listing(ACL_FOLDER, f"{MY_NAME}:(OI)(CI)(F)",
+                             summary="1 Dateien erfolgreich verarbeitet; bei 0 Dateien ist ein Fehler aufgetreten")
+    assert board_module._acl_problem(listing, ACL_FOLDER, MY_NAME, MY_GRANTEE) is None
+
+
+@pytest.mark.parametrize("entries, words", [
+    pytest.param([f"{MY_NAME}:(I)(OI)(CI)(F)", "NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)",
+                  "BUILTIN\\Administrators:(I)(OI)(CI)(F)"], ["inherits"], id="all inherited"),
+    pytest.param([f"{MY_NAME}:(OI)(CI)(F)", "NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)"], ["inherits"],
+                 id="yours, and one inherited"),
+    pytest.param([f"{MY_NAME}:(OI)(CI)(F)", "BUILTIN\\Users:(OI)(CI)(RX)"],
+                 ["BUILTIN\\Users can open it too", '/remove:g "BUILTIN\\Users"'], id="another account's own entry"),
+    pytest.param([f"{MY_NAME}:(F)"], ["full control"], id="you, without what's inside"),
+    pytest.param([f"{MY_NAME}:(OI)(CI)(RX)"], ["full control"], id="you, read only"),
+    pytest.param(["BUILTIN\\Users:(OI)(CI)(DENY)(W)"], ["full control"], id="only a deny"),
+])
+def test_a_folder_others_can_open_says_why_with_a_one_line_fix(entries, words):
+    problem = board_module._acl_problem(icacls_listing(ACL_FOLDER, *entries), ACL_FOLDER, MY_NAME, MY_GRANTEE)
+    assert problem and "\n" not in problem
+    for word in words:
+        assert word in problem
+    assert f'run: icacls "{ACL_FOLDER}" /inheritance:r /grant:r "{MY_GRANTEE}:(OI)(CI)F"' in problem
+
+
+def test_inheritance_off_is_left_to_remove_what_was_inherited():
+    listing = icacls_listing(ACL_FOLDER, f"{MY_NAME}:(OI)(CI)(F)", "NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)")
+    problem = board_module._acl_problem(listing, ACL_FOLDER, MY_NAME, MY_GRANTEE)
+    assert problem and "/remove:g" not in problem
+
+
+def test_the_doctors_check_reads_what_icacls_says(tmp_path, windows):
+    folder = tmp_path / ".handoff"
+    folder.mkdir()
+
+    def says(*entries):  # (the listing starts with the folder as icacls was given it)
+        windows.icacls = lambda argv: completed(argv, out=icacls_listing(argv[1], *entries))
+
+    says(f"{MY_NAME}:(OI)(CI)(F)")
+    assert board_module.owner_only_problem(folder) is None
+    (argv, kwargs), = icacls_calls(windows)
+    assert argv[1:] == [os.path.abspath(folder)] and not kwargs.get("shell")
+    says(f"{MY_NAME}:(I)(OI)(CI)(F)", "NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)")
+    problem = board_module.owner_only_problem(folder)
+    assert problem and "icacls" in problem and "inherits" in problem
+    says(f"{MY_NAME}:(OI)(CI)(F)", "Everyone:(OI)(CI)(R)")
+    assert '/remove:g "Everyone"' in board_module.owner_only_problem(folder)
+
+
+@pytest.mark.parametrize("icacls, said", FAILED_ICACLS)
+def test_a_check_that_cant_be_made_is_a_reason_and_never_an_error(tmp_path, windows, icacls, said):
+    windows.icacls = icacls
+    reason = board_module.owner_only_problem(tmp_path)
+    assert isinstance(reason, str) and said in reason
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_the_doctors_check_reads_the_folders_mode(tmp_path):
+    Board.open(tmp_path)
+    folder = tmp_path / ".handoff"
+    assert board_module.owner_only_problem(folder) is None
+    os.chmod(folder, 0o755)
+    problem = board_module.owner_only_problem(folder)
+    assert problem and "chmod 700" in problem and "755" in problem
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACLs")
+def test_on_windows_a_new_board_is_for_your_account_only(tmp_path):
+    from handoff.proc import system32
+
+    def tool(program, *args):
+        done = subprocess.run([system32(program), *args], capture_output=True, text=True, encoding="oem",
+                              errors="replace")
+        assert done.returncode == 0, done.stderr
+        return done.stdout
+
+    def accounts(listing, path):  # who an icacls listing names (it starts with the path it was given)
+        lines = [line.strip() for line in listing.splitlines() if line.strip()]
+        lines[0] = lines[0][len(str(path)):].strip()
+        found = (re.match(r"^(.+?):((?:\([^()]*\))+)$", line) for line in lines)
+        return {match.group(1).lower() for match in found if match}
+
+    Board.open(tmp_path)
+    folder = tmp_path / ".handoff"
+    me = tool("whoami.exe").strip().lower()
+    assert board_module.owner_only_problem(folder) is None
+    on_folder = tool("icacls.exe", str(folder))
+    assert "(I)" not in on_folder  # not inheriting from the parent folder
+    assert accounts(on_folder, folder) == {me}
+    on_file = tool("icacls.exe", str(folder / "board.db"))  # (it may say (I): it inherits from the folder)
+    assert accounts(on_file, folder / "board.db") == {me}
+    tool("icacls.exe", str(folder), "/grant", "*S-1-1-0:(R)")  # Everyone may read
+    problem = board_module.owner_only_problem(folder)
+    assert problem and "/remove:g" in problem
 
 
 def test_board_keeps_itself_out_of_git(tmp_path):
