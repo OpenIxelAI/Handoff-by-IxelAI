@@ -14,6 +14,7 @@ def project(tmp_path, monkeypatch):
     (root / ".git").mkdir(parents=True)
     (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     monkeypatch.chdir(root)
+    monkeypatch.delenv("HANDOFF_DEPTH", raising=False)  # (these may run under a Handoff worker)
     monkeypatch.setattr(cli, "console", Console(width=200, highlight=False))
     monkeypatch.setattr(cli, "err_console", Console(width=200, highlight=False, stderr=True))
     monkeypatch.setattr(cli, "_interactive", lambda: False)

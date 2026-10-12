@@ -137,7 +137,7 @@ def test_run_says_the_model_list_could_not_be_read(repo, fake_ixel, run_cli):  #
     assert code == 0, err
     board = Board.open(repo)
     [(task, approval)] = board.pending_runs()
-    no_list = asks.IxelRoster([], [], "This Ixel MAT can't take single tasks yet")
+    no_list = asks.roster_from_lists("ixel", None, None)
     result = asks.run(board, repo, task, approval, roster=no_list)
     assert result.ok
     left = last_handback(repo)["left"]
@@ -158,6 +158,20 @@ def test_effort_note_says_why_the_effort_was_left_out():
     assert "model's own effort" in note and "high" in note and "ixel update" in note
     note = asks._effort_note("gemini,codex", "high", roster("effort"))
     assert "model's own effort" in note and "ixel update" in note
-    for lookup_failed in (replace(roster(), problem="This Ixel MAT can't take single tasks yet"), None):
+    for lookup_failed in (replace(roster(), problem="This Ixel MAT can't take single tasks yet", unread=True), None):
         note = asks._effort_note("gemini", "high", lookup_failed)
         assert "couldn't read Ixel MAT's list of models" in note and "ixel update" not in note
+
+
+def test_effort_note_gives_any_other_roster_problem_as_the_reason():
+    other = asks.IxelRoster([], [], "Ixel MAT isn't set up here. Run: ixel setup")
+    note = asks._effort_note("gemini", "high", other)
+    assert "model's own effort" in note and "high" in note and "Ixel MAT isn't set up here" in note
+    assert "couldn't read" not in note
+    note = asks._effort_note("gemini", "high", asks.roster_from_lists(None, None, None))
+    assert "isn't installed" in note and "couldn't read" not in note
+    note = asks._effort_note("gemini", "high", asks.IxelRoster([], [], "x" * 1000))
+    assert "…" in note and len(note) < 400
+    assert "couldn't read Ixel MAT's list of models" in asks._effort_note("gemini", "high", None)
+    listed_nothing = asks.roster_from_lists("ixel", None, None)
+    assert "couldn't read Ixel MAT's list of models" in asks._effort_note("gemini", "high", listed_nothing)

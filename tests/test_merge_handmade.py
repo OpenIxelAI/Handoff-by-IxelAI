@@ -1,4 +1,4 @@
-"""Merging a task whose branch was made by hand with git (no worker run): refused, with how to merge it by hand."""
+"""Merging a task whose git branch no worker run recorded: refused, with how to merge it yourself."""
 import json
 import subprocess
 
@@ -74,10 +74,11 @@ def run_cli(repo, monkeypatch, capsys):
     return code, captured.out + captured.err
 
 
-# ── Hand-made branches ───────────────────────────────────────────────────────
+# ── Branches no worker run recorded ──────────────────────────────────────────
 
-def test_a_hand_made_branch_is_refused_with_how_to_merge_it(board, repo, current, monkeypatch, capsys):
-    board.create(HUMAN, "Made by hand", "Write it.")  # T-1, with no worker run
+def test_an_unrecorded_branch_is_refused_with_how_to_merge_it(board, repo, current, monkeypatch, capsys):
+    board.create(HUMAN, "Branch with no run", "Write it.")  # T-1, with no worker run
+    board.set_status(HUMAN, 1, "done")  # so merge_blocker doesn't refuse it first
     git(repo, "checkout", "-q", "-b", "handoff/T-1")
     (repo / "hand.txt").write_text("by hand\n", encoding="utf-8")
     commit(repo, "by hand")
@@ -89,13 +90,15 @@ def test_a_hand_made_branch_is_refused_with_how_to_merge_it(board, repo, current
 
     code, message = error("merge", repo, task="T-1")
     assert code == "invalid"
-    assert "handoff/T-1" in message and "made by hand rather than by a worker run" in message
-    assert "Handoff won't merge it" in message and "run: git merge handoff/T-1" in message
-    assert "nothing to merge" not in message
+    assert "handoff/T-1" in message and "no worker run recorded it" in message
+    assert "Handoff won't merge it" in message and "git merge handoff/T-1" in message
+    assert "skips Handoff's checks" in message
+    assert "made by hand" not in message and "nothing to merge" not in message
 
     code, output = run_cli(repo, monkeypatch, capsys)
     assert code == 1
-    assert "made by hand rather than by a worker run" in output and "git merge handoff/T-1" in output
+    assert "no worker run recorded it" in output and "git merge handoff/T-1" in output
+    assert "skips Handoff's checks" in output and "made by hand" not in output
 
     assert head(repo) == before_head
     assert git(repo, "rev-parse", "handoff/T-1").stdout.strip() == before_tip
@@ -103,6 +106,30 @@ def test_a_hand_made_branch_is_refused_with_how_to_merge_it(board, repo, current
     assert git(repo, "status", "--porcelain").stdout == before_porcelain
     assert not (repo / "hand.txt").exists()
     assert not [e for e in board.events(1) if e.kind == "merged"]
+
+
+@pytest.mark.parametrize("state", ["approved", "started"])
+def test_a_run_approved_or_started_gets_its_reason_before_the_unrecorded_branch(board, repo, current, monkeypatch,
+                                                                                capsys, state):
+    board.create(HUMAN, "Run in hand", "Write it.")  # T-1
+    git(repo, "checkout", "-q", "-b", "handoff/T-1")
+    (repo / "hand.txt").write_text("by hand\n", encoding="utf-8")
+    commit(repo, "by hand")
+    git(repo, "checkout", "-q", current)
+    board.approve(HUMAN, 1, "claude")
+    if state == "started":
+        [(_, approval)] = board.pending_runs("claude", [1])
+        board.start_run("claude", 1, approval.id, {})
+    assert board.get(1).branch is None
+    task, events, _, _ = board.task_with_history(1)
+    expected = Board.merge_blocker(task, events)
+    assert expected
+
+    code, message = error("merge", repo, task="T-1")
+    assert code == "invalid" and expected in message and "no worker run recorded it" not in message
+
+    code, output = run_cli(repo, monkeypatch, capsys)
+    assert code == 1 and expected in output and "no worker run recorded it" not in output
 
 
 # ── No branch at all ─────────────────────────────────────────────────────────
@@ -113,10 +140,12 @@ def test_a_task_with_no_branch_at_all_keeps_the_old_wording(board, repo, monkeyp
 
     code, message = error("merge", repo, task="T-1")
     assert code == "invalid"
-    assert "T-1 has no branch: nothing to merge." in message and "made by hand" not in message
+    assert "T-1 has no branch: nothing to merge." in message
+    assert "made by hand" not in message and "no worker run recorded it" not in message
 
     code, output = run_cli(repo, monkeypatch, capsys)
     assert code == 1
-    assert "T-1 has no branch, so there's nothing to merge." in output and "made by hand" not in output
+    assert "T-1 has no branch, so there's nothing to merge." in output
+    assert "made by hand" not in output and "no worker run recorded it" not in output
 
     assert head(repo) == before
