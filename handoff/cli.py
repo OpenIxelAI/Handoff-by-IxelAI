@@ -1512,8 +1512,8 @@ def cmd_approve(argv: list[str]) -> int:
                         help="who gets the task back when the run ends (default: you)")
     parser.add_argument("--model", metavar="MODEL",
                         help="for an edit, the model the agent runs on, like claude-opus-5-5 or haiku, "
-                             "opencode/step-5-preview-free for opencode, or qwen3:4b for ollama (default: the agent's "
-                             "own)")
+                             "opencode/step-5-preview-free for opencode, or qwen3:4b-instruct for ollama "
+                             "(default: the agent's own)")
     parser.add_argument("--chain", metavar="BIG,...,SMALL",
                         help="for a claude edit, a chain of models, biggest first, like "
                              "claude-fable-5-1,claude-opus-5-5,claude-haiku-5-5: the first plans the steps and gives "

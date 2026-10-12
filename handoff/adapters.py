@@ -23,7 +23,7 @@ may run. For example:
     enabled = true                       # it runs with its own permissions: commands, as you
 
     [agents.ollama]
-    model = "qwen3:4b"                   # what it runs when an approval names no model
+    model = "qwen3:4b-instruct"          # what it runs when an approval names no model
 
     [agents.studio]                      # a model server of your own
     url = "http://192.168.1.20:1234/v1"

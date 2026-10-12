@@ -773,7 +773,7 @@ class Worker:
                      "lmstudio": " Start its server (in LM Studio, or run: lms server start)."}.get(self.spec.name, "")
             raise WorkerUnavailable(f"{label(self.spec)} isn't answering at {self.spec.url}: {exc}.{start}") from None
         if not models:
-            pull = " Get one with: ollama pull qwen3:4b" if self.spec.name == "ollama" else ""
+            pull = " Get one with: ollama pull qwen3:4b-instruct" if self.spec.name == "ollama" else ""
             raise WorkerUnavailable(f"{label(self.spec)} at {self.spec.url} has no models yet.{pull}")
         self.models = models
 

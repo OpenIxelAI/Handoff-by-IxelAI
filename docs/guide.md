@@ -270,13 +270,13 @@ Board and in `handoff agents`, with what it can reach:
 | Agent | Approve it as | What it can do | Costs |
 |---|---|---|---|
 | [OpenCode](https://opencode.ai) | `opencode`, with `--model provider/model` (`opencode/step-5-preview-free`, say) and `--effort` (its `--variant`: minimal … max, as the model offers; OpenCode 2 has no `--variant`, so there it runs at its default) | edits files in the worktree with its file tools; no commands, no web | its free models (`opencode/…-free`) nothing |
-| [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any server with an OpenAI-style API | `ollama`, `lmstudio`, or a name you give it, with `--model qwen3:4b` and `--effort none`, low, medium or high | reads and writes files in the worktree through four tools Handoff runs itself; no commands | nothing: it runs on your computer |
+| [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any server with an OpenAI-style API | `ollama`, `lmstudio`, or a name you give it, with `--model qwen3:4b-instruct` and `--effort none`, low, medium or high | reads and writes files in the worktree through four tools Handoff runs itself; no commands | nothing: it runs on your computer |
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `hermes`, with `--model` | its file tools only, but they can read outside the worktree | its model's |
 | [Kimi Code](https://github.com/MoonshotAI/kimi-code), [Cline](https://cline.bot), [OpenClaw](https://github.com/openclaw/openclaw) | `kimi`, `cline`, `openclaw`, with `--model` (and `--effort`: Cline's none … xhigh, OpenClaw's off … max) | everything their own permissions allow: commands as you, with the network | their model's |
 
 ```bash
 handoff approve T-7 opencode --model opencode/step-5-preview-free
-handoff approve T-8 ollama --model qwen3:4b                # a small, clear task, done for free
+handoff approve T-8 ollama --model qwen3:4b-instruct       # a small, clear task, done for free
 handoff agents enable kimi                                 # once: kimi runs with its own permissions
 handoff approve T-9 kimi
 ```
@@ -287,15 +287,15 @@ them, each works in its own worktree and branch, and the Board shows what each r
 claude. OpenCode and Hermes report their tokens and cost; a model on your computer reports its tokens, at no
 cost. A small model is best at small, clear tasks (a rename, a test, a doc change): give it those, and the
 bigger models the rest. `--effort none` asks a local model not to think, but some builds think anyway (Ollama's
-`qwen3:4b` did, taking minutes on a one-line change): for quick small edits, pick an instruct model, one made
-not to think.
+`qwen3:4b` did, taking 5 minutes on a one-line change that `qwen3:4b-instruct` made in 9 seconds): for small
+edits, pick an instruct model, one made not to think.
 
 **Your own agents and model servers** go in `agents.toml`, next to the approval key (in the folder above).
 Only you write that file; a project can't add an agent:
 
 ```toml
 [agents.ollama]
-model = "qwen3:4b"                       # what it runs when an approval names no model
+model = "qwen3:4b-instruct"              # what it runs when an approval names no model
 
 [agents.studio]                          # a model server elsewhere on your network
 url = "http://192.168.1.20:1234/v1"
