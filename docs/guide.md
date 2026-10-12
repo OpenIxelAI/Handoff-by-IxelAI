@@ -407,6 +407,7 @@ can't.
 | `handoff show T-12 [--json]` · `handoff T-12` | One task with its full history, and what you can do with it next |
 | `handoff add "title" --to codex [--body TEXT] [--accept CHECK]… [--path PATH]…` | Add a task (with no title, it asks what needs doing and who should do it) |
 | `handoff assign T-12 claude` | Give a task to someone else (`me` for yourself, or `nobody`) |
+| `handoff claim T-12 [PATH …]` | Take a task yourself (one that's open or handed to you); PATHs also claim the files or folders you'll change, and you're warned if another active task claims any of them |
 | `handoff note T-12 "text"` | Add a note to any task |
 | `handoff done T-12 [--reason R]` | Close a task, no review needed |
 | `handoff reopen T-12` | Open a done, cancelled or blocked task again |

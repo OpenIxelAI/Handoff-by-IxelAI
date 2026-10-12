@@ -49,6 +49,7 @@ COMMANDS = [
     ("handoff show T-12 [--json]", "One task with its full history (or just: handoff T-12)"),
     ('handoff add "title" [--to NAME] [--body TEXT] [--accept CHECK]...', "Add a task (and assign it)"),
     ("handoff assign T-12 NAME", "Give a task to claude, codex, me… (or nobody)"),
+    ("handoff claim T-12 [PATH ...]", "Take a task yourself, and the files or folders you'll change"),
     ('handoff note T-12 "text"', "Add a note to a task"),
     ("handoff done T-12 [--reason R]", "Mark a task done (no review needed)"),
     ("handoff reopen T-12", "Open a done, cancelled or blocked task again"),
@@ -84,8 +85,8 @@ COMMANDS = [
 
 GROUPS = [
     ("See what's happening", ("board", "show")),
-    ("Make and change tasks", ("add", "assign", "note", "done", "reopen", "block", "cancel", "delete", "clean",
-                               "status")),
+    ("Make and change tasks", ("add", "assign", "claim", "note", "done", "reopen", "block", "cancel", "delete",
+                               "clean", "status")),
     ("Review work", ("review", "merge")),
     ("Hand work to agents", ("dispatch", "agents", "approve", "rankings", "run", "worker")),
     ("Set up", ("setup", "doctor", "done-rule", "keep", "update", "version", "help")),
@@ -111,6 +112,7 @@ EXAMPLES = {
     "add": ['handoff add "Fix the login page" --to codex',
             'handoff add "Write the release notes" --accept "Mentions the new API"'],
     "assign": ["handoff assign T-3 codex", "handoff assign T-3 me", "handoff assign T-3 nobody"],
+    "claim": ["handoff claim T-3", "handoff claim T-3 src/api.py docs"],
     "note": ['handoff note T-3 "The bug only happens on Safari"'],
     "done": ["handoff done T-3", 'handoff done T-3 --reason "Fixed in the last release"'],
     "reopen": ["handoff reopen T-3"],
@@ -496,6 +498,10 @@ def _for_you(message: str) -> str:
     message = re.sub(r"^worker (.*) such as claude, codex or human\.$", r"The agent \1 such as claude or codex.",
                      message)
     message = message.replace("such as claude, codex or human.", "such as claude, codex or me.")
+    # What claiming a task says to an agent: the command you'd type, and the review you do with handoff review
+    message = re.sub(r"handoff assign (T-\d+) human\b", r"handoff assign \1 me", message)
+    message = re.sub(r"(T-\d+) is waiting for your review; use handoff_review\.",
+                     r"\1 is waiting for your review: handoff review \1", message)
     return message.replace("The person can ", "You can ")
 
 
@@ -940,6 +946,29 @@ def cmd_assign(argv: list[str]) -> int:
     _ok(f"{task.ref} is assigned to {_who(task.assignee) or 'nobody'} ({task.status}).")
     if task.assignee and task.assignee != HUMAN:
         _hint(f"Tell {task.assignee} to check its handoffs.")
+    return 0
+
+
+def cmd_claim(argv: list[str]) -> int:
+    from handoff.board import HUMAN
+
+    parser = _parser("claim", "Take a task yourself: one that's open, or one handed to you. PATHs also claim the "
+                              "files or folders you'll change.",
+                     needs={"task": "Say which task, like: handoff claim T-3 src/api.py"})
+    parser.add_argument("task", metavar="T-12")
+    parser.add_argument("paths", nargs="*", metavar="PATH", help="a file or folder you'll change")
+    args = parser.parse_args(argv)
+    board = _board(args)
+    task, found = board.claim(HUMAN, _task_id(args.task), args.paths)
+    _ok(f"{task.ref} is yours ({task.status}).")
+    if task.status == "blocked":  # taken while blocked: say why it is, and that it's yours to unblock
+        reason = board.last_event_of(task.id, ["status"])
+        if reason and reason.text:
+            _hint(f"Why it's blocked, from {_who(reason.actor)}: {reason.text}")
+        _hint(f"Unblock it with: handoff reopen {task.ref}")
+    if found:
+        _hint("Another active task claims overlapping paths. Coordinate before editing them:")
+        _warn_overlaps(found)
     return 0
 
 
@@ -2573,6 +2602,7 @@ HANDLERS = {
     "show": cmd_show,
     "add": cmd_add,
     "assign": cmd_assign,
+    "claim": cmd_claim,
     "note": cmd_note,
     "done": cmd_done,
     "reopen": cmd_reopen,
@@ -2605,8 +2635,8 @@ HANDLERS = {
 # What only the person does. Anything Handoff started is refused these (setup and update decide on their
 # parsed options: _not_started_by_handoff). A guard against an agent doing it by accident, not a wall: a
 # shell can unset the variable, which is why SECURITY.md says to deny these in the agent's permissions too.
-PERSON_WRITES = {"add", "assign", "note", "done", "reopen", "block", "review", "status", "cancel", "delete",
-                 "clean", "done-rule", "keep", "approve", "merge"}
+PERSON_WRITES = {"add", "assign", "claim", "note", "done", "reopen", "block", "review", "status", "cancel",
+                 "delete", "clean", "done-rule", "keep", "approve", "merge"}
 
 
 def _not_started_by_handoff() -> None:

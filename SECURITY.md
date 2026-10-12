@@ -118,9 +118,9 @@ The rules above bind the MCP tools, which is how an app's agent works on the boa
 run commands as you (Claude Code's Bash tool, Codex's shell) can run the `handoff` CLI, and at the CLI it
 is you: it could approve a task, run it, or delete one. Handoff can't tell it apart from you at a terminal.
 
-- Anything Handoff started (`HANDOFF_DEPTH` is set) is refused the CLI's writes (add, assign, note, status,
-  review, approve, merge, delete, clean, keep and the like, plus `setup` when it would change an app's config or
-  hook, and `update` other than `--check`), `handoff api`'s writes, and `handoff run`, `dispatch` and
+- Anything Handoff started (`HANDOFF_DEPTH` is set) is refused the CLI's writes (add, assign, claim, note,
+  status, review, approve, merge, delete, clean, keep and the like, plus `setup` when it would change an app's
+  config or hook, and `update` other than `--check`), `handoff api`'s writes, and `handoff run`, `dispatch` and
   `worker`. It can still look. This is a guard against an agent doing it by accident, not a wall: a shell
   can unset the variable (`env -u HANDOFF_DEPTH`, or `HANDOFF_DEPTH=0`), and Handoff can't stop that.
 - So for every agent with a shell, deny those commands in its app's permission settings too. In Claude
