@@ -1647,17 +1647,21 @@ def _models(parser, args) -> tuple[list[str] | None, dict[str, str] | None]:
     if args.chain and len(items) < 2:
         parser.fail("A chain is two or more models, biggest first, like: --chain claude-opus-5-5,claude-haiku-5-5")
     from handoff import adapters
-    from handoff.worker import CLAUDE_EFFORTS, CODEX_EFFORTS
+    from handoff.worker import BUILT_IN, CLAUDE_EFFORTS, CODEX_EFFORTS
     # (a colon is also part of some models' names, like Ollama's qwen3:4b: what follows the last one is an effort
     # only when it's a level some agent takes)
     levels = {*CLAUDE_EFFORTS, *CODEX_EFFORTS, *adapters.OPENCODE_EFFORTS, *adapters.CLINE_EFFORTS,
               *adapters.OPENCLAW_EFFORTS, *adapters.LOCAL_EFFORTS}
+    # (claude's and codex's names are lowercase, so Haiku is haiku; another agent's are as its server lists them,
+    # like Qwen/Qwen3-Coder-30B: only the effort after them is lowercased)
+    agent = (getattr(args, "agent", None) or getattr(args, "worker", None) or "claude").lower()
     names, efforts = [], {}
     for item in items:
-        name, _, level = (part.strip() for part in item.lower().rpartition(":"))
+        name, _, level = (part.strip() for part in item.rpartition(":"))
+        level = level.lower()
         if not name or level not in levels:
-            name, level = item.lower().strip(), ""
-        names.append(name)
+            name, level = item.strip(), ""
+        names.append(name.lower() if agent in BUILT_IN else name)
         if level or effort:
             efforts[name] = level or effort
     models = check_models(names)

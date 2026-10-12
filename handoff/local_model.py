@@ -137,7 +137,7 @@ def _resolve(root: Path, path: object) -> Path:
     rel = Path(path.strip().replace("\\", "/"))
     if rel.is_absolute() or rel.anchor or ".." in rel.parts:  # (on Windows, /etc/x has a root but no drive)
         raise _Refused(f"{path} is outside the project: give a path inside it, like src/app.py")
-    if ".git" in rel.parts:
+    if any(part.lower() == ".git" for part in rel.parts):  # (.GIT is .git on Windows and macOS)
         raise _Refused("the .git folder is off limits")
     current = root
     for part in rel.parts:
@@ -155,10 +155,11 @@ def _list(root: Path, args: dict) -> str:
         raise _Refused(f"{args.get('path')} isn't a folder")
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(folder):
-        dirnames[:] = sorted(d for d in dirnames if d != ".git" and not os.path.islink(os.path.join(dirpath, d)))
+        dirnames[:] = sorted(d for d in dirnames
+                             if d.lower() != ".git" and not os.path.islink(os.path.join(dirpath, d)))
         for name in sorted(filenames):
             full = Path(dirpath, name)
-            if name != ".git" and not full.is_symlink():  # (a worktree's .git is a file)
+            if name.lower() != ".git" and not full.is_symlink():  # (a worktree's .git is a file)
                 found.append(full.relative_to(root).as_posix())
             if len(found) >= LIST_LIMIT:
                 return "\n".join(found) + "\n(more files not shown: list a folder inside it)"
@@ -169,7 +170,8 @@ def _read(root: Path, args: dict) -> str:
     path = _resolve(root, args.get("path"))
     if not path.is_file():
         raise _Refused(f"there's no file {args.get('path')}")
-    data = path.read_bytes()
+    with path.open("rb") as file:  # (no more than it shows: a model may pick a huge file)
+        data = file.read(READ_LIMIT + 1)
     if b"\0" in data[:8000]:
         raise _Refused(f"{args.get('path')} isn't a text file")
     text = data[:READ_LIMIT].decode("utf-8", "replace")

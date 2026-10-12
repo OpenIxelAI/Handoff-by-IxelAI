@@ -311,12 +311,14 @@ def test_a_model_name_with_a_colon_isnt_taken_for_an_effort():
         def fail(self, message):
             raise AssertionError(message)
 
-    def models(model=None, chain=None, effort=None):
-        return cli._models(Parser(), SimpleNamespace(model=model, chain=chain, effort=effort))
+    def models(model=None, chain=None, effort=None, agent="ollama"):
+        return cli._models(Parser(), SimpleNamespace(model=model, chain=chain, effort=effort, agent=agent))
     assert models("qwen3:4b", effort="none") == (["qwen3:4b"], {"qwen3:4b": "none"})
     assert models("qwen3:4b") == (["qwen3:4b"], None)
     assert models("qwen3:4b:high") == (["qwen3:4b"], {"qwen3:4b": "high"})
     assert models("llama3:latest") == (["llama3:latest"], None)
+    assert models("Qwen/Qwen3-Coder-30B:HIGH") == (["Qwen/Qwen3-Coder-30B"], {"Qwen/Qwen3-Coder-30B": "high"})
+    assert models("Haiku", agent="claude") == (["haiku"], None)
     assert models(chain="claude-fable-5-1:max,claude-haiku-5-5") == (["claude-fable-5-1", "claude-haiku-5-5"],
                                                                      {"claude-fable-5-1": "max"})
 
@@ -555,11 +557,19 @@ def test_a_model_that_never_stops_asking_for_tools_is_stopped(board, repo, serve
     assert not result.ok and "after 3 turns" in result.message and len(s.requests) == 3
 
 
-@pytest.mark.parametrize("path", ["../x", "/etc/passwd", "a/../../x", ".git/config", "", "C:\\x" if
+@pytest.mark.parametrize("path", ["../x", "/etc/passwd", "a/../../x", ".git/config", ".GIT/config", "sub/.Git", "",
+                                  "C:\\x" if
                                   sys.platform == "win32" else "/x"])
 def test_the_tools_refuse_paths_that_leave_the_worktree(tmp_path, path):
     assert local_model.run_tool(tmp_path, "read_file", json.dumps({"path": path})).startswith("Error")
     assert local_model.run_tool(tmp_path, "write_file", {"path": path, "content": "x"}).startswith("Error")
+
+
+def test_reading_a_huge_file_reads_no_more_than_it_shows(tmp_path, monkeypatch):
+    (tmp_path / "big.txt").write_bytes(b"x" * (local_model.READ_LIMIT * 3))
+    monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail("read the whole file"))
+    said = local_model.run_tool(tmp_path, "read_file", {"path": "big.txt"})
+    assert said.endswith(f"(cut at {local_model.READ_LIMIT} bytes)")
 
 
 def test_the_tools_do_not_follow_links(tmp_path):
