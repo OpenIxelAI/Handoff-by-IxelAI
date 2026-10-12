@@ -316,6 +316,13 @@ hands its steps to the next best coder. Any other failure (no login, a crash, a 
 since the next model working would hide it. Answers and reviews go through Ixel (`ixel ask --agent a,b,c`),
 which asks the next agent in turn. `--no-fallback` approves a run without fallbacks.
 
+To keep one agent from taking over, leave it out: `--no-fallback-to codex` (or a comma list, like
+`--no-fallback-to codex,gemini`) works the list out without those agents, for a change, a chain, an answer or a
+review, and the others still take over. Handoff shows the list without them, and says so if none is left. It can't
+be used with `--no-fallback`, and an agent Handoff doesn't know is refused. On the Board and in the API it's the
+`no_fallback_to` arg, a list of agent names, on `approve` (when the request has no `fallbacks` of its own) and on
+`fallbacks`, which previews the list.
+
 `handoff rankings` shows which models are best at what, best first: coding, planning, reviewing, writing,
 pictures and video, with the leaderboards they come from. `handoff rankings update` gets the newest from
 Handoff's own repository (a public file: nothing about you is sent), and you can keep your own in
@@ -324,6 +331,7 @@ Handoff's own repository (a public file: nothing about you is sent), and you can
 ```bash
 handoff approve T-7 claude --model claude-opus-5-5   # shows who takes over, then asks
 handoff approve T-7 claude --no-fallback             # stops at the limit, as before
+handoff approve T-7 claude --no-fallback-to codex    # anyone but codex takes over
 handoff rankings --job video
 ```
 

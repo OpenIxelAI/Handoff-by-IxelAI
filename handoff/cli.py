@@ -14,7 +14,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Collection
 
 from rich import box
 from rich.console import Console, Group
@@ -65,7 +65,8 @@ COMMANDS = [
      "Split one request across your agents and run the parts side by side"),
     ("handoff agents [enable|disable AGENT]", "Who can take tasks here: changing files, answering, reviewing, "
                                               "pictures"),
-    ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL] [--effort E]",
+    ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL] "
+     "[--effort E] [--no-fallback | --no-fallback-to A,...]",
      "Let an agent run a task, once (on a model, or a chain of models)"),
     ("handoff rankings [update] [--job JOB] [--json]",
      "Which models are best at what (who takes over when one hits its usage limit)"),
@@ -1584,6 +1585,9 @@ def cmd_approve(argv: list[str]) -> int:
     parser.add_argument("--no-fallback", action="store_true",
                         help="stop the run when a model is out of usage, instead of going on with the next best "
                              "model you have (handoff rankings shows the order)")
+    parser.add_argument("--no-fallback-to", metavar="AGENT,...",
+                        help="leave these agents out of the fallbacks, like codex or codex,gemini; the others "
+                             "still take over (not with --no-fallback)")
     parser.add_argument("--revoke", action="store_true", help="withdraw an approval the worker hasn't used yet")
     parser.add_argument("--yes", action="store_true", help="don't ask; approve the task as shown")
     args = parser.parse_args(argv)
@@ -1630,6 +1634,25 @@ def cmd_approve(argv: list[str]) -> int:
         parser.fail("--model and --chain are for an edit; the models in Ixel MAT have their own (ixel model).")
     if efforts and args.kind == "image":
         parser.fail("--effort is for an edit, an answer or a review.")
+    leave_out: list[str] = []
+    if args.no_fallback_to is not None:
+        leave_out = list(dict.fromkeys(part.strip().lower() for part in args.no_fallback_to.split(",")
+                                       if part.strip()))
+        if not leave_out:
+            parser.fail("--no-fallback-to takes the agents to leave out, like: "
+                        f"handoff approve {ref} {agent} --no-fallback-to codex")
+        if args.no_fallback:
+            parser.fail("Use --no-fallback (no fallbacks at all) or --no-fallback-to (all but these agents), "
+                        "not both.")
+        if args.kind == "image":
+            parser.fail("--no-fallback-to is for an edit, an answer or a review; pictures don't fall back.")
+        unknown = unknown_agents(leave_out)
+        if unknown:
+            said = ", ".join(clean_line(name)[:40] for name in unknown)
+            what = "isn't an agent Handoff knows, so it" if len(unknown) == 1 else \
+                "aren't agents Handoff knows, so they"
+            parser.fail(f"{said} {what} can't be left out of the fallbacks.\n"
+                        "To see who can take over: handoff rankings")
     if models and len(models) > 1 and agent not in CHAIN_AGENTS:
         parser.fail(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}. For {agent}, name one with --model.")
     if models and len(models) > 1 and step_agent(models[0], agent)[0] != agent:
@@ -1648,7 +1671,8 @@ def cmd_approve(argv: list[str]) -> int:
     # What's sealed is what was shown: if an agent changes the task while you read it, you see it again.
     from handoff.board import Changed, content_of
     whose = f" ({ref}'s assignee)" if asked else ""
-    fallbacks = None if args.no_fallback else (suggested_fallbacks(args.kind, agent, models, _root(args)) or None)
+    fallbacks = None if args.no_fallback else (
+        suggested_fallbacks(args.kind, agent, models, _root(args), leave_out=leave_out) or None)
     for attempt in range(1, 6):
         task, events, _, _ = board.task_with_history(task_id)
         console.print(f"\n  [{C['dim']}]The {escape(agent)} worker{whose} gets {ref} as it is now, with its "
@@ -1688,6 +1712,9 @@ def cmd_approve(argv: list[str]) -> int:
                   "setting." + (" With fallbacks, it applies to the first model only." if fallbacks else ""))
         if fallbacks:
             _hint(f"If {agent} hits its usage limit, {', then '.join(fallbacks)} take over, in turn.")
+        elif leave_out:
+            _hint(f"With {names(leave_out)} left out, no other model you have can take over; the run stops at its "
+                  "usage limit.")
         _hint(f"Nothing in the project changes; the result goes to .handoff/outputs/{task.ref} and the task to "
               f"{_who(return_to)}.")
         console.print(f"  [{C['dim']}]Run it with:[/] handoff run {task.ref}", soft_wrap=True)
@@ -1703,6 +1730,9 @@ def cmd_approve(argv: list[str]) -> int:
     if fallbacks:
         from handoff.rankings import shown as in_words
         _hint(f"If a model hits its usage limit, the run goes on with {in_words(fallbacks)}, and says so.")
+    elif leave_out:
+        _hint(f"With {names(leave_out)} left out, no other model you have can take over; the run stops at its "
+              "usage limit.")
     how = _sandbox_word(agent)
     if how is None:
         console.print(f"  [{C['gold']}]⚠[/] {escape(agent)} only runs inside its sandbox, which can't run here "
@@ -1715,10 +1745,24 @@ def cmd_approve(argv: list[str]) -> int:
     return 0
 
 
-def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: Path) -> list[str]:
+def unknown_agents(asked: Collection[str]) -> list[str]:
+    """The names that are neither an agent the worker runs nor one a ranking names (rankings.py): nobody
+    that could take over, so nobody to leave out of the fallbacks (`handoff approve --no-fallback-to`)."""
+    from handoff import rankings
+    from handoff.worker import AGENTS
+    known = set(AGENTS)
+    for entries in rankings.load()[0].values():
+        known.update(rankings.split(entry)[0] for entry in entries)
+    return [name for name in asked if name not in known]
+
+
+def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: Path, *,
+                        leave_out: Collection[str] = ()) -> list[str]:
     """Who takes over a run when a model is out of usage, best first: the models ranked below its own for its
     kind of work (rankings.py) that this computer has an agent for. A chain's planner falls back to the next
-    best planner, its steps to the next best coders. [] for a run that can't fall back (pictures)."""
+    best planner, its steps to the next best coders. [] for a run that can't fall back (pictures).
+    `leave_out`: agents (lowercase names) that never take over; the list fills up with the others. Leaving out
+    the run's own agent drops its other models."""
     from handoff import rankings
     from handoff.approvals import FALLBACK_KINDS, MAX_FALLBACKS
     if kind not in FALLBACK_KINDS:
@@ -1728,7 +1772,7 @@ def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: P
         from handoff.worker import AGENTS
         have = {name for name, spec in AGENTS.items()
                 if (spec.kind == "local" or (spec.command and adapters.find_on_path(spec.command)))
-                and (not spec.needs_ok or adapters.enabled(name))}
+                and (not spec.needs_ok or adapters.enabled(name))} - set(leave_out)
         served: dict[str, set[str]] = {}
 
         def usable(name: str, model: str) -> bool:  # a model on your computer only if its server has it
@@ -1747,7 +1791,7 @@ def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: P
     from handoff import asks
     from handoff.board import safe_name
     roster = asks.ixel_roster(root)
-    have = {safe_name(a.get("name")) or "" for a in roster.agents if a.get("ready")}
+    have = {safe_name(a.get("name")) or "" for a in roster.agents if a.get("ready")} - set(leave_out)
     return rankings.fallbacks(rankings.KIND_JOB[kind], agent, None, have, agents_only=True)
 
 
