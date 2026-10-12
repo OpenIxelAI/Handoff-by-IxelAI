@@ -104,9 +104,8 @@ def roster_from_lists(ixel: str | None, listed: dict | None, pictures: dict | No
     """What Ixel's two lists say, put together. `ixel` is the command (None when there's none), `listed` what
     `ixel ask --list` printed and `pictures` what `ixel image --list` did (ixel_list)."""
     if ixel is None:
-        return IxelRoster([], [], "Ixel MAT isn't installed (no `ixel` command), so only claude and codex can "
-                                  "take tasks, as edits. Install Ixel MAT to give answers, reviews and pictures to "
-                                  "any model.")
+        return IxelRoster([], [], "Ixel MAT isn't installed (no `ixel` command), so agents can take tasks only "
+                                  "as edits. Install Ixel MAT to give answers, reviews and pictures to any model.")
     if listed is None or not isinstance(listed.get("agents"), list):
         return IxelRoster([], [], "This Ixel MAT can't take single tasks yet (`ixel ask` is missing). Update it "
                                   "with: ixel update")

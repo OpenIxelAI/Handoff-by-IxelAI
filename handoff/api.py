@@ -69,8 +69,8 @@ MAX_DONE_SHOWN = 500
 MAX_OUTPUTS = 50
 _OUTPUT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 WRITE_OPS = ("init", "add", "assign", "note", "review", "status", "delete", "approve", "revoke", "run.start",
-             "merge")
-READ_OPS = ("hello", "revision", "board", "task", "agents", "inbox")
+             "merge", "agents.enable")
+READ_OPS = ("hello", "revision", "board", "task", "agents", "inbox", "models")
 OPS = READ_OPS + WRITE_OPS
 
 
@@ -398,13 +398,66 @@ def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
 # run-effort: an edit can say how hard each model thinks (approve's args.efforts: {model: level}, or {"": level}
 # for the agent's own model), in the levels each worker takes (a task's `workers`). run-merge: the person can merge a
 # task's branch into their current branch (op merge: args.task, and optional args.shown as approve's).
-FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge")
+# any-worker: the worker runs more agents than claude and codex (a board's `workers`, each with its `label`,
+# `access`, `local` and `needs_ok`/`enabled`: adapters.py), op models lists the models one can run, and op
+# agents.enable lets one run, or stops it (args.agent, args.on).
+FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge", "any-worker")
 
 
 def _workers() -> dict:
-    """What each worker's edits can be given: its effort levels, least first, and whether it runs a chain."""
-    from handoff.worker import AGENTS, CHAIN_AGENTS
-    return {name: {"efforts": list(spec.effort_levels), "chain": name in CHAIN_AGENTS} for name, spec in AGENTS.items()}
+    """What each worker's edits can be given: its effort levels, least first, and whether it runs a chain; and for
+    people, its name, what it can reach (adapters.ACCESS), whether it's a model on this computer (free), and
+    whether it waits for you to enable it. Nothing here starts a program or asks a server."""
+    from handoff import adapters
+    from handoff.worker import AGENTS, CHAIN_AGENTS, access, label
+    try:
+        config = adapters.load_config()
+    except adapters.ConfigError:
+        config = {}
+    return {name: {"efforts": list(spec.effort_levels), "chain": name in CHAIN_AGENTS, "label": label(spec),
+                   "access": access(spec), "local": spec.kind == "local", "needs_ok": spec.needs_ok,
+                   "enabled": (not spec.needs_ok) or adapters.enabled(name, config),
+                   "default_model": spec.default_model or None}
+            for name, spec in AGENTS.items()}
+
+
+def op_models(request: dict) -> dict:
+    """The models a worker can run, as it lists them (a local server's, or `opencode models`): `models`, and
+    `default`, the one it runs when an approval names none. Empty where the agent can't say (claude and codex
+    take their own names and aliases, like claude-opus-5-5 or haiku)."""
+    from handoff.worker import AGENTS, Worker, WorkerUnavailable
+    agent = _name(request.get("args", {}).get("agent"), "agent")
+    if agent is None or agent not in AGENTS:
+        raise ApiError("usage", "args.agent must be one of the workers: " + ", ".join(AGENTS) + ".")
+    try:
+        worker = Worker(None, Path("."), agent)  # type: ignore[arg-type]  (only lists, never runs)
+    except WorkerUnavailable as exc:
+        raise BoardError(str(exc)) from None
+    models = worker.list_models()
+    default = AGENTS[agent].default_model or (models[0] if models and AGENTS[agent].kind == "local" else None)
+    return {"agent": agent, "models": models, "default": default}
+
+
+def op_agents_enable(request: dict) -> dict:
+    """Let a worker that runs with its own permissions (or reads outside its worktree) change files, or stop
+    letting it: `enabled` in agents.toml, which only the person writes (refused for anything Handoff started)."""
+    from handoff import adapters
+    from handoff.worker import AGENTS, BUILT_IN, load_agents
+    args = request.get("args", {})
+    agent = _name(args.get("agent"), "agent")
+    on = _arg(args, "on", bool, required=False, default=True)
+    if agent is None:
+        raise ApiError("usage", "Say which agent: args.agent.")
+    if agent in BUILT_IN:
+        raise BoardError(f"{agent} doesn't need enabling.")
+    if agent not in AGENTS and agent not in adapters.presets():
+        raise BoardError(f"Handoff doesn't know {agent}; add it in {adapters.config_path()} first.")
+    try:
+        adapters.set_enabled(agent, on)
+    except adapters.ConfigError as exc:
+        raise BoardError(str(exc)) from None
+    load_agents()
+    return {"agent": agent, "enabled": on, "workers": _workers()}
 
 
 def op_hello(request: dict) -> dict:
@@ -540,7 +593,7 @@ def _work_left(root: Path, ref: str) -> list[str]:
 
 
 def op_approve(request: dict) -> dict:
-    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem
+    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem, names
     board = _board(_project(request))
     args = request.get("args", {})
     agent = _name(args.get("agent"), "agent")
@@ -550,7 +603,7 @@ def op_approve(request: dict) -> dict:
     if kind not in RUN_KINDS:
         raise ApiError("usage", f"args.kind must be one of: {', '.join(RUN_KINDS)}.")
     if kind == "edit" and agent not in AGENTS:
-        raise BoardError(f"Only {' and '.join(AGENTS)} can change files. {agent} can answer, review your changes "
+        raise BoardError(f"Only {names(AGENTS)} can change files. {agent} can answer, review your changes "
                          "or make pictures instead.")
     return_to = _name(args.get("return_to"), "return_to") or HUMAN
     target = args.get("target")
@@ -666,7 +719,7 @@ HANDLERS = {
     "hello": op_hello, "revision": op_revision, "board": op_board, "task": op_task, "agents": op_agents,
     "inbox": op_inbox, "init": op_init, "add": op_add, "assign": op_assign, "note": op_note, "review": op_review,
     "status": op_status, "delete": op_delete, "approve": op_approve, "revoke": op_revoke, "run.start": op_run_start,
-    "merge": op_merge,
+    "merge": op_merge, "models": op_models, "agents.enable": op_agents_enable,
 }
 assert set(HANDLERS) == set(OPS)
 

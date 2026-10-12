@@ -370,9 +370,9 @@ def test_the_api_takes_efforts_and_says_what_each_worker_takes(board, repo):
     [(_, approval)] = board.pending_runs("codex")
     assert approval.data["efforts"] == {"gpt-5.5": "xhigh"}
     workers = api.task_detail(board, repo, t.id)["task"]["workers"]
-    assert workers["claude"] == {"efforts": ["low", "medium", "high", "xhigh", "max"], "chain": True}
-    assert workers["codex"] == {"efforts": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-                                "chain": False}
+    assert workers["claude"].items() >= {"efforts": ["low", "medium", "high", "xhigh", "max"], "chain": True}.items()
+    assert workers["codex"].items() >= {"efforts": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                                        "chain": False}.items()
     assert "run-effort" in api.op_hello({})["features"]
     with pytest.raises(api.ApiError, match="args.efforts must be an object"):
         api.op_approve({"project": str(repo), "args": {"task": t.ref, "agent": "claude", "efforts": "high"}})

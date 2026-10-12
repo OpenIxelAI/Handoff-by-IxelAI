@@ -123,7 +123,7 @@ your API keys: install it and run `ixel setup` to add your models. They come fro
 there, so "codex review my changes" needs Codex among them, and "gemini …" needs Gemini. For an answer or
 a review, "claude" means Claude Code in Ixel MAT (`claude_code`); for an edit, the claude the worker runs.
 `handoff agents` shows who can do what on this computer, with an example that runs here. Without Ixel,
-only claude and codex can take tasks, as edits.
+agents can take tasks only as edits (claude, codex, and the others in [Every other agent and model you have](#every-other-agent-and-model-you-have)).
 
 - `--plan` shows the plan and adds nothing (not even a board). To make it, Handoff still checks which
   agents can run here: it starts `claude --help` and `codex exec --help`, tries the sandbox, and asks
@@ -261,6 +261,54 @@ which model did the work. `handoff show T-7` lists it under each run, the handba
 run --json` and the API (`usage` and `cost` on the task and on its runs, each task's on the board too, and the
 board's `usage` and `spent`, what its tasks' runs used and cost in all) carry it for the Ixel app. A run that was stopped (by its
 time limit or Ctrl+C) has no report, so what it used isn't counted.
+
+### Every other agent and model you have
+
+The worker isn't only Claude Code and Codex. Handoff finds these on your computer and offers each one on the
+Board and in `handoff agents`, with what it can reach:
+
+| Agent | Approve it as | What it can do | Costs |
+|---|---|---|---|
+| [OpenCode](https://opencode.ai) | `opencode`, with `--model provider/model` (`opencode/step-5-preview-free`, say) and `--effort` (its `--variant`: minimal … max, as the model offers) | edits files in the worktree with its file tools; no commands, no web | its free models (`opencode/…-free`) nothing |
+| [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any server with an OpenAI-style API | `ollama`, `lmstudio`, or a name you give it, with `--model qwen3:4b` and `--effort none`, low, medium or high | reads and writes files in the worktree through four tools Handoff runs itself; no commands | nothing: it runs on your computer |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `hermes`, with `--model` | its file tools only, but they can read outside the worktree | its model's |
+| [Kimi Code](https://github.com/MoonshotAI/kimi-code), [Cline](https://cline.bot), [OpenClaw](https://github.com/openclaw/openclaw) | `kimi`, `cline`, `openclaw`, with `--model` (and `--effort`: Cline's none … xhigh, OpenClaw's off … max) | everything their own permissions allow: commands as you, with the network | their model's |
+
+```bash
+handoff approve T-7 opencode --model opencode/step-5-preview-free
+handoff approve T-8 ollama --model qwen3:4b                # a small, clear task, done for free
+handoff agents enable kimi                                 # once: kimi runs with its own permissions
+handoff approve T-9 kimi
+```
+
+Hermes, Kimi, Cline, OpenClaw and any agent you add run only once you've enabled them (`handoff agents
+enable NAME`, or the switch on the Board): until then, an approval for one waits. Nothing is pushed by any of
+them, each works in its own worktree and branch, and the Board shows what each run used, as it does for
+claude. OpenCode and Hermes report their tokens and cost; a model on your computer reports its tokens, at no
+cost. A small model is best at small, clear tasks (a rename, a test, a doc change): give it those, and the
+bigger models the rest.
+
+**Your own agents and model servers** go in `agents.toml`, next to the approval key (in the folder above).
+Only you write that file; a project can't add an agent:
+
+```toml
+[agents.ollama]
+model = "qwen3:4b"                       # what it runs when an approval names no model
+
+[agents.studio]                          # a model server elsewhere on your network
+url = "http://192.168.1.20:1234/v1"
+model = "qwen3-coder-30b"
+key_env = "STUDIO_KEY"                   # only if it wants a key
+
+[agents.myagent]                         # any command-line agent
+command = "myagent"
+args = ["run", "--quiet"]                # the task goes in on stdin, or where "{prompt}" is
+model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
+efforts = ["low", "high"]
+env = ["MYAGENT_"]                       # what of your environment it gets: names, or prefixes ending in _
+enabled = true                           # it runs with its own permissions
+```
 
 ## What the agents can do
 

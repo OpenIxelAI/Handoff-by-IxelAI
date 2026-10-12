@@ -129,8 +129,8 @@ def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._ru
     nothing is sent to a model, and nothing reads the board (a plan needs none). The checks run side by
     side, since each starts a program (an agent's --help, its sandbox's probe, Ixel's lists) that takes a
     second or more on its own."""
-    from handoff import proc
-    from handoff.worker import AGENTS, Worker, WorkerUnavailable
+    from handoff import adapters, proc
+    from handoff.worker import AGENT_PROBLEMS, AGENTS, Worker, WorkerUnavailable, label
 
     def edit_check(name: str) -> tuple[str, str]:
         """Whether `name` can change files here: ("", a note) when it can, (why not, "") when it can't."""
@@ -139,8 +139,13 @@ def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._ru
             worker.check()
         except WorkerUnavailable as exc:
             return str(exc), ""
-        note = f"edits without running commands here ({worker.fallback_reason})" if worker.fallback_reason else ""
-        return "", note
+        if worker.fallback_reason:
+            return "", f"edits without running commands here ({worker.fallback_reason})"
+        spec = worker.spec
+        if spec.access == "sandbox":
+            return "", ""
+        free = " Free: it runs on your computer." if spec.kind == "local" else ""
+        return "", f"{adapters.ACCESS[spec.access][0].upper()}{adapters.ACCESS[spec.access][1:]}.{free}"
 
     members: dict[str, Member] = {}
     command = asks.find_ixel()
@@ -151,7 +156,7 @@ def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._ru
         lists = [pool.submit(asks.ixel_list, command, which, root, runner) for which in ("ask", "image")] \
             if command else []
         for name in AGENTS:
-            member = members.setdefault(name, Member(name, name.capitalize()))
+            member = members.setdefault(name, Member(name, label(AGENTS[name])))
             if not check_edits:
                 member.kinds["edit"] = ""
                 continue
@@ -193,7 +198,7 @@ def build_roster(board: Board | None, root: Path, runner: asks.Runner = asks._ru
         found = providers.get(provider)
         if found and found.get("ready") and not any(asks.image_provider(n, ixel) == provider for n in members):
             members[alias] = Member(alias, clean_line(found.get("label") or alias), {"image": ""})
-    problems = [ixel.problem] if ixel.problem else []
+    problems = ([ixel.problem] if ixel.problem else []) + list(AGENT_PROBLEMS)
     return Roster(members, ixel, problems)
 
 

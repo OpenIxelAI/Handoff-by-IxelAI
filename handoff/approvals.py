@@ -115,7 +115,10 @@ def board_identity(board_path: Path) -> str:
 TARGET_KINDS = ("review", "edit")  # the runs that can be of given commits
 MODEL_KINDS = ("edit",)  # the runs that can name their models
 MAX_MODELS = 4  # a planner and up to three models for its steps
-_MODEL = re.compile(r"^[a-z0-9][a-z0-9.\-]{0,63}$")
+# claude-opus-5-5, haiku, gpt-6-codex, and the names other agents give theirs: opencode/step-5-preview-free,
+# qwen3:4b, Qwen/Qwen3-Coder-30B. It goes on the agent's command line as a flag's value: never starting with "-",
+# and nothing a shell or cmd.exe would read
+_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@\-]{0,79}$")
 
 
 def check_models(models: object) -> list[str] | None:

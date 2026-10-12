@@ -45,6 +45,8 @@ handoff setup --write
 - In any connected app, ask the agent to hand work over. In the other app, say **"check your handoffs"**.
 - `handoff board` shows who's doing what. `handoff 3` shows task T-3, and `handoff done 3` closes it.
 - `handoff dispatch "..."` splits one request across your agents and runs the parts side by side.
+- `handoff approve 3 opencode` (or `claude`, `codex`, `ollama`, `kimi`…) lets one agent work on T-3 in its own
+  branch. Every coding agent and local model you have can take tasks: `handoff agents` lists them.
 
 Every command, tool and rule is in the [guide](docs/guide.md).
 
