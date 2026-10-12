@@ -445,8 +445,9 @@ doesn't run. Findings from the reviews:
 - **Loop guard.** Everything the worker starts gets `HANDOFF_DEPTH` one higher, and a worker won't start
   with it set.
 - **Timeouts** (30 minutes by default) stop the agent and what it started. In the sandbox, that's everything
-  in it. Elsewhere it's the agent's process group, and on Linux also anything that left the group (with
-  `setsid`, say) but still has the run's `HANDOFF_RUN` variable. A run that fails or times out
+  in it. Elsewhere it's the agent's process group, and on Linux and macOS also anything of yours that left the
+  group (with `setsid`, say) but still has the run's `HANDOFF_RUN` variable (on macOS, one whose environment
+  can't be read counts if it was started under the agent). A run that fails or times out
   keeps what it changed, committed on its branch, and blocks the task with the reason.
 
 ### The other agents
