@@ -114,6 +114,7 @@ def test_run_passes_the_effort_to_ixel_when_it_can_take_it(repo, fake_ixel, run_
     assert code == 0, err
     [call] = fake_ixel("ask")
     assert call["argv"][call["argv"].index("--effort") + 1] == "high"
+    assert "model's own effort" not in last_handback(repo)["left"]  # passed, so nothing to say about it
 
 
 def test_run_leaves_the_effort_out_when_ixel_cannot_take_it(repo, fake_ixel, run_cli):  # noqa: F811
@@ -124,3 +125,39 @@ def test_run_leaves_the_effort_out_when_ixel_cannot_take_it(repo, fake_ixel, run
     assert code == 0, err
     [call] = fake_ixel("ask")
     assert "--effort" not in call["argv"]
+    # the run goes on, and the handback says why the level wasn't used
+    handback = last_handback(repo)
+    assert handback["done"].startswith("gemini says:")
+    assert "model's own effort" in handback["left"] and "ixel update" in handback["left"]
+
+
+def test_run_says_the_model_list_could_not_be_read(repo, fake_ixel, run_cli):  # noqa: F811
+    assert run_cli("add", "List three databases for a small shop")[0] == 0
+    code, _, err = run_cli("approve", "T-1", "gemini", "--kind", "answer", "--effort", "high", "--no-fallback", "--yes")
+    assert code == 0, err
+    board = Board.open(repo)
+    [(task, approval)] = board.pending_runs()
+    no_list = asks.IxelRoster([], [], "This Ixel MAT can't take single tasks yet")
+    result = asks.run(board, repo, task, approval, roster=no_list)
+    assert result.ok
+    left = last_handback(repo)["left"]
+    assert "couldn't read Ixel MAT's list of models" in left and "ixel update" not in left
+    [call] = fake_ixel("ask")
+    assert "--effort" not in call["argv"]
+
+
+def last_handback(repo):
+    return [e for e in Board.open(repo).events(1) if e.kind == "handoff"][-1].data
+
+
+def test_effort_note_says_why_the_effort_was_left_out():
+    assert asks._effort_note("gemini", "high", roster("effort")) == ""
+    assert asks._effort_note("gemini,codex", "high", roster("effort", "effort-first")) == ""
+    assert asks._effort_note("gemini", None, roster()) == ""
+    note = asks._effort_note("gemini", "high", roster())
+    assert "model's own effort" in note and "high" in note and "ixel update" in note
+    note = asks._effort_note("gemini,codex", "high", roster("effort"))
+    assert "model's own effort" in note and "ixel update" in note
+    for lookup_failed in (replace(roster(), problem="This Ixel MAT can't take single tasks yet"), None):
+        note = asks._effort_note("gemini", "high", lookup_failed)
+        assert "couldn't read Ixel MAT's list of models" in note and "ixel update" not in note
