@@ -398,10 +398,29 @@ def test_doctor(project, capsys, monkeypatch, tmp_path):
     assert "Project" in out and "1 task ·" in out and "done rule: review_or_reason" in out
     assert "finished tasks kept forever" in out
     assert "The board stays out of git" in out
+    assert ".handoff is owner-only" in out
     if sys.platform != "win32":
         os.chmod(project / ".handoff" / "board.db", 0o644)
         code, out, _ = run(capsys, "doctor")
         assert code == 0 and "board.db was readable by others  mode 644; now 600" in out
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACLs")
+def test_doctor_says_when_others_can_open_the_board_folder_on_windows(project, capsys, monkeypatch, tmp_path):
+    import subprocess
+
+    from handoff.proc import system32
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(cli, "console", Console(width=300, highlight=False))  # (the fix is one long line)
+    run(capsys, "add", "Task")
+    done = subprocess.run([system32("icacls.exe"), str(project / ".handoff"), "/grant", "*S-1-1-0:(R)"],
+                          capture_output=True, text=True, encoding="oem", errors="replace")
+    assert done.returncode == 0, done.stderr  # Everyone may read it now
+    code, out, _ = run(capsys, "doctor")
+    assert code == 1, out
+    assert ".handoff isn't owner-only" in out and "icacls" in out and "/remove:g" in out
+    assert out.index("/grant:r") < out.index("/inheritance:r")  # (the account is granted before anything's removed)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")

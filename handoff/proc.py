@@ -2,8 +2,8 @@
 
 Agent-written text only ever goes on stdin, never on the command line. A
 timeout stops the whole process tree, not just the launcher: its process group
-everywhere, and on Linux also what left the group (with setsid, say) but still
-carries the run's mark.
+everywhere, and on Linux and macOS also what left the group (with setsid, say)
+but still carries the run's mark.
 """
 from __future__ import annotations
 
@@ -75,6 +75,12 @@ def stop_all() -> int:
     return len(procs)
 
 
+def system32(name: str) -> str:
+    """One of Windows' own programs (icacls.exe, whoami.exe), from where Windows keeps it: by a bare name,
+    Windows would look in the current folder first, and that is often a project you cloned."""
+    return os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", name)
+
+
 @contextmanager
 def children_noted(note: Callable[[int], None]) -> Iterator[None]:
     """While this is open, `note` gets the process id of each program run_tree starts on this thread: a board
@@ -89,13 +95,16 @@ def children_noted(note: Callable[[int], None]) -> Iterator[None]:
 
 
 def taskkill() -> str:
-    """Windows' taskkill, from where Windows keeps it: by a bare name, Windows would look in the current folder
-    first, and that is often a project you cloned."""
-    return os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "taskkill.exe")
+    """Windows' taskkill, by its full path (see system32)."""
+    return system32("taskkill.exe")
 
 
 # In the environment of everything one run starts: a process that leaves the run's process group keeps it
 RUN_VAR = "HANDOFF_RUN"
+# macOS: where ps lives, and sysctl's numbers for a process's arguments and environment (kern.procargs2)
+PS = "/bin/ps"
+CTL_KERN = 1
+KERN_PROCARGS2 = 49
 
 
 def _marked(mark: str) -> list[int]:
@@ -116,9 +125,131 @@ def _marked(mark: str) -> list[int]:
     return found
 
 
+def _parse_procargs2(data: bytes) -> tuple[bytes, list[bytes], list[bytes]]:
+    """macOS: what sysctl KERN_PROCARGS2 gives for a process, as (program path, arguments, environment). A buffer
+    that is cut short gives back only what was complete, and nothing here raises. Apple's own strings after the
+    environment are not part of it."""
+    if len(data) < 4:
+        return b"", [], []
+    argc = int.from_bytes(data[:4], sys.byteorder, signed=True)
+    end = data.find(b"\0", 4)
+    if end < 0:
+        return b"", [], []
+    path = data[4:end]
+    if argc < 0:
+        return path, [], []
+    pos = end
+    while pos < len(data) and data[pos] == 0:  # the padding after the path
+        pos += 1
+    argv: list[bytes] = []
+    while len(argv) < argc:  # counted, because an argument can be empty
+        end = data.find(b"\0", pos)
+        if end < 0:
+            return path, argv, []
+        argv.append(data[pos:end])
+        pos = end + 1
+    env: list[bytes] = []
+    while pos < len(data):
+        end = data.find(b"\0", pos)
+        if end <= pos:  # the empty string that ends the environment, or a last one with no closing NUL
+            break
+        env.append(data[pos:end])
+        pos = end + 1
+    return path, argv, env
+
+
+def _procargs2(pid: int) -> bytes | None:
+    """macOS: a process's raw KERN_PROCARGS2 buffer, or None when macOS won't give it (another user's process, a
+    hardened one, or one that is gone)."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                                ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+        libc.sysctl.restype = ctypes.c_int
+        try:
+            size = os.sysconf("SC_ARG_MAX")
+        except (OSError, ValueError):
+            size = 0
+        size = size if size > 0 else 1 << 20
+        mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+        buf = ctypes.create_string_buffer(size)
+        length = ctypes.c_size_t(size)
+        if libc.sysctl(mib, 3, buf, ctypes.byref(length), None, 0) != 0:
+            return None
+        return ctypes.string_at(buf, length.value)
+    except (OSError, AttributeError, TypeError):
+        return None
+
+
+def _ps_table(text: str) -> list[tuple[int, int, int]]:
+    """The output of `ps -A -o pid=,ppid=,uid=` as (pid, parent pid, uid) rows. A line that isn't three whole
+    numbers is skipped."""
+    rows = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
+        except ValueError:
+            continue
+    return rows
+
+
+def _processes() -> list[tuple[int, int, int]]:
+    """macOS: every process as (pid, parent pid, uid), from ps. Empty when ps can't be run."""
+    try:
+        done = subprocess.run([PS, "-A", "-o", "pid=,ppid=,uid="], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return _ps_table(done.stdout) if done.returncode == 0 else []
+
+
+def _descendants(table: list[tuple[int, int, int]], root: int) -> set[int]:
+    """Every pid whose chain of parents reaches `root`, not counting `root` itself."""
+    children: dict[int, list[int]] = {}
+    for pid, ppid, _ in table:
+        children.setdefault(ppid, []).append(pid)
+    found: set[int] = set()
+    todo = [root]
+    while todo:
+        for pid in children.get(todo.pop(), []):
+            if pid != root and pid not in found:  # (so a loop of parents can't go on for ever)
+                found.add(pid)
+                todo.append(pid)
+    return found
+
+
+def _marked_darwin(mark: str, root: int) -> list[int]:
+    """macOS (no /proc): your processes that carry this run's mark, read with sysctl. One whose environment macOS
+    won't show (it refuses, or shows none at all, as it does for Apple's own programs like /bin/sleep) counts when
+    it was started under `root`. Never this process or its parent."""
+    want = f"{RUN_VAR}={mark}".encode()
+    table = _processes()
+    tree = _descendants(table, root) if root > 1 else set()
+    me = os.getuid()
+    skip = {os.getpid(), os.getppid()}
+    found = []
+    for pid, _, uid in table:
+        if uid != me or pid in skip or pid <= 1:
+            continue
+        data = _procargs2(pid)
+        environment = _parse_procargs2(data)[2] if data is not None else []
+        if want in environment or (not environment and pid in tree):
+            found.append(pid)
+    return found
+
+
 def kill_tree(proc: subprocess.Popen, mark: str | None = None) -> None:
     """Stop a program and everything it started (on Windows, a `.cmd` launcher wraps the real process).
-    `mark`: the run's mark, to find on Linux what started its own session to get away."""
+    `mark`: the run's mark, to find on Linux and macOS what started its own session to get away."""
+    early = []
+    if mark and sys.platform == "darwin":
+        # Who is under a program can only be read while it lives (after, launchd has them), and a program that's
+        # already been reaped has no pid of its own to look under
+        early = _marked_darwin(mark, proc.pid if proc.returncode is None else 0)
     try:
         if sys.platform == "win32":
             subprocess.run([taskkill(), "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=30)
@@ -129,6 +260,21 @@ def kill_tree(proc: subprocess.Popen, mark: str | None = None) -> None:
     if mark and sys.platform.startswith("linux"):
         for _ in range(5):  # again, for any that started another just before it was stopped
             left = [pid for pid in _marked(mark) if pid != os.getpid()]
+            if not left:
+                break
+            for pid in left:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+    elif mark and sys.platform == "darwin":
+        for pid in early:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        for _ in range(5):  # again, for any that started another just before it was stopped
+            left = _marked_darwin(mark, proc.pid if proc.returncode is None else 0)
             if not left:
                 break
             for pid in left:

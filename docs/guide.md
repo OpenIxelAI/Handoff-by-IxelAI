@@ -147,9 +147,9 @@ agents can take tasks only as edits (claude, codex, and the others in [Every oth
 
 ## The worker (preview)
 
-The worker lets an agent work on a task while you're elsewhere, with nobody switching apps. On Linux it
-runs **Claude Code or Codex inside an OS sandbox**, where the agent can run your tests and builds. On macOS
-and Windows, for now, it runs **Claude Code edit-only**; Codex needs the sandbox. (On Windows, Codex 0.155.1's
+The worker lets an agent work on a task while you're elsewhere, with nobody switching apps. On Linux and
+macOS it runs **Claude Code or Codex inside an OS sandbox**, where the agent can run your tests and builds.
+On Windows, for now, it runs **Claude Code edit-only**; Codex needs the sandbox. (On Windows, Codex 0.155.1's
 unelevated sandbox refuses to run with the rule that keeps Codex's login unreadable, and without that rule its
 commands can read your files and reach the network, so a Codex worker there would need Codex's elevated sandbox.)
 
@@ -161,12 +161,13 @@ handoff worker --agent codex             # runs it, then waits for your next app
 1. The worker makes a git worktree for the task at `.handoff/worktrees/T-7`, on a new branch `handoff/T-7`
    from your current commit. Your own checkout isn't touched.
 2. It runs the agent there, with the task exactly as it was when you approved it:
-   - The agent runs inside [bubblewrap](https://github.com/containers/bubblewrap), which shows it nothing
-     of yours but the worktree, and inside its own sandbox (Codex's `workspace-write`, Claude Code's
-     `sandbox` setting), which takes the network away from the commands it runs. So it can run your tests
-     and builds, with the tools installed on the system; it can't install anything, reach the network, or
-     see your home folder or your other projects. Git doesn't work in there either (the repository is
-     outside the worktree), and the agent is told so. Its login is a private copy its commands can't read.
+   - The agent runs inside an OS sandbox ([bubblewrap](https://github.com/containers/bubblewrap) on Linux,
+     `sandbox-exec` on macOS), which shows it nothing of yours but the worktree, and inside its own
+     sandbox (Codex's `workspace-write`, Claude Code's `sandbox` setting), which takes the network away
+     from the commands it runs. So it can run your tests and builds, with the tools installed on the
+     system; it can't install anything, reach the network, or see your home folder or your other
+     projects. Git doesn't work in there either (the repository is outside the worktree), and the agent
+     is told so. Its login is a private copy its commands can't read.
    - Where the sandbox can't run, **Claude** runs as `claude -p --restricted` with only its file tools:
      read, edit, write and search. It can't run commands, tests or builds, and the handback says so.
 3. When the agent finishes, the worker commits its changes on `handoff/T-7` (it never pushes, and it won't
@@ -192,17 +193,28 @@ An approval only counts on the computer where you made it. It's sealed with a ke
 lists any approvals it won't run for that reason, and approving the task again here makes it runnable.
 Approvals made before this version count as made elsewhere, so approve those again.
 
-**The sandbox needs Linux and bubblewrap** (`sudo apt install bubblewrap`, `sudo dnf install bubblewrap`
-or `sudo pacman -S bubblewrap`); for Claude, also `socat` (the same way). macOS support is next. The agent
-must be signed in with a login file, or have its API key set:
+**On Linux the sandbox needs bubblewrap** (`sudo apt install bubblewrap`, `sudo dnf install bubblewrap`
+or `sudo pacman -S bubblewrap`); for Claude, also `socat` (the same way). **On macOS it needs nothing
+installed**: it is the system's own `sandbox-exec`. The agent must be signed in with a login file, or have
+its API key set:
 
 - **Codex:** `codex login` (if your login is in the system keyring, set
   `cli_auth_credentials_store = "file"` in `~/.codex/config.toml`), or `OPENAI_API_KEY`.
 - **Claude Code:** sign in with `claude` (then /login), or set `ANTHROPIC_API_KEY` or
-  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`).
+  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`). On macOS, Claude Code keeps its login in the
+  Keychain, which the sandbox keeps the agent out of, so there set `CLAUDE_CODE_OAUTH_TOKEN` or
+  `ANTHROPIC_API_KEY` for the worker.
 
 `handoff doctor` tells you whether each worker is ready, and in which mode. It looks for that login too.
 A run that finds none doesn't start, and the task stays approved: sign in, then `handoff run T-N`.
+
+**On macOS the agent's view is made by denying, not by leaving out**, because there is one filesystem and
+nothing to mount over it. Reads of `/Users`, `/Volumes`, your home folder, the project, `/tmp`,
+`/var/folders` and `/var/root` are denied, except the worktree, a private home and a private temp folder
+for the agent, its own install, the folders you share, and what the network needs (a certificate file,
+say). Other system places (`/Applications`, `/Library`, `/opt`) stay readable. Credential folders in your
+home (`~/.ssh`, `~/.aws` and the like) stay hidden, and writes are allowed only to the worktree and the
+private folders.
 
 **Tools installed in your home folder** (by rustup, nvm, pyenv, `pip --user` and the like) aren't in the
 sandbox unless you share their folders, read-only, when you start the worker:
@@ -497,8 +509,8 @@ Ixel's own `ixel_review` tool, once `ixel mcp --setup` has added Ixel's tools to
 ## Where things live
 
 - The board is `<project>/.handoff/board.db`. The project is the nearest folder with a `.git`, and a linked
-  git worktree shares its main checkout's board. On macOS and Linux the folder is private to you (0700,
-  and 0600 for the file).
+  git worktree shares its main checkout's board. The folder is private to you: 0700 (and 0600 for the file) on
+  macOS and Linux, and on Windows an ACL that gives it to your account only. `handoff doctor` checks it.
 - Finished tasks stay on the board until you delete them, run `handoff clean`, or set `handoff keep DAYS`.
   Deleting overwrites the task's text in the board file, so it isn't left behind in the file's free space.
 - `.handoff/` keeps itself out of git, with a `.gitignore` of its own. If that file goes missing or

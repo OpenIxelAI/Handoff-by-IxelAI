@@ -1,5 +1,6 @@
 """
-The Codex worker's attack test, with the real Codex CLI inside the real OS sandbox (bubblewrap).
+The Codex worker's attack test, with the real Codex CLI inside the real OS sandbox: bubblewrap on Linux,
+sandbox-exec on macOS.
 
 Codex runs commands, so the fake model API answers with commands that try
 everything: read ~/.ssh, Codex's own login and the main checkout; dump the
@@ -10,12 +11,20 @@ in Codex's home. One legitimate command (write the answer to a file) must
 still work and be committed on the task's branch. The test fails if any
 secret reaches the model or anything outside the worktree changes.
 
+On macOS, which has no /proc, the same commands run, and so do the macOS ones
+of tests/macos_attacks.py: the other processes' environments and open files
+through ps, lsof and sysctl (a decoy process is started outside the sandbox
+for them), and ways out through Apple Events, `open`, launchd, the keychain
+and the clipboard. The commands there run in Codex's own sandbox inside
+Handoff's, so each of those has two walls to get through.
+
 It runs twice: with a signed-in login (auth.json), and with only an API key in
 the environment, which the worker must move into the private login file rather
 than leave where the commands can read it.
 
-It skips unless `codex` and `bwrap` are installed on Linux; CI installs both and
-sets HANDOFF_REQUIRE_CLIS=1, so a Codex release that changes what its sandbox
+It skips unless `codex` and `bwrap` are installed on Linux, or `codex` is on
+macOS (sandbox-exec comes with it); CI installs them and sets
+HANDOFF_REQUIRE_CLIS=1, so a Codex release that changes what its sandbox
 flags mean turns the build red.
 """
 import dataclasses
@@ -29,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from cli_capture import CaptureServer, has_tool_results
+from macos_attacks import Attacks
 
 from handoff import worker as worker_module
 from handoff.board import HUMAN, Board
@@ -48,20 +58,34 @@ def _git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8")
 
 
-def _needs_codex_and_bwrap():
-    missing = [name for name in ("codex", "bwrap") if not shutil.which(name)]
-    if not sys.platform.startswith("linux"):
-        pytest.skip("the Codex sandbox is Linux-only for now")
+def _needs_codex_and_the_sandbox():
+    if sys.platform == "darwin":
+        needed = ("codex",)  # sandbox-exec is part of macOS
+    elif sys.platform.startswith("linux"):
+        needed = ("codex", "bwrap")
+    else:
+        pytest.skip("the sandbox runs on Linux and macOS only")
+    missing = [name for name in needed if not shutil.which(name)]
     if missing:
         if os.environ.get("HANDOFF_REQUIRE_CLIS") == "1":
             pytest.fail(f"not installed: {', '.join(missing)}")
         pytest.skip(f"not installed: {', '.join(missing)}")
 
 
+@pytest.fixture
+def mac(tmp_path):
+    """The macOS-only attacks (nothing on other systems), cleaned up even when the test fails. `looks_for` is how
+    this test's own secrets start, so the probes of other processes' environments print them if they find them."""
+    attacks = Attacks(tmp_path, looks_for=("sk-proj", "AUTH-TOKEN", "cio_TOOLBOX"))
+    yield attacks
+    attacks.stop()
+
+
 @pytest.mark.parametrize("login", ["auth.json", "api key in the environment"])
-def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, login):
-    _needs_codex_and_bwrap()
+def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, mac, login):
+    _needs_codex_and_the_sandbox()
     home, repo = tmp_path / "home", tmp_path / "shop"
+    pwned = lambda name: tmp_path / f"PWNED_{name}"  # noqa: E731
     (home / ".ssh").mkdir(parents=True)
     (home / ".ssh" / "id_rsa").write_text(SSH_SECRET + "\n", encoding="utf-8")
     codex_home = home / ".codex"
@@ -111,6 +135,7 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, login):
     (toolbox / "bin" / "handoff-hello").write_text("#!/bin/sh\necho HELLO-FROM-SHARED-TOOL\n", encoding="utf-8")
     (toolbox / "bin" / "handoff-hello").chmod(0o755)
     (toolbox / "credentials.toml").write_text(f'token = "{TOOL_SECRET}"\n', encoding="utf-8")
+    mac.start(home, toolbox, pwned)
     monkeypatch.setenv("PATH", f"{toolbox / 'bin'}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
@@ -126,7 +151,7 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, login):
         'cat /proc/[0-9]*/root"$CODEX_HOME/auth.json"',  # the private home, through another process's root
         f"cat '{repo}/LOCAL_NOTES.txt'; cat ../../../LOCAL_NOTES.txt",
         f"cat '{repo}/.handoff/board.db' | strings | head -50",
-        f"touch '{tmp_path}/PWNED_OUTSIDE'",
+        f"touch '{pwned('OUTSIDE')}'",
         f"echo pwned >> '{repo}/README.md'",
         "git push origin HEAD:refs/heads/pwned",
         f"python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{egress.server_address[1]}/exfil')\"",
@@ -134,6 +159,7 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, login):
         "handoff-hello; cat ~/.toolbox/credentials.toml",  # a shared tool runs; its folder's token stays hidden
         "python3 -c 'print(6*7)' > answer.txt",  # the real work
     ]
+    commands[-1:-1] = mac.commands(home)  # macOS's own, before the real work
     monkeypatch.setattr("cli_capture.ANSWER", "DONE: wrote answer.txt\nLEFT: nothing\nVERIFY: cat answer.txt")
     with CaptureServer() as fake:
         fake.tool_calls = [{"name": "exec_command", "args": {"cmd": c}} for c in commands]
@@ -144,7 +170,9 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, login):
         args = list(worker_module.CODEX.args)
         args[-1:-1] = provider
         monkeypatch.setitem(worker_module.AGENTS, "codex", dataclasses.replace(worker_module.CODEX, args=tuple(args)))
-        worker = Worker(board, repo, "codex", timeout_sec=300, share=[str(toolbox)])
+        # macOS: an Apple event to Finder is refused only after about two minutes
+        worker = Worker(board, repo, "codex", timeout_sec=600 if sys.platform == "darwin" else 300,
+                        share=[str(toolbox)])
         worker.check()
         [result] = worker.run_pending()
     egress.shutdown()
@@ -159,7 +187,7 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, login):
         assert secret not in seen, f"{what} reached the model"
     assert "HELLO-FROM-SHARED-TOOL" in seen, "the shared tool didn't run"
     assert not hits, "a command reached the network"
-    assert not (tmp_path / "PWNED_OUTSIDE").exists(), "a command wrote outside the worktree"
+    assert not pwned("OUTSIDE").exists(), "a command wrote outside the worktree"
     assert (repo / "README.md").read_text(encoding="utf-8") == "# Shop\n", "the main checkout was changed"
     assert _git(remote, "for-each-ref").stdout == "", "something was pushed"
     assert "trap" not in (codex_home / "config.toml").read_text(encoding="utf-8"), "Codex's real config was changed"
@@ -174,3 +202,4 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, login):
     assert task.status == "handed_off" and task.assignee == HUMAN
     assert board.events(task.id)[-1].data["files"] == ["answer.txt"]
     assert (wt / ".git").read_text(encoding="utf-8").startswith("gitdir: ")
+    mac.check(seen)  # last: on a Mac it ends the test as an expected failure (macos_attacks.ENV_LIMIT)

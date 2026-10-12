@@ -1,14 +1,17 @@
 """The worker's OS sandbox, and the agents' private logins: pure logic, on every platform.
 
 tests/test_worker_codex_live.py and tests/test_worker_claude_live.py run the real
-thing (codex and claude inside bubblewrap) on Linux.
+thing (codex and claude inside bubblewrap) on Linux. The macOS profile is checked
+here as text, on any system; one test runs the real sandbox-exec, on a Mac.
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -88,7 +91,11 @@ def test_install_dirs_for_a_single_binary(tmp_path):
 
 def test_check_explains_what_is_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox.sys, "platform", "darwin")
-    with pytest.raises(sandbox.SandboxUnavailable, match="Linux-only for now"):
+    monkeypatch.setattr(sandbox, "SANDBOX_EXEC", str(tmp_path / "sandbox-exec"))  # not there
+    with pytest.raises(sandbox.SandboxUnavailable, match="macOS's sandbox-exec, which isn't at"):
+        sandbox.check()
+    monkeypatch.setattr(sandbox.sys, "platform", "win32")
+    with pytest.raises(sandbox.SandboxUnavailable, match=r"Linux \(bubblewrap\) and macOS \(sandbox-exec\)"):
         sandbox.check()
     monkeypatch.setattr(sandbox.sys, "platform", "linux")
     monkeypatch.setattr(sandbox, "find_bwrap", lambda: None)
@@ -364,6 +371,280 @@ def test_the_apparmor_fix_writes_and_loads_the_profile(tmp_path):
                      "/etc/apparmor.d/bwrap"]
 
 
+def test_wrap_goes_by_the_program_not_the_platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.sys, "platform", "darwin")
+    argv = sandbox.wrap("bwrap", ["x"], worktree=tmp_path, home=Path("/home/ada"), private={}, read_only=[], env={})
+    assert argv[0] == "bwrap" and "--die-with-parent" in argv and argv[-2:] == ["--", "x"]
+
+
+def test_wrap_for_bubblewrap_leaves_the_environment_as_it_is(tmp_path):
+    env = {"PATH": "/usr/bin", "HOME": "/root"}
+    sandbox.wrap("bwrap", ["x"], worktree=tmp_path, home=Path("/home/ada"), private={}, read_only=[], env=env)
+    assert env == {"PATH": "/usr/bin", "HOME": "/root"}  # it passes HOME and TMPDIR as --setenv
+
+
+# ── The macOS sandbox: sandbox-exec, under a profile ─────────────────────────
+
+MAC = "/usr/bin/sandbox-exec"
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="the profile holds POSIX paths")
+
+
+def _fake_sandbox_exec(tmp_path, script):
+    fake = tmp_path / "sandbox-exec"
+    fake.write_bytes(script)
+    fake.chmod(0o755)
+    return fake
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses sh")
+def test_check_on_a_mac_probes_sandbox_exec_and_ignores_what_only_linux_needs(monkeypatch, tmp_path):
+    fake = _fake_sandbox_exec(tmp_path, b'#!/bin/sh\nprintf "%s\\n" "$@" > "$0.args"\nexit 0\n')
+    monkeypatch.setattr(sandbox.sys, "platform", "darwin")
+    monkeypatch.setattr(sandbox, "SANDBOX_EXEC", str(fake))
+    monkeypatch.setattr(sandbox, "find_on_path", lambda name: None)  # no socat here: Claude's Linux sandbox needs it
+    assert sandbox.check(("socat",)) == str(fake)
+    asked = Path(f"{fake}.args").read_text(encoding="utf-8").splitlines()
+    assert asked == ["-p", "(version 1)(allow default)", "/usr/bin/true"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses sh")
+def test_check_explains_a_sandbox_exec_that_cannot_start(monkeypatch, tmp_path):
+    fake = _fake_sandbox_exec(tmp_path, b"#!/bin/sh\necho 'sandbox_apply: Operation not permitted' >&2\nexit 1\n")
+    monkeypatch.setattr(sandbox.sys, "platform", "darwin")
+    monkeypatch.setattr(sandbox, "SANDBOX_EXEC", str(fake))
+    with pytest.raises(sandbox.SandboxUnavailable, match=r"sandbox-exec couldn't start.*Operation not permitted"):
+        sandbox.check()
+
+
+def _fake_agent(path):
+    """A file that looks like a program of its own (a Mach-O header), as Claude Code's and Codex's installs are."""
+    path.write_bytes(b"\xcf\xfa\xed\xfe" + bytes(60))
+    path.chmod(0o755)
+    return path
+
+
+def _mac_layout(tmp_path):
+    """A home with a shared toolbox, a project with a task's worktree, a private login and an agent install."""
+    home, tools, project = _home_with_tools(tmp_path)
+    private, install = tmp_path / "handoff-codex-abc", tmp_path / "install"
+    private.mkdir()
+    install.mkdir()
+    agent = _fake_agent(install / "codex")
+    folders, hidden = sandbox.shared_folders([tools], project=project, home=home)
+    return SimpleNamespace(home=home, tools=tools, project=project, private=private, install=install, agent=agent,
+                           worktree=project / ".handoff" / "worktrees" / "T-1", folders=folders, hidden=hidden)
+
+
+def _mac_wrap(layout, env=None, **changes):
+    """What sandbox.wrap gives for codex under sandbox-exec, and the env it was given (which it fills in)."""
+    env = {} if env is None else env
+    given = dict(worktree=layout.worktree, home=layout.home, private={layout.private: layout.private},
+                 read_only=[layout.install, *layout.folders], env=env, hidden=layout.hidden)
+    given.update(changes)
+    return sandbox.wrap(MAC, [str(layout.agent), "exec", "-"], **given), env
+
+
+def _sub(path):
+    """A folder as the profile names it: as realpath gives it (tmp_path is under /private on a Mac)."""
+    return f'(subpath "{os.path.realpath(path)}")'
+
+
+def _rules(profile, verb, operation):
+    """(line number, rule) of each `(verb operation ...)` rule of a profile, in order."""
+    return [(i, line) for i, line in enumerate(profile.splitlines()) if line.startswith(f"({verb} {operation} ")]
+
+
+@POSIX_ONLY
+def test_wrap_on_a_mac_gives_sandbox_exec_a_profile_then_the_agents_command(tmp_path):
+    layout = _mac_layout(tmp_path)
+    argv, env = _mac_wrap(layout)
+    assert argv[:2] == [MAC, "-p"] and argv[3:] == [str(layout.agent), "exec", "-"] and "--" not in argv
+    assert argv[2].splitlines()[:2] == ["(version 1)", "(allow default)"]
+    temp = Path(env["TMPDIR"])
+    assert str(temp) == os.path.realpath(sandbox.private_temp(layout.private))
+    assert temp.is_dir() and temp.stat().st_mode & 0o777 == 0o700
+    assert env["HOME"] == str(layout.home)
+
+
+@POSIX_ONLY
+def test_the_profile_denies_what_bubblewrap_leaves_out_and_allows_back_what_the_agent_needs(tmp_path):
+    layout = _mac_layout(tmp_path)
+    profile = _mac_wrap(layout)[0][2]
+    denies = _rules(profile, "deny", "file-read*")
+    first_at, first = denies[0]
+    hides_at, hides = denies[1]  # the hidden files, and the credential folders of the home
+    allow_at, allow = _rules(profile, "allow", "file-read*")[0]
+    meta_at, meta = _rules(profile, "allow", "file-read-metadata")[0]
+    assert first_at < allow_at < meta_at < hides_at
+
+    for fixed in ("/Users", "/Volumes", "/private/tmp", "/private/var/folders", "/private/var/root"):
+        assert f'(subpath "{fixed}")' in first
+    assert _sub(layout.home) in first and _sub(layout.project) in first
+    for shown in (layout.worktree, sandbox.private_temp(layout.private), layout.install, layout.tools):
+        assert _sub(shown) in allow
+    assert _sub(layout.private) not in allow  # only the agent's own program reads its login (the test below)
+    # The folders on the way to what's shown can be seen to be there (not what is in them), and "/" needs no rule
+    assert f'(literal "{os.path.realpath(layout.worktree.parent)}")' in meta
+    assert "(subpath" not in meta and '(literal "/")' not in meta
+    # What is hidden is denied again after the allows, so they can't open it
+    for hidden in (layout.tools / "credentials.toml", layout.home / ".ssh"):
+        assert _sub(hidden) in hides
+        assert profile.index(_sub(hidden)) > profile.index(_sub(layout.tools))
+
+
+@POSIX_ONLY
+def test_the_profile_allows_writes_only_to_the_worktree_and_the_private_folders(tmp_path):
+    layout = _mac_layout(tmp_path)
+    profile = _mac_wrap(layout)[0][2]
+    (allow_at, allow), (_, agent_only) = _rules(profile, "allow", "file-write*")
+    lines = profile.splitlines()
+    assert lines.count("(deny file-write*)") == 1 and lines.index("(deny file-write*)") < allow_at
+    for written in (layout.worktree, sandbox.private_temp(layout.private)):
+        assert _sub(written) in allow
+    assert _sub(layout.private) not in allow and _sub(layout.private) in agent_only and "process-path" in agent_only
+    for not_written in (layout.install, layout.tools, layout.home, layout.project):
+        assert _sub(not_written) not in allow
+    for device in ('(literal "/dev/null")', '(regex #"^/dev/tty")', '(regex #"^/dev/fd/")'):
+        assert device in allow
+
+
+@POSIX_ONLY
+def test_the_profile_keeps_the_agent_from_other_processes_and_your_keychain(tmp_path):
+    lines = _mac_wrap(_mac_layout(tmp_path))[0][2].splitlines()
+    assert "(deny process-info* (target others))" in lines
+    assert lines.index("(deny signal)") < lines.index("(allow signal (target same-sandbox))")
+    assert '(deny mach-lookup (global-name "com.apple.SecurityServer"))' in lines
+
+
+@POSIX_ONLY
+def test_no_read_rule_of_the_profile_is_without_filters(tmp_path):
+    """A bare (deny file-read*) would hide everything, and a bare (allow file-read*) would show it all."""
+    layout = _mac_layout(tmp_path)
+    for changes in ({}, {"hidden": [], "read_only": []}):
+        profile = _mac_wrap(layout, **changes)[0][2]
+        assert re.search(r"\((allow|deny) file-read[*a-z-]*\)", profile) is None
+        assert "(allow file-write*)" not in profile.splitlines()
+
+
+@POSIX_ONLY
+def test_the_mac_sandbox_needs_a_private_folder(tmp_path):
+    with pytest.raises(ValueError, match="private folder"):
+        _mac_wrap(_mac_layout(tmp_path), private={})
+
+
+@POSIX_ONLY
+def test_the_project_is_denied_only_for_a_worktree_inside_one(tmp_path):
+    layout = _mac_layout(tmp_path)
+    profile = _mac_wrap(layout, worktree=tmp_path / "elsewhere")[0][2]
+    first = _rules(profile, "deny", "file-read*")[0][1]
+    assert _sub(layout.home) in first and _sub(layout.project) not in first
+
+
+@POSIX_ONLY
+def test_each_folder_is_shown_once_and_one_that_is_missing_is_left_out(tmp_path):
+    layout = _mac_layout(tmp_path)
+    missing = layout.tools / "nowhere"
+    profile = _mac_wrap(layout, read_only=[layout.install, layout.install, missing])[0][2]
+    shown = [line for _, line in _rules(profile, "allow", "file-read*")]
+    assert shown[0].count(_sub(layout.install)) == 1 and _sub(missing) not in profile
+
+
+@POSIX_ONLY
+def test_an_agent_installed_in_a_credential_folder_keeps_its_install(tmp_path):
+    layout = _mac_layout(tmp_path)
+    install = layout.home / ".claude" / "local"  # where Claude Code installs itself
+    install.mkdir(parents=True)
+    profile = _mac_wrap(layout, read_only=[install, *layout.folders])[0][2]
+    hides = _rules(profile, "deny", "file-read*")[1][1]
+    assert _sub(install) in _rules(profile, "allow", "file-read*")[0][1]
+    assert _sub(layout.home / ".claude") not in hides  # it would only hide the install: the home is denied already
+    assert _sub(layout.home / ".claude.json") in hides and _sub(layout.home / ".ssh") in hides
+
+
+@POSIX_ONLY
+def test_a_path_with_a_quote_or_a_backslash_is_escaped_in_the_profile(tmp_path):
+    layout = _mac_layout(tmp_path)
+    odd = layout.worktree.parent / 'T"2\\x'
+    odd.mkdir()
+    profile = _mac_wrap(layout, worktree=odd)[0][2]
+    parent = os.path.realpath(layout.worktree.parent)
+    assert f'(subpath "{parent}/T\\"2\\\\x")' in profile
+    assert f'"{parent}/T"2' not in profile
+
+
+@POSIX_ONLY
+def test_what_the_network_needs_is_allowed_again_after_the_denies(tmp_path):
+    """As on Linux: a CA file in a hidden folder of a shared one, and one hidden by name, stay readable."""
+    layout = _mac_layout(tmp_path)
+    tools = Path(os.path.realpath(layout.tools))  # as shared_folders gives it
+    (tools / "config" / "corp").mkdir(parents=True)
+    ca, proxy = tools / "config" / "corp" / "ca.pem", tools / "proxy-ca.pem"
+    for path in (ca, proxy):
+        path.write_text("cert", encoding="utf-8")
+    hidden = [*layout.hidden, tools / "config", proxy]
+    env = {"NODE_EXTRA_CA_CERTS": str(ca), "SSL_CERT_FILE": str(proxy)}
+    profile = _mac_wrap(layout, env=env, hidden=hidden)[0][2]
+
+    hides_at, hides = _rules(profile, "deny", "file-read*")[1]
+    assert _sub(tools / "config") in hides and _sub(tools / "credentials.toml") in hides
+    assert _sub(proxy) not in hides  # a mask over it would break the agent's HTTPS
+    network_at, network = _rules(profile, "allow", "file-read*")[-1]
+    assert network_at > hides_at and _sub(ca) in network and _sub(proxy) in network
+    meta_at, meta = _rules(profile, "allow", "file-read-metadata")[-1]
+    assert meta_at > network_at and f'(literal "{tools / "config" / "corp"}")' in meta
+
+
+# ── Where the agent finds its private folder ─────────────────────────────────
+
+def test_where_the_agent_finds_its_private_folder(tmp_path):
+    host, inside = tmp_path / "handoff-codex-abc", Path("/home/ada/.codex")
+    assert sandbox.login_place("bwrap", host, inside) == inside  # mounted there
+    assert sandbox.login_place(MAC, host, inside) == Path(os.path.realpath(host))  # can't be moved: it's where it is
+    assert sandbox.login_place("/somewhere/sandbox-exec", host, inside) == Path(os.path.realpath(host))
+
+
+def test_the_macs_temp_folder_sits_beside_the_private_home_not_in_it(tmp_path):
+    host = tmp_path / "handoff-codex-abc"
+    assert sandbox.private_temp(Path("/x/h")) == Path("/x/h-tmp")
+    assert sandbox.private_temp(host).parent == host.parent
+
+
+# ── The real sandbox-exec ────────────────────────────────────────────────────
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS's")
+def test_a_real_sandbox_exec_hides_what_the_profile_denies_and_stops_writes(tmp_path):
+    program = sandbox.check()
+    assert program == "/usr/bin/sandbox-exec"
+    home = Path.home()
+    worktree = tmp_path / "shop" / ".handoff" / "worktrees" / "T-1"
+    private = tmp_path / "handoff-codex-abc"
+    worktree.mkdir(parents=True)
+    private.mkdir()
+    (worktree / "ok.txt").write_bytes(b"fine\n")
+    secret = tmp_path / "secret.txt"  # beside the project, in a folder the profile denies
+    secret.write_bytes(b"top secret\n")
+    folder = os.path.realpath(tmp_path)
+    if not any(folder.startswith(root + "/") for root in (*sandbox.MAC_HIDDEN, os.path.realpath(home))):
+        pytest.skip("pytest's temp folder isn't one the sandbox hides")
+
+    def run(*command):
+        env = dict(os.environ)
+        argv = sandbox.wrap(program, list(command), worktree=worktree, home=home, private={private: private},
+                            read_only=[], env=env, hidden=[])
+        return subprocess.run(argv, env=env, cwd=worktree, capture_output=True, text=True, encoding="utf-8",
+                              timeout=30)
+
+    assert secret.read_text(encoding="utf-8") == "top secret\n"  # you can read it; the agent can't
+    read = run("/bin/cat", str(secret))
+    assert read.returncode != 0 and "top secret" not in read.stdout
+    shown = run("/bin/cat", "ok.txt")
+    assert shown.returncode == 0 and shown.stdout == "fine\n"
+    blocked = tmp_path / "blocked.txt"
+    assert run("/usr/bin/touch", str(blocked)).returncode != 0 and not blocked.exists()
+    made = worktree / "made.txt"
+    assert run("/usr/bin/touch", str(made)).returncode == 0 and made.exists()
+
+
 # ── Codex's private login ────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -390,6 +671,17 @@ def test_the_login_is_copied_into_a_private_home(codex_home):
         assert login.home.stat().st_mode & 0o777 == 0o700
     login.cleanup()
     assert not login.home.exists()
+
+
+def test_cleaning_up_a_login_also_removes_the_macs_temp_folder_beside_it(codex_home):
+    (codex_home / "auth.json").write_text(_auth(), encoding="utf-8")
+    login = CodexLogin({})
+    login.prepare()
+    temp = sandbox.private_temp(login.home)
+    temp.mkdir()
+    (temp / "scratch.txt").write_text("left by a command", encoding="utf-8")
+    login.cleanup()
+    assert not login.home.exists() and not temp.exists()
 
 
 def test_an_api_key_in_the_environment_becomes_the_private_login(codex_home):
@@ -708,6 +1000,50 @@ def test_codex_runs_inside_the_sandbox_with_its_private_login(tmp_path, monkeypa
     assert CODEX.note in left and "You shared these folders with it, read-only" in left
 
 
+@POSIX_ONLY
+def test_codex_on_a_mac_finds_its_private_login_where_it_is(tmp_path, monkeypatch, codex_home):
+    """sandbox-exec can't move the private home to ~/.codex, so the agent is pointed at the folder itself."""
+    repo = tmp_path / "shop"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    (repo / "README.md").write_text("# Shop\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "-m", "init")
+    (codex_home / "auth.json").write_text(_auth(), encoding="utf-8")
+    monkeypatch.delenv("HANDOFF_DEPTH", raising=False)
+    board = Board.open(repo)
+    task, _ = board.create(HUMAN, "Compute the answer")
+    board.approve(HUMAN, task.id, "codex")
+    seen = {}
+
+    def fake_sandbox_exec(argv, stdin, env, timeout, cwd):
+        seen.update(argv=argv, env=dict(env))
+        seen["private"] = sorted(p.name for p in Path(env["CODEX_HOME"]).iterdir())
+        seen["temp"] = Path(env["TMPDIR"]).is_dir()
+        (Path(cwd) / "answer.txt").write_text("42\n", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "DONE: wrote answer.txt\nLEFT: nothing\nVERIFY: cat it", "")
+
+    worker = Worker(board, repo, "codex", runner=fake_sandbox_exec, command=str(_fake_agent(tmp_path / "codex")))
+    worker.check = lambda: None  # the sandbox itself is faked here
+    worker.bwrap = MAC
+    [result] = worker.run_pending()
+    assert result.ok, result.message
+
+    argv, env = seen["argv"], seen["env"]
+    inner = argv[3:]
+    assert argv[:2] == [MAC, "-p"] and inner[0] == os.path.realpath(str(tmp_path / "codex"))
+    host = env["CODEX_HOME"]
+    assert host == os.path.realpath(host) and Path(host).name.startswith("handoff-codex-")
+    assert host != str(Path.home() / ".codex") and seen["private"] == ["auth.json"]
+    assert env["HOME"] == str(Path.home()) and env["TMPDIR"] == host + "-tmp" and seen["temp"]
+    assert f'(subpath "{host}")' in argv[2]
+    # Codex's own sandbox can't start inside this one: its permission profile is replaced by no sandbox of its own
+    assert inner[1:4] == ["exec", "--sandbox", "danger-full-access"]
+    assert not any(word.startswith("permissions.handoff.") for word in inner)
+    assert not Path(host).exists() and not Path(env["TMPDIR"]).exists()  # both are removed after the run
+    assert git(repo, "show", "handoff/T-1:answer.txt").stdout == "42\n"
+
+
 def test_a_login_refreshed_before_a_timeout_still_goes_back(tmp_path, monkeypatch, codex_home):
     repo = tmp_path / "shop"
     repo.mkdir()
@@ -736,7 +1072,7 @@ def test_a_login_refreshed_before_a_timeout_still_goes_back(tmp_path, monkeypatc
 def test_codex_on_a_system_without_the_sandbox(tmp_path, monkeypatch):
     monkeypatch.delenv("HANDOFF_DEPTH", raising=False)
     monkeypatch.setattr(sandbox.sys, "platform", "win32")
-    with pytest.raises(WorkerUnavailable, match="Linux-only for now"):
+    with pytest.raises(WorkerUnavailable, match=r"Linux \(bubblewrap\) and macOS \(sandbox-exec\)"):
         Worker(None, tmp_path, "codex", command="codex").check()  # type: ignore[arg-type]
     assert worker_module.AGENTS["codex"] is CODEX
 
@@ -787,3 +1123,75 @@ def test_claude_runs_inside_the_sandbox_with_its_private_login(tmp_path, monkeyp
     assert "Git commands don't work here" in seen["stdin"]  # (it can't see the repository)
     assert git(repo, "show", "handoff/T-1:answer.txt").stdout == "42\n"
     assert CLAUDE.note in board.events(task.id)[-1].data["left"]
+
+
+# ── macOS: one profile for the agent and its commands ───────────────────────
+
+@POSIX_ONLY
+def test_only_the_agents_own_program_has_the_network_and_its_private_home(tmp_path):
+    layout = _mac_layout(tmp_path)
+    profile = _mac_wrap(layout)[0][2]
+    me = f'(process-path "{os.path.realpath(layout.agent)}")'
+    assert f"(deny network* (require-not {me}))" in profile
+    private = _sub(layout.private)
+    reads = [line for _, line in _rules(profile, "allow", "file-read*") if private in line]
+    writes = [line for _, line in _rules(profile, "allow", "file-write*") if private in line]
+    assert reads and all(me in line for line in reads)  # never for a command it runs
+    assert writes and all(me in line for line in writes)
+    # Started by sandbox-exec or by itself, never by a command; and never changed
+    assert f'(literal "{os.path.realpath(layout.agent)}")' in profile
+    assert '(process-path "/usr/bin/sandbox-exec")' in profile
+    assert f"(deny file-write* {_sub(layout.install)})" in profile
+
+
+@POSIX_ONLY
+def test_commands_cant_use_other_programs_to_leave(tmp_path):
+    profile = _mac_wrap(_mac_layout(tmp_path))[0][2]
+    services = [line for _, line in _rules(profile, "deny", "mach-lookup") if "require-not" in line]
+    assert services
+    for name in ("com.apple.coreservices.appleevents", "com.apple.coreservices.launchservicesd",
+                 "com.apple.pasteboard.1", "com.apple.cfprefsd.agent"):
+        assert f'"{name}"' in services[0]
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("program, header", [("node", b"\xcf\xfa\xed\xfe"), ("python3.12", b"\xcf\xfa\xed\xfe"),
+                                             ("bash", b"\xcf\xfa\xed\xfe"), ("claude", b"#!/usr/bin/env node\n")])
+def test_an_interpreter_or_a_script_cant_be_the_agent(tmp_path, program, header):
+    path = tmp_path / program
+    path.write_bytes(header + bytes(60))
+    with pytest.raises(sandbox.SandboxUnavailable, match="every command could use too"):
+        sandbox.agent_binary(str(path))
+
+
+def test_the_agents_own_sandbox_is_switched_off_inside_macos_one():
+    settings = json.dumps({"sandbox": {"enabled": True}, "apiKeyHelper": "cat '/x/key'", "disableAllHooks": True})
+    claude = sandbox._agent_argv(["claude", "-p", "--settings", settings, "--x"])
+    changed = json.loads(claude[3])
+    assert changed == {"sandbox": {"enabled": False}, "disableAllHooks": True} and claude[4] == "--x"
+    codex = sandbox._agent_argv(["codex", "exec", "--skip", "-c", 'default_permissions="handoff"',
+                                 "-c", 'permissions.handoff.extends=":workspace"',
+                                 "-c", 'permissions.handoff.filesystem={AGENT_HOME="none"}', "-c", 'x="y"', "-"])
+    assert codex == ["codex", "exec", "--sandbox", "danger-full-access", "--skip", "-c", 'x="y"', "-"]
+
+
+@POSIX_ONLY
+def test_an_api_key_reaches_claude_through_a_pipe_not_a_file_its_commands_can_read(tmp_path):
+    layout = _mac_layout(tmp_path)
+    key = layout.private / ".handoff-api-key"
+    settings = json.dumps({"sandbox": {"enabled": True}, "apiKeyHelper": f"cat {shlex.quote(str(key))}"})
+    argv = sandbox.wrap(MAC, [str(layout.agent), "-p", "--settings", settings], worktree=layout.worktree,
+                        home=layout.home, private={layout.private: layout.private}, read_only=[], env={}, hidden=[])
+    assert argv[:4] == [sys.executable, "-I", "-c", sandbox.KEY_PIPE] and argv[4] == str(key) and argv[5] == MAC
+    assert "apiKeyHelper" not in argv[-1]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.pipe and execv as on macOS and Linux")
+def test_the_key_pipe_gives_the_key_once(tmp_path):
+    key = tmp_path / "key"
+    key.write_bytes(b"sk-test-key")
+    reader = ("import os; fd = int(os.environ['CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR']); "
+              "print(os.read(fd, 100)); print(os.read(fd, 100))")
+    done = subprocess.run([sys.executable, "-I", "-c", sandbox.KEY_PIPE, str(key), sys.executable, "-c", reader],
+                          capture_output=True, text=True, timeout=30)
+    assert done.stdout.splitlines() == ["b'sk-test-key'", "b''"]

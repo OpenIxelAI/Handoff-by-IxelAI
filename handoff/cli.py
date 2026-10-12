@@ -1848,8 +1848,8 @@ def cmd_worker(argv: list[str]) -> int:
 
     parser = _parser("worker", "Run an agent headlessly on the tasks you approved (handoff approve), one at a "
                                "time, each in its own git worktree. The agent can read and edit files there and run "
-                               "commands, inside a sandbox with no network (Linux, with bubblewrap); where the "
-                               "sandbox can't run, Claude only reads and edits and Codex doesn't run. In the "
+                               "commands, inside a sandbox with no network (Linux with bubblewrap, or macOS); where "
+                               "the sandbox can't run, Claude only reads and edits and Codex doesn't run. In the "
                                "sandbox, nothing of yours outside the worktree is visible (system folders such as "
                                "/usr and /etc are, read-only). Nothing is pushed. Answers, reviews and pictures you "
                                "approved for it go through Ixel MAT.",
@@ -2432,6 +2432,11 @@ def _setup_remove(wanted: list[str]) -> int:
 
 # ── doctor ───────────────────────────────────────────────────────────────────
 
+# What the macOS sandbox can't stop (SECURITY.md, "The worker")
+MAC_ENV_NOTE = (". On a Mac its commands can still read your other programs' environment variables, so keep "
+                "tokens out of your shell's environment while it runs")
+
+
 def cmd_doctor(argv: list[str]) -> int:
     import json
     import os
@@ -2439,10 +2444,10 @@ def cmd_doctor(argv: list[str]) -> int:
     import sqlite3
 
     from handoff import hosts
-    from handoff.board import Board, BoardError, link_problem
+    from handoff.board import Board, BoardError, link_problem, owner_only_problem
     from handoff.project import ProjectError, board_path, gitignore_has_board, resolve_project
 
-    parser = _parser("doctor", "Check the project, the board and which apps have Handoff set up.")
+    parser = _parser("doctor","Check the project, the board and which apps have Handoff set up.")
     parser.add_argument("--json", action="store_true", help="print it as JSON")
     args = parser.parse_args(argv)
     problems = 0
@@ -2506,6 +2511,12 @@ def cmd_doctor(argv: list[str]) -> int:
                     line("✗", f"{item.name} is readable by others", f"mode {mode:o}; run: chmod {want:o} {item}")
                 elif before[item] & 0o077:
                     line("⚠", f"{item.name} was readable by others", f"mode {before[item]:o}; now {mode:o}")
+            loose = owner_only_problem(path.parent)
+            if loose is None:
+                line("✓", ".handoff is owner-only")
+            elif sys.platform == "win32":  # (on macOS and Linux, the loop above said it)
+                problems += 1
+                line("✗", ".handoff isn't owner-only", loose)
         if gitignore_has_board(root) or (root / ".handoff" / ".gitignore").exists():
             line("✓", "The board stays out of git")
         else:
@@ -2563,7 +2574,8 @@ def cmd_doctor(argv: list[str]) -> int:
             if worker.fallback_reason:
                 line("⚠", f"Worker ({agent})", f"ready, edit-only (no commands): {worker.fallback_reason}")
             elif worker.spec.access == "sandbox":
-                line("✓", f"Worker ({agent})", f"ready, in its sandbox: handoff approve T-12 {agent}")
+                line("✓", f"Worker ({agent})", f"ready, in its sandbox: handoff approve T-12 {agent}"
+                     + (MAC_ENV_NOTE if sys.platform == "darwin" else ""))
             else:
                 from handoff import adapters
                 line("✓", f"Worker ({agent})", f"ready; it {adapters.ACCESS[worker.spec.access]}: handoff approve "

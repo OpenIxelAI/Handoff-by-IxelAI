@@ -153,6 +153,75 @@ append_path_hint() {
   fi
 }
 
+offer_sandbox_tools() {
+  # Linux only: the worker's sandbox needs bubblewrap and socat. Says how to install what's missing, and
+  # runs that only when you're at a terminal and answer yes. Plain sh (no [[ ]], arrays or local): the tests
+  # run this function under /bin/sh. $1 and $2 are the os-release and AppArmor files, for the tests.
+  [ "$(uname -s)" = "Linux" ] || return 0
+  st_file="${1:-/etc/os-release}"
+  st_userns="${2:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+  st_missing=""
+  command -v bwrap >/dev/null 2>&1 || st_missing="bubblewrap"
+  if ! command -v socat >/dev/null 2>&1; then
+    st_missing="$st_missing${st_missing:+ }socat"
+  fi
+  [ -n "$st_missing" ] || return 0
+
+  st_id="" st_like=""
+  if [ -r "$st_file" ]; then
+    # shellcheck disable=SC1090
+    st_id="$(. "$st_file" && echo "${ID:-}")" || st_id=""
+    # shellcheck disable=SC1090
+    st_like="$(. "$st_file" && echo "${ID_LIKE:-}")" || st_like=""
+  fi
+  st_mgr=""
+  case " $st_id $st_like " in
+    *" debian "*|*" ubuntu "*) st_mgr="apt install" ;;
+    *" fedora "*|*" rhel "*|*" centos "*) st_mgr="dnf install" ;;
+    *" arch "*) st_mgr="pacman -S" ;;
+    *" suse "*|*" opensuse "*|*" opensuse-"*) st_mgr="zypper install" ;;
+    *" alpine "*) st_mgr="apk add" ;;
+  esac
+
+  case "$st_missing" in
+    *" "*) st_names="bubblewrap and socat" st_it="them" st_are="are" ;;
+    *)     st_names="$st_missing" st_it="it" st_are="is" ;;
+  esac
+  echo
+  echo "The worker's sandbox needs $st_names, which $st_are not installed here."
+  if [ -n "$st_mgr" ]; then
+    echo "  Install $st_it with:  sudo $st_mgr $st_missing"
+  else
+    echo "  Install $st_names with your system's package manager."
+  fi
+  st_flag=""
+  if [ -r "$st_userns" ]; then
+    read -r st_flag 2>/dev/null < "$st_userns" || true
+  fi
+  if [ "$st_flag" = "1" ]; then
+    echo "  On this system (Ubuntu 24.04 and later) AppArmor stops bubblewrap until it has a profile."
+    echo "  'handoff doctor' will print the one command that adds it."
+  fi
+
+  if [ -n "$st_mgr" ] && [ -t 0 ] && [ "${HANDOFF_INSTALL_YES:-}" != "0" ]; then
+    printf 'Install %s now? [y/N] ' "$st_it"
+    read -r st_answer || st_answer=""
+    case "$st_answer" in
+      y|Y|yes|Yes|YES)
+        # shellcheck disable=SC2086
+        if sudo $st_mgr $st_missing; then
+          echo "Installed $st_names."
+        else
+          echo "That didn't finish. When you're ready, run:"
+          echo "  sudo $st_mgr $st_missing"
+        fi ;;
+      *)
+        echo "Skipped. Run the command above when you're ready." ;;
+    esac
+  fi
+  return 0
+}
+
 VENV_PYTHON="$VENV_DIR/bin/python"
 # An environment from the last install that works is kept, with its own Python (below), so updating it needs
 # no other Python here. One is looked for only when there's no such environment, or you chose one.
@@ -273,3 +342,5 @@ echo "Update:  handoff update"
 echo "Remove:  handoff setup --remove, then: rm -rf \"$INSTALL_ROOT\" \"$WRAPPER_PATH\""
 echo "If your shell cannot find 'handoff' yet, restart the shell or run:"
 echo "  export PATH=\"$BIN_DIR:\$PATH\""
+
+offer_sandbox_tools
