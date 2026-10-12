@@ -11,9 +11,17 @@
    "codex:gpt-5.5",
    "kimi:kimi-k3",
    "cline:claude-sonnet-5-5",
+   "ollama:qwen3.6:27b",
+   "ollama:qwen3.6:35b",
    "opencode:opencode/step-5-preview-free",
    "claude:claude-haiku-5-5",
+   "ollama:gpt-oss:120b",
+   "ollama:qwen3-coder:30b",
    "codex:gpt-6-luna",
+   "ollama:gpt-oss:20b",
+   "ollama:granite4.2:8b",
+   "ollama:qwen3.5:9b",
+   "ollama:qwen2.5-coder:14b",
    "ollama:qwen3:4b-instruct",
    "lmstudio:qwen3-4b-instruct-2507"
   ],
@@ -21,18 +29,25 @@
    "claude:claude-fable-5-1",
    "claude:claude-opus-5-5",
    "codex:gpt-6-astra",
+   "kimi:kimi-k3",
    "claude:claude-sonnet-5-5",
    "codex:gpt-6.1-sol",
-   "claude:claude-haiku-5-5"
+   "ollama:gpt-oss:120b",
+   "ollama:qwen3.6:27b",
+   "claude:claude-haiku-5-5",
+   "ollama:deepseek-r1:14b"
   ],
   "review": [
    "claude:claude-opus-5-5",
    "codex:gpt-6-astra",
    "claude:claude-fable-5-1",
    "gemini:gemini-3.1-pro-preview",
+   "kimi:kimi-k3",
    "grok:grok-4.7",
    "claude:claude-sonnet-5-5",
    "antigravity:gemini-3.1-pro-preview",
+   "ollama:gpt-oss:120b",
+   "ollama:qwen3.6:27b",
    "local:"
   ],
   "writing": [
@@ -40,9 +55,12 @@
    "claude:claude-fable-5-1",
    "codex:gpt-6-astra",
    "gemini:gemini-3.1-pro-preview",
+   "kimi:kimi-k3",
    "grok:grok-4.7",
    "claude:claude-sonnet-5-5",
    "antigravity:gemini-3.1-pro-preview",
+   "ollama:qwen3.6:27b",
+   "ollama:gemma4:12b",
    "local:"
   ],
   "images": [
@@ -57,6 +75,90 @@
    "minimax:minimax-h3",
    "flux:flux-3",
    "gemini:gemini-omni-flash-1.1"
+  ]
+ },
+ "tiers": {
+  "top": [
+   {
+    "model": "claude:claude-fable-5-1",
+    "note": "the best planner; the dearest, so for hard tasks"
+   },
+   {
+    "model": "claude:claude-opus-5-5",
+    "note": "plans and reviews well at about 40% of Fable's price"
+   },
+   {
+    "model": "codex:gpt-6-astra",
+    "note": "on a ChatGPT plan"
+   },
+   {
+    "model": "kimi:kimi-k3",
+    "note": "open (about 2.8T, 104B active): the best open planner; Kimi's own service, or a very large GPU server"
+   },
+   {
+    "model": "DeepSeek V4 Pro / V4.1 Flash",
+    "note": "open (1.6T and 552B): on a hosted open-model server"
+   },
+   {
+    "model": "GLM-5.3",
+    "note": "open (753B): on a hosted open-model server"
+   },
+   {
+    "model": "MiniMax M3",
+    "note": "open (428B, 23B active): on a hosted open-model server"
+   }
+  ],
+  "mid": [
+   {
+    "model": "claude:claude-sonnet-5-5",
+    "note": "the best builder for its price"
+   },
+   {
+    "model": "codex:gpt-6-sol",
+    "note": "on a ChatGPT plan"
+   },
+   {
+    "model": "ollama:qwen3.6:27b",
+    "note": "open, 27B: needs a 32 GB Mac or a 24 GB GPU"
+   },
+   {
+    "model": "ollama:qwen3.6:35b",
+    "note": "open, 35B (3B active): fast for its size; 32 GB or more"
+   },
+   {
+    "model": "ollama:qwen3-coder:30b",
+    "note": "open, 30B (3.3B active): 32 GB or more"
+   },
+   {
+    "model": "ollama:gpt-oss:120b",
+    "note": "open, 117B (5.1B active): 80 GB or more"
+   }
+  ],
+  "low": [
+   {
+    "model": "claude:claude-haiku-5-5",
+    "note": "small steps, very cheap"
+   },
+   {
+    "model": "opencode:opencode/step-5-preview-free",
+    "note": "free through OpenCode"
+   },
+   {
+    "model": "ollama:qwen3.5:9b",
+    "note": "open, 9B: runs on a 16 GB Mac"
+   },
+   {
+    "model": "ollama:qwen2.5-coder:14b",
+    "note": "open, 14B: the most a 16 GB Mac runs well"
+   },
+   {
+    "model": "ollama:granite4.2:8b",
+    "note": "open, 8B: runs on a 16 GB Mac"
+   },
+   {
+    "model": "ollama:qwen3:4b-instruct",
+    "note": "open, 4B: fast on any Mac; one exact change at a time"
+   }
   ]
  }
 }

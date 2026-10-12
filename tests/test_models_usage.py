@@ -169,7 +169,9 @@ def test_a_chain_plans_with_the_biggest_and_trickles_the_steps_down(board, repo)
     [ran] = worker(board, repo, agent).run_pending()
 
     assert ran.ok, ran.message
-    assert [c["model"] for c in agent.calls] == [FABLE, OPUS, HAIKU]
+    # and back up: Opus checks what the smaller Haiku did (its reply sends nothing up to Fable)
+    assert [c["model"] for c in agent.calls] == [FABLE, OPUS, HAIKU, OPUS]
+    assert "## Check the work" in agent.calls[3]["stdin"] and "test_calc.py" in agent.calls[3]["stdin"]
     planner = agent.calls[0]
     assert tools(planner["argv"]) == list(PLANNER_TOOLS) and "--allowedTools" not in planner["argv"]
     assert "Don't change any files yourself" in planner["stdin"] and f"{OPUS}, {HAIKU}" in planner["stdin"]
@@ -182,11 +184,12 @@ def test_a_chain_plans_with_the_biggest_and_trickles_the_steps_down(board, repo)
     assert set(git(repo, "show", "--name-only", "--format=", "handoff/T-1").stdout.split()) == {"test_calc.py"}
     # what each model used, and the total
     assert set(ran.used["models"]) == {FABLE, OPUS, HAIKU}
-    assert usage.total_cost(ran.used) == pytest.approx(0.783)
+    assert usage.total_cost(ran.used) == pytest.approx(0.903)  # (Opus twice: its step, and the check)
     handoff = board.events(t.id)[-1]
     assert handoff.data["done"].startswith(f"{FABLE} planned 2 steps.")
     assert f"Step 2 of 2, by {HAIKU} (about $0.0030): test it" in handoff.data["done"]
-    assert handoff.data["left"].startswith("nothing") and "Total: $0.7830" in handoff.data["left"]
+    assert handoff.data["left"].startswith("nothing") and "Total: $0.9030" in handoff.data["left"]
+    assert f"Check, by {OPUS} (about $0.1200): step 2 (changed no files)" in handoff.data["done"]
     assert sorted(handoff.data["files"]) == ["calc.py", "test_calc.py"]
 
 
@@ -200,12 +203,28 @@ def test_a_plan_the_worker_cant_read_gives_the_whole_task_to_the_next_model(boar
     assert "didn't write a plan the worker could read" in board.events(t.id)[-1].data["left"]
 
 
-def test_a_failed_step_stops_the_chain_and_keeps_what_came_before(board, repo):
+def test_a_step_a_smaller_model_fails_goes_back_up_to_the_bigger_one(board, repo):
     t = task(board)
     board.approve(HUMAN, t.id, "claude", models=[FABLE, OPUS, HAIKU])
     agent = Agent({FABLE: plan_reply(), OPUS: result("DONE: wrote calc.py", OPUS),
                    HAIKU: result("Rate limited.", HAIKU, 0.0, 0, error=True)},
                   {OPUS: write_calc}, codes={HAIKU: 1})
+    [ran] = worker(board, repo, agent).run_pending()
+    assert ran.ok, ran.message
+    assert [c["model"] for c in agent.calls] == [FABLE, OPUS, HAIKU, OPUS]  # (no check: Opus did every step)
+    handoff = board.events(t.id)[-1]
+    assert f"{HAIKU} couldn't do step 2" in handoff.data["left"] and f"so {OPUS} did it" in handoff.data["left"]
+    assert f"Step 2 of 2, by {OPUS}" in handoff.data["done"]
+
+
+def test_a_failed_step_by_the_biggest_step_model_stops_the_chain_and_keeps_what_came_before(board, repo):
+    t = task(board)
+    plan = {"steps": [{"model": HAIKU, "title": "write calc.py", "instructions": "Write calc.py."},
+                      {"model": OPUS, "title": "test it", "instructions": "Write test_calc.py."}]}
+    board.approve(HUMAN, t.id, "claude", models=[FABLE, OPUS, HAIKU])
+    agent = Agent({FABLE: plan_reply(plan), HAIKU: result("DONE: wrote calc.py", HAIKU),
+                   OPUS: result("Rate limited.", OPUS, 0.0, 0, error=True)},
+                  {HAIKU: write_calc}, codes={OPUS: 1})
     [ran] = worker(board, repo, agent).run_pending()
     assert not ran.ok and "Step 2 of 2" in ran.message and "Rate limited." in ran.message
     assert "committed on handoff/T-1" in ran.message
@@ -328,7 +347,8 @@ def test_each_model_in_a_chain_thinks_at_its_own_effort(board, repo):
                   {OPUS: write_calc, HAIKU: write_test})
     [ran] = worker(board, repo, agent).run_pending()
     assert ran.ok, ran.message
-    assert [(c["model"], c["effort"]) for c in agent.calls] == [(FABLE, "max"), (OPUS, "high"), (HAIKU, None)]
+    assert [(c["model"], c["effort"]) for c in agent.calls] == [(FABLE, "max"), (OPUS, "high"), (HAIKU, None),
+                                                                (OPUS, "high")]  # (the check)
     planner = agent.calls[0]["stdin"]
     assert f"{OPUS} (high effort), {HAIKU}" in planner  # it knows how hard each one thinks
     assert "Read only what you need" in planner and "don't read the whole project" in planner

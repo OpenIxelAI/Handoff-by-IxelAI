@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from handoff import adapters, api, local_model, usage, worker
-from handoff.board import HUMAN, Board
+from handoff.board import HUMAN, Board, BoardError
 from handoff.worker import AGENTS, Worker, WorkerUnavailable
 
 REPLY = "DONE: added src/hello.py\nLEFT: nothing\nVERIFY: python src/hello.py"
@@ -635,3 +635,90 @@ def test_an_edit_can_be_approved_for_any_worker_through_the_api(repo, server, co
     assert reply["ok"], reply
     bad = call("approve", repo, task="T-1", agent="ollama", models=["qwen3:4b"], efforts={"qwen3:4b": "max"})
     assert not bad["ok"]
+
+
+# ── A chain whose steps run on other agents ──────────────────────────────────
+
+def claude_result(reply, model, cost=0.01):
+    return json.dumps({"type": "result", "is_error": False, "result": reply, "total_cost_usd": cost,
+                       "modelUsage": {model: {"inputTokens": 10, "outputTokens": 100, "cacheReadInputTokens": 0,
+                                              "cacheCreationInputTokens": 0, "costUSD": cost}}})
+
+
+def test_a_chain_gives_a_small_step_to_a_free_model_on_another_agent_and_checks_it(tmp_path, board, repo,
+                                                                                  monkeypatch):
+    worker.load_agents()
+    monkeypatch.setitem(AGENTS, "opencode", adapters.presets()["opencode"])
+    fake_program(tmp_path, "opencode", OPENCODE_HELP)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin") + os.pathsep + os.environ.get("PATH", ""))
+    free = "opencode:opencode/step-5-preview-free"
+    plan = {"steps": [{"model": free, "title": "write hello", "instructions": "Write src/hello.py: print('hi')."}]}
+    calls = []
+
+    def runner(argv, stdin, env, timeout, cwd):
+        calls.append({"argv": list(argv), "stdin": stdin})
+        if "opencode" in os.path.basename(argv[0]):
+            write_hello(Path(cwd))
+            return subprocess.CompletedProcess(argv, 0, opencode_events(), "")
+        model = argv[argv.index("--model") + 1]
+        reply = f"```json\n{json.dumps(plan)}\n```" if "## Check the work" not in stdin else \
+            "DONE: nothing to fix\nLEFT: nothing\nVERIFY: python src/hello.py\nESCALATE: no"
+        return subprocess.CompletedProcess(argv, 0, claude_result(reply, model), "")
+
+    task = approve(board, "claude", models=["claude-opus-5-5", "claude-sonnet-5-5", free])
+    w = Worker(board, repo, "claude", runner=runner, command="claude", sandboxed=False)
+    [result] = w.run_pending()
+    assert result.ok, result.message
+    planner = calls[0]["stdin"]
+    assert f"{free} is small" in planner and "short, exact directions" in planner
+    step = calls[1]
+    assert "opencode" in os.path.basename(step["argv"][0])
+    assert step["argv"][step["argv"].index("--model") + 1] == "opencode/step-5-preview-free"
+    assert "You're opencode" in step["stdin"] and "Do only step 1" in step["stdin"]
+    check = calls[2]  # back up: Sonnet checks what the free model did, with its diff
+    assert check["argv"][check["argv"].index("--model") + 1] == "claude-sonnet-5-5"
+    assert "## Check the work" in check["stdin"] and "+print('hi')" in check["stdin"]
+    assert len(calls) == 3  # nothing went up to Opus
+    done = board.events(task.id)[-1].data["done"]
+    assert "Step 1 of 1, by opencode (opencode/step-5-preview-free)" in done
+    assert "Check, by claude-sonnet-5-5" in done
+    assert git(repo, "show", f"handoff/{task.ref}:src/hello.py").stdout == "print('hi')\n"
+
+
+def test_what_a_check_cant_fix_goes_up_to_the_planner(tmp_path, board, repo):
+    plan = {"steps": [{"model": "claude-haiku-5-5", "title": "write hello", "instructions": "Write src/hello.py."}]}
+    calls = []
+
+    def runner(argv, stdin, env, timeout, cwd):
+        model = argv[argv.index("--model") + 1]
+        calls.append((model, stdin))
+        if model == "claude-opus-5-5" and "## Fix what the check found" in stdin:
+            (Path(cwd) / "src" / "hello.py").write_text("print('hi')  # fixed\n", encoding="utf-8")
+            reply = "DONE: fixed the design"
+        elif model == "claude-opus-5-5":
+            reply = f"```json\n{json.dumps(plan)}\n```"
+        elif "## Check the work" in stdin:
+            reply = "DONE: looked\nESCALATE: The whole approach is wrong: it should be a module, not a script."
+        else:
+            write_hello(Path(cwd))
+            reply = "DONE: wrote it"
+        return subprocess.CompletedProcess(argv, 0, claude_result(reply, model), "")
+
+    task = approve(board, "claude", models=["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"])
+    [result] = Worker(board, repo, "claude", runner=runner, command="claude", sandboxed=False).run_pending()
+    assert result.ok, result.message
+    assert [m for m, _ in calls] == ["claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]
+    assert "it should be a module, not a script" in calls[3][1]
+    done = board.events(task.id)[-1].data["done"]
+    assert "Fix, by claude-opus-5-5" in done and "fixed the design" in done
+    assert "# fixed" in git(repo, "show", f"handoff/{task.ref}:src/hello.py").stdout
+    log = git(repo, "log", "--format=%s", f"handoff/{task.ref}").stdout
+    assert f"{task.ref} fix: claude-opus-5-5 fixed what the check sent up" in log
+
+
+def test_a_chain_plans_on_its_own_agent(board, repo, monkeypatch):
+    monkeypatch.setitem(AGENTS, "ollama", adapters.presets()["ollama"])
+    task, _ = board.create(HUMAN, "Task", "")
+    with pytest.raises(BoardError, match="first model plans"):
+        api.op_approve({"project": str(repo), "args": {"task": task.ref, "agent": "claude",
+                                                         "models": ["ollama:qwen3:4b", "claude-haiku-5-5"]}})

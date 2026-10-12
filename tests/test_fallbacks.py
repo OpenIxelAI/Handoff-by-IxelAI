@@ -90,7 +90,7 @@ def test_not_out_of_usage(said):
 
 def test_the_published_rankings_file_matches_the_built_in_one():
     data = json.loads((Path(rankings.__file__).with_name("rankings.json")).read_text(encoding="utf-8"))
-    assert data == {"updated": rankings.UPDATED, "ranks": rankings.RANKS}
+    assert data == {"updated": rankings.UPDATED, "ranks": rankings.RANKS, "tiers": rankings.TIERS}
     assert rankings.check(data) == rankings.RANKS
 
 
@@ -130,7 +130,7 @@ def test_a_model_is_never_replaced_by_a_dearer_one():
     assert rankings.fallbacks("coding", "claude", OPUS, None, rankings.RANKS)[0] == f"claude:{SONNET}"
     # Haiku goes only to what costs no more, or is free
     found = rankings.fallbacks("coding", "claude", HAIKU, None, rankings.RANKS)
-    assert not any(m in f for f in found for m in (SONNET, OPUS, FABLE)) and "ollama:qwen3:4b-instruct" in found
+    assert not any(m in f for f in found for m in (SONNET, OPUS, FABLE)) and any("ollama:" in f for f in found)
     # Fable, the dearest, can go to the cheaper Claude models
     assert rankings.fallbacks("coding", "claude", FABLE, None, rankings.RANKS)[:2] == [f"claude:{SONNET}",
                                                                                       f"claude:{OPUS}"]
@@ -257,7 +257,8 @@ def test_a_chain_goes_on_when_a_step_model_is_out_of_usage(board, repo):
                    HAIKU: result("DONE: checked it\nLEFT: nothing", HAIKU)}, out={OPUS}, actions={SONNET: write_calc})
     [ran] = worker(board, repo, agent).run_pending()
     assert ran.ok, ran.message
-    assert [c["model"] for c in agent.calls] == [FABLE, OPUS, SONNET, HAIKU]
+    # (and Opus, benched, doesn't check Haiku's step: Sonnet, in its place, does)
+    assert [c["model"] for c in agent.calls] == [FABLE, OPUS, SONNET, HAIKU, SONNET]
     handback = board.events(t.id)[-1]
     assert f"Step 1 of 2, by {SONNET}" in handback.data["done"]
     assert f"{OPUS} hit its usage limit, so {SONNET} took over." in handback.data["left"]

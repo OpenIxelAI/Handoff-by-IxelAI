@@ -1495,7 +1495,7 @@ def cmd_approve(argv: list[str]) -> int:
     from handoff.board import HUMAN, RUN_KINDS, TERMINAL
     from handoff.crew import board_name
     from handoff.sanitize import clean_line
-    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem, names
+    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem, names, step_agent
 
     parser = _parser("approve", "Approve a task for an agent to run, once: claude or codex change files in their "
                                 "own git worktree, in a sandbox (where it can't run, Claude only edits files), and so "
@@ -1577,6 +1577,9 @@ def cmd_approve(argv: list[str]) -> int:
                     "model).")
     if models and len(models) > 1 and agent not in CHAIN_AGENTS:
         parser.fail(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}. For {agent}, name one with --model.")
+    if models and len(models) > 1 and step_agent(models[0], agent)[0] != agent:
+        parser.fail(f"A chain's first model plans, on {agent}; the models after it can run on other agents, like "
+                    "ollama:qwen3:4b-instruct.")
     if effort_problem(agent, efforts):
         parser.fail(effort_problem(agent, efforts))
     if args.kind != "edit" and board_name(agent):  # (asks Ixel MAT who it has; no model is asked anything)
@@ -1664,11 +1667,21 @@ def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: P
         have = {name for name, spec in AGENTS.items()
                 if (spec.kind == "local" or (spec.command and adapters.find_on_path(spec.command)))
                 and (not spec.needs_ok or adapters.enabled(name))}
+        served: dict[str, set[str]] = {}
+
+        def usable(name: str, model: str) -> bool:  # a model on your computer only if its server has it
+            spec = AGENTS.get(name)
+            if not spec or spec.kind != "local" or not model:
+                return True
+            if name not in served:
+                from handoff.worker import Worker
+                served[name] = set(Worker(None, root, name).list_models())  # type: ignore[arg-type]
+            return model in served[name]
         if models and len(models) > 1:
-            found = rankings.fallbacks("planning", agent, models[0], have) + \
-                rankings.fallbacks("coding", agent, models[1], have)
+            found = rankings.fallbacks("planning", agent, models[0], have, usable=usable) + \
+                rankings.fallbacks("coding", agent, models[1], have, usable=usable)
             return list(dict.fromkeys(found))[:MAX_FALLBACKS]
-        return rankings.fallbacks("coding", agent, models[0] if models else None, have)
+        return rankings.fallbacks("coding", agent, models[0] if models else None, have, usable=usable)
     from handoff import asks
     from handoff.board import safe_name
     roster = asks.ixel_roster(root)
@@ -1689,7 +1702,7 @@ def _models(parser, args) -> tuple[list[str] | None, dict[str, str] | None]:
     if args.chain and len(items) < 2:
         parser.fail("A chain is two or more models, biggest first, like: --chain claude-opus-5-5,claude-haiku-5-5")
     from handoff import adapters
-    from handoff.worker import BUILT_IN, CLAUDE_EFFORTS, CODEX_EFFORTS
+    from handoff.worker import AGENTS, BUILT_IN, CLAUDE_EFFORTS, CODEX_EFFORTS
     # (a colon is also part of some models' names, like Ollama's qwen3:4b: what follows the last one is an effort
     # only when it's a level some agent takes)
     levels = {*CLAUDE_EFFORTS, *CODEX_EFFORTS, *adapters.OPENCODE_EFFORTS, *adapters.CLINE_EFFORTS,
@@ -1703,7 +1716,9 @@ def _models(parser, args) -> tuple[list[str] | None, dict[str, str] | None]:
         level = level.lower()
         if not name or level not in levels:
             name, level = item.strip(), ""
-        names.append(name.lower() if agent in BUILT_IN else name)
+        # (a model on another agent, like ollama:Qwen/Qwen3-Coder-30B, keeps its name as that agent lists it)
+        other = name.partition(":")[0] in AGENTS and name.partition(":")[0] != agent
+        names.append(name.lower() if agent in BUILT_IN and not other else name)
         if level or effort:
             efforts[name] = level or effort
     models = check_models(names)
@@ -2047,6 +2062,7 @@ def cmd_rankings(argv: list[str]) -> int:
     jobs = [args.job] if args.job else list(rankings.JOBS)
     if args.json:
         print(json.dumps({"updated": updated, "ranks": {j: ranks.get(j, []) for j in jobs},
+                          "tiers": rankings.TIERS, "tier_words": rankings.TIER_WORDS, "hardware": rankings.HARDWARE,
                           "sources": [{"name": n, "url": u} for n, u in rankings.SOURCES]}, indent=2))
         return 0
     print_banner()
@@ -2055,6 +2071,14 @@ def cmd_rankings(argv: list[str]) -> int:
         console.print(f"\n  [{C['blue']}]{escape(rankings.JOBS[job].capitalize())}[/]")
         for n, entry in enumerate(ranks.get(job, []), 1):
             console.print(f"    {n:>2}. {escape(rankings.shown([entry]))}", soft_wrap=True)
+    if not args.job:
+        console.print(f"\n  [{C['blue']}]Where each fits in a chain[/]")
+        for tier, entries in rankings.TIERS.items():
+            console.print(f"    [bold]{escape(rankings.TIER_WORDS[tier])}[/]")
+            for item in entries:
+                name = rankings.shown([item["model"]]) if ":" in item["model"] else item["model"]
+                console.print(f"      {escape(name)}  [{C['dim']}]{escape(item['note'])}[/]", soft_wrap=True)
+        console.print(f"    [{C['dim']}]{escape(rankings.HARDWARE)}[/]", soft_wrap=True)
     console.print(f"\n  [{C['dim']}]Sources:[/]")
     for name, url in rankings.SOURCES:
         console.print(f"    [{C['dim']}]{escape(name)}{' ' + escape(url) if url else ''}[/]", soft_wrap=True)

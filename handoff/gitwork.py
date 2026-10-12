@@ -21,7 +21,7 @@ from typing import Callable, Iterator
 
 from handoff.board import Changed, task_of_name
 from handoff.proc import find_on_path
-from handoff.sanitize import clean_line, find_secret, find_token
+from handoff.sanitize import clean_line, clean_text, find_secret, find_token
 
 WORKTREES = Path(".handoff") / "worktrees"
 _no_hooks: Path | None = None
@@ -389,6 +389,14 @@ def commit_all(root: Path, worktree: Worktree, message: str) -> str | None:
 def changed_files(root: Path, worktree: Worktree) -> list[str]:
     out = _git(root, ["diff", "--no-ext-diff", "--name-only", "-z", worktree.base, "HEAD"], worktree=worktree).stdout
     return [clean_line(name) for name in out.split("\0") if name]
+
+
+def diff_since(root: Path, worktree: Worktree, since: str | None = None) -> str:
+    """What the branch changed since `since` (its base, if None), as a plain diff with no colour or external
+    diff tool: what a chain's checker reads (sanitized and fenced by the caller)."""
+    out = _git(root, ["diff", "--no-ext-diff", "--no-color", "--no-textconv", since or worktree.base, "HEAD"],
+               worktree=worktree).stdout
+    return clean_text(out)
 
 
 _SAFE_REF = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-")

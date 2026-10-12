@@ -594,7 +594,7 @@ def _work_left(root: Path, ref: str) -> list[str]:
 
 
 def op_approve(request: dict) -> dict:
-    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem, names
+    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem, names, step_agent
     board = _board(_project(request))
     args = request.get("args", {})
     agent = _name(args.get("agent"), "agent")
@@ -615,6 +615,8 @@ def op_approve(request: dict) -> dict:
         raise ApiError("usage", "args.models must be a list of model names, biggest first.")
     if models is not None and len(models) > 1 and agent not in CHAIN_AGENTS:
         raise BoardError(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}; {agent} takes one model.")
+    if models and len(models) > 1 and isinstance(models[0], str) and step_agent(models[0], agent)[0] != agent:
+        raise BoardError(f"A chain's first model plans, on {agent}; the models after it can run on other agents.")
     efforts = args.get("efforts")
     if efforts is not None and not isinstance(efforts, dict):
         raise ApiError("usage", 'args.efforts must be an object: a level for each model, like {"claude-opus-5-5": '
@@ -650,11 +652,13 @@ def op_fallbacks(request: dict) -> dict:
 
 
 def op_rankings(request: dict) -> dict:
-    """Which models are best at what (rankings.py): `ranks` per job, best first, what each job is, how current
-    they are, and where they come from."""
+    """Which models are best at what (rankings.py): `ranks` per job, best first, what each job is, where each
+    model fits in a chain (`tiers`: top, mid, low, open models with what it takes to run them), how current they
+    are, and where they come from."""
     from handoff import rankings
     ranks, updated = rankings.load()
-    return {"updated": updated, "jobs": dict(rankings.JOBS), "ranks": ranks,
+    return {"updated": updated, "jobs": dict(rankings.JOBS), "ranks": ranks, "tiers": rankings.TIERS,
+            "tier_words": dict(rankings.TIER_WORDS), "hardware": rankings.HARDWARE,
             "sources": [{"name": n, "url": u} for n, u in rankings.SOURCES]}
 
 
