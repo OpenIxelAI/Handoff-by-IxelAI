@@ -1739,8 +1739,8 @@ def cmd_worker(argv: list[str]) -> int:
 
     parser = _parser("worker", "Run an agent headlessly on the tasks you approved (handoff approve), one at a "
                                "time, each in its own git worktree. The agent can read and edit files there and run "
-                               "commands, inside a sandbox with no network (Linux, with bubblewrap); where the "
-                               "sandbox can't run, Claude only reads and edits and Codex doesn't run. In the "
+                               "commands, inside a sandbox with no network (Linux with bubblewrap, or macOS); where "
+                               "the sandbox can't run, Claude only reads and edits and Codex doesn't run. In the "
                                "sandbox, nothing of yours outside the worktree is visible (system folders such as "
                                "/usr and /etc are, read-only). Nothing is pushed. Answers, reviews and pictures you "
                                "approved for it go through Ixel MAT.",

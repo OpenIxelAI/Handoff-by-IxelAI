@@ -27,9 +27,10 @@ in your project, and Handoff never listens on the network.
   work on its own.
 - It isn't a model or a hosted service, and it calls no model itself. It runs the agents, subscriptions, API
   keys and local models you already have.
-- The sandbox that lets an agent run your tests and builds needs Linux with bubblewrap. On macOS and Windows,
-  Claude Code, OpenCode and local models only edit files for now. Kimi, Cline and OpenClaw run only once you
-  enable them, and then with their own permissions: commands as you, with the network.
+- The sandbox that lets an agent run your tests and builds is bubblewrap on Linux and the built-in
+  sandbox-exec on macOS. On Windows, Claude Code, OpenCode and local models only edit files for now. Kimi,
+  Cline and OpenClaw run only once you enable them, and then with their own permissions: commands as you,
+  with the network.
 
 ## Install
 
@@ -102,9 +103,9 @@ handoff approve T-7 claude --chain claude-opus-5-5,claude-sonnet-5-5,ollama:qwen
   shows the same pages in a browser. There you can approve runs with a model picker, see what each run used and
   cost, and merge with the Merge button.
 
-**On macOS and Windows the worker is edit-only for now.** Claude Code, OpenCode and local models change files
-but run no commands, tests or builds, and Codex needs the sandbox. The sandbox that runs your tests and builds
-needs Linux with bubblewrap.
+**On Windows the worker is edit-only for now.** Claude Code, OpenCode and local models change files but run
+no commands, tests or builds, and Codex doesn't run. On Linux (with bubblewrap) and macOS (its built-in
+sandbox-exec, nothing to install), the agent runs in the sandbox that runs your tests and builds.
 
 ### If a run fails
 

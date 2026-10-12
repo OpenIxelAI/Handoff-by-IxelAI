@@ -1,10 +1,12 @@
-"""The worker's OS sandbox on Linux: bubblewrap around the agent.
+"""The worker's OS sandbox: bubblewrap on Linux, sandbox-exec on macOS, around the agent.
 
 The agent's own sandbox (Codex's `workspace-write`) blocks the network and
 writes outside the worktree for the commands the agent runs, but not reads:
 left to itself, a command can read ~/.ssh or any other file you can. So the
-worker runs the agent inside bubblewrap, which shows it a filesystem with
-nothing of yours in it:
+worker runs the agent inside an OS sandbox of its own, which shows it nothing
+of yours.
+
+On Linux, bubblewrap shows it a filesystem with nothing of yours in it:
 
 - the system (/usr, /etc, /opt and the like), read-only;
 - the agent's own install (and Node's), read-only;
@@ -14,6 +16,25 @@ nothing of yours in it:
 - a private home for the agent (its login, and nothing else), read-write;
 - an empty /tmp and an empty home; every other home, /root, /mnt, /media,
   /var and the rest of the project are simply not there.
+
+On macOS there is one filesystem and no way to mount over a part of it, so
+sandbox-exec runs the agent under a profile that denies what bubblewrap
+leaves out, and allows back what the agent needs:
+
+- reads of /Users, /Volumes, your home, the project, /private/tmp,
+  /private/var/folders and /private/var/root are denied, except the
+  worktree, the private home and its temp folder, the agent's install, the
+  folders you share and what the network needs. The rest of the system
+  (/usr, /Applications, /Library, /opt) stays readable;
+- credential folders in your home, and the files hidden in shared folders,
+  are denied again after that, so an install or a share can't open them;
+- writes are denied except in the worktree, the private home, its temp
+  folder, /dev/null and the terminal;
+- the agent can't look at or signal processes outside the sandbox, nor
+  reach the security server that opens your keychain.
+
+The private home can't be moved on macOS, so the agent finds it where it is
+(`login_place`); its temp folder is beside it (`private_temp`).
 
 The network stays shared, because the agent must reach its model API; the
 agent's own sandbox takes the network away from the commands it runs.
@@ -34,6 +55,8 @@ from handoff.proc import Stopped, find_on_path, run_tree
 SYSTEM_READ_ONLY = ("/usr", "/etc", "/opt", "/nix", "/snap", "/srv")
 LIB_DIRS = ("/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32")
 HIDDEN = ("/tmp", "/home", "/root", "/mnt", "/media", "/run", "/var")
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+MAC_HIDDEN = ("/Users", "/Volumes", "/private/tmp", "/private/var/folders", "/private/var/root")
 CERT_ENV = ("SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 APPARMOR_USERNS = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
 APPARMOR_FILE = "/etc/apparmor.d/bwrap"
@@ -173,10 +196,14 @@ def _install_hint(package: str) -> str:
 
 
 def check(needs: tuple[str, ...] = ()) -> str:
-    """The bwrap command, once it has shown it can start a sandbox here. `needs`: other programs the agent's
-    own sandbox uses inside this one (Claude Code's: socat)."""
+    """The sandbox program (bwrap, or sandbox-exec on macOS), once it has shown it can start a sandbox here.
+    `needs`: other programs the agent's own sandbox uses inside this one (Claude Code's: socat). Only its Linux
+    sandbox needs them, so macOS ignores them."""
+    if sys.platform == "darwin":
+        return _check_mac()
     if not sys.platform.startswith("linux"):
-        raise SandboxUnavailable("The worker's sandbox is Linux-only for now (it uses bubblewrap); macOS is next.")
+        raise SandboxUnavailable("The worker's sandbox runs on Linux (bubblewrap) and macOS (sandbox-exec), "
+                                 "not here yet.")
     bwrap = find_bwrap()
     if bwrap is None:
         raise SandboxUnavailable("The worker runs the agent inside bubblewrap, which isn't installed. Install it "
@@ -204,6 +231,25 @@ def check(needs: tuple[str, ...] = ()) -> str:
                                  "(`sysctl user.max_user_namespaces` above 0) and that you aren't inside a container "
                                  "that forbids them.")
     return bwrap
+
+
+def _check_mac() -> str:
+    program = SANDBOX_EXEC
+    if not os.access(program, os.X_OK):
+        raise SandboxUnavailable(f"The worker runs the agent inside macOS's sandbox-exec, which isn't at {program} "
+                                 "here.")
+    probe = [program, "-p", "(version 1)(allow default)", "/usr/bin/true"]
+    try:  # (through run_tree, so Ctrl+C's stop_all stops it on whatever thread it runs)
+        proc = run_tree(probe, "", dict(os.environ), 30.0)
+    except Stopped as exc:
+        raise SandboxUnavailable("The sandbox check was stopped before it finished.") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SandboxUnavailable(f"sandbox-exec didn't start: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise SandboxUnavailable("sandbox-exec couldn't start a sandbox here"
+                                 + (f" ({detail[-1][:200]})" if detail else "") + ".")
+    return program
 
 
 def _apparmor_restricts_userns() -> bool:
@@ -257,11 +303,19 @@ def _covered(path: Path) -> bool:
     return any(path == Path(root) or Path(root) in path.parents for root in SYSTEM_READ_ONLY + LIB_DIRS)
 
 
-def wrap(bwrap: str, argv: list[str], *, worktree: Path, home: Path, private: dict[Path, Path],
+def _is_mac(program: str) -> bool:
+    return Path(program).name == "sandbox-exec"
+
+
+def wrap(program: str, argv: list[str], *, worktree: Path, home: Path, private: dict[Path, Path],
          read_only: list[Path], env: dict[str, str], hidden: list[Path] = ()) -> list[str]:
-    """`argv` run inside the sandbox, in the worktree. `private` maps host folders to where the agent sees them;
-    `hidden` are folders and files inside the read-only ones that it sees empty, except what the network needs."""
-    out = _base(bwrap)
+    """`argv` run inside the sandbox, in the worktree. `private` maps host folders to where the agent sees them
+    (on macOS, where they are: see login_place); `hidden` are folders and files inside the read-only ones that it
+    sees empty, except what the network needs. `program` is what check() returned: bwrap or sandbox-exec."""
+    if _is_mac(program):
+        return _wrap_mac(program, argv, worktree=worktree, home=home, private=private, read_only=read_only,
+                         env=env, hidden=hidden)
+    out = _base(program)
     seen: set[str] = set()
 
     def show(paths: list[Path]) -> None:
@@ -284,3 +338,91 @@ def wrap(bwrap: str, argv: list[str], *, worktree: Path, home: Path, private: di
     out += ["--bind", str(worktree), str(worktree), "--chdir", str(worktree),
             "--setenv", "HOME", str(home), "--setenv", "TMPDIR", "/tmp", "--", *argv]
     return out
+
+
+def login_place(program: str, host: Path, inside: Path) -> Path:
+    """Where the agent finds a private folder. Under bubblewrap that is `inside`, where it is mounted; sandbox-exec
+    can't move a folder, so there it is the folder itself."""
+    return _real(host) if _is_mac(program) else inside
+
+
+def private_temp(host: Path) -> Path:
+    """The run's temp folder on macOS, which has no empty /tmp to show. It sits beside the private home, not in
+    it, because both agents' own sandboxes hide the private home from the commands they run."""
+    return Path(f"{host}-tmp")
+
+
+def _real(path: str | Path) -> Path:
+    return Path(os.path.realpath(path))
+
+
+def _sbpl_string(text: str) -> str:
+    """`text` as a quoted string in a sandbox-exec profile."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _subpaths(paths: list[str | Path]) -> list[str]:
+    return [f"(subpath {_sbpl_string(str(path))})" for path in paths]
+
+
+def _above(paths: list[Path]) -> list[str]:
+    """The folders above `paths` (never "/"), once each, as exact paths: a program walking down to one of them
+    must see that the folders on the way are there, though not what is in them."""
+    found = {str(parent) for path in paths for parent in path.parents if parent != Path(parent.anchor)}
+    return [f"(literal {_sbpl_string(parent)})" for parent in sorted(found)]
+
+
+def _rule(verb: str, operation: str, filters: list[str]) -> list[str]:
+    """A rule of the profile, or none when there is nothing for it to match: a read rule with no filters would
+    deny, or allow, every file."""
+    return [f"({verb} {operation} {' '.join(filters)})"] if filters else []
+
+
+def _project_of(worktree: Path) -> Path | None:
+    """The project a task's worktree is in (project/.handoff/worktrees/T-1), or None if it isn't in one."""
+    from handoff.gitwork import WORKTREES
+    names = WORKTREES.parts
+    if len(worktree.parts) > len(names) + 2 and worktree.parts[-len(names) - 1:-1] == names:
+        return worktree.parents[len(names)]
+    return None
+
+
+def _wrap_mac(program: str, argv: list[str], *, worktree: Path, home: Path, private: dict[Path, Path],
+              read_only: list[Path], env: dict[str, str], hidden: list[Path]) -> list[str]:
+    """`argv` run by sandbox-exec under a profile that gives the agent bubblewrap's view (see the module docstring).
+    A later rule of a profile wins over an earlier one, so what is denied again comes after what is allowed.
+    Sets HOME and TMPDIR in `env`, which the caller starts the agent with."""
+    if not private:
+        raise ValueError("The macOS sandbox needs a private folder for the agent to log in from.")
+    tmp = private_temp(next(iter(private)))
+    tmp.mkdir(mode=0o700, exist_ok=True)
+    tmp = _real(tmp)
+    hosts = [_real(host) for host in private]
+    worktree, real_home = _real(worktree), _real(home)
+    project = _project_of(worktree)
+    reads = list(dict.fromkeys([worktree, *hosts, tmp, *(_real(path) for path in read_only if os.path.exists(path))]))
+    network = _extra_read_only(env)
+    hidden_paths = [path for path in dict.fromkeys(_real(path) for path in hidden)
+                    if not any(_inside(path, needed) for needed in network)]  # as bubblewrap's masks
+    # A credential folder that holds the agent's install (~/.claude/local) stays as it is: the rest of the home
+    # is denied already, so denying it too would only hide the install
+    sensitive = [path for path in (_real(real_home / name) for name in SENSITIVE)
+                 if not any(_inside(allowed, path) for allowed in reads)]
+    lines = ["(version 1)", "(allow default)"]
+    lines += _rule("deny", "file-read*", _subpaths([*MAC_HIDDEN, real_home, *([project] if project else [])]))
+    lines += _rule("allow", "file-read*", _subpaths(reads))
+    lines += _rule("allow", "file-read-metadata", _above(reads))
+    lines += _rule("deny", "file-read*", _subpaths([*hidden_paths, *sensitive]))
+    lines += _rule("allow", "file-read*", _subpaths(network))  # after the denies, as bubblewrap shows it after
+    lines += _rule("allow", "file-read-metadata", _above(network))
+    writes = list(dict.fromkeys([worktree, *hosts, tmp]))
+    lines += ["(deny file-write*)",
+              "(allow file-write* " + " ".join([*_subpaths(writes), '(literal "/dev/null")', '(regex #"^/dev/tty")',
+                                                '(regex #"^/dev/fd/")']) + ")",
+              "(deny process-info* (target others))",
+              "(deny signal)",
+              "(allow signal (target same-sandbox))"]
+    lines.append('(deny mach-lookup (global-name "com.apple.SecurityServer"))')  # keeps the agent out of your keychain
+    env["HOME"] = str(home)
+    env["TMPDIR"] = str(tmp)
+    return [program, "-p", "\n".join(lines), *argv]
