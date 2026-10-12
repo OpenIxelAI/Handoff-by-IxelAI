@@ -146,7 +146,7 @@ def test_run_says_the_model_list_could_not_be_read(repo, fake_ixel, run_cli):  #
     assert "--effort" not in call["argv"]
 
 
-def last_handback(repo):
+def last_handback(repo):  # noqa: F811
     return [e for e in Board.open(repo).events(1) if e.kind == "handoff"][-1].data
 
 
