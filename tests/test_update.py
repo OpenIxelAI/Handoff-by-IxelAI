@@ -97,7 +97,7 @@ if args[0] == "venv" and not python.exists():
     (fakes / "uv").chmod(0o755)
     env = {**os.environ, "PATH": f"{fakes}{os.pathsep}{os.environ['PATH']}", "HANDOFF_USE_UV": "1",
            "HANDOFF_PYTHON": sys.executable, "HANDOFF_INSTALL_ROOT": str(root), "HANDOFF_BIN_DIR": str(bin_dir),
-           "HANDOFF_SKIP_PATH_UPDATE": "1"}
+           "HANDOFF_SKIP_PATH_UPDATE": "1", "HANDOFF_INSTALL_YES": "0"}
 
     def install(**extra):  # from this checkout, so that Python finds Handoff whether or not it's installed
         return subprocess.run(["bash", str(checkout / "install.sh")], env={**env, **extra}, capture_output=True,
