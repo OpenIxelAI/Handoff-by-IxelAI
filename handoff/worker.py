@@ -520,6 +520,7 @@ class PrivateLogin:
 
     def cleanup(self) -> None:
         shutil.rmtree(self.home, ignore_errors=True)
+        shutil.rmtree(sandbox.private_temp(self.home), ignore_errors=True)  # macOS's, beside it
 
 
 class CodexLogin(PrivateLogin):
@@ -977,7 +978,7 @@ class Worker:
         assert self.spec.login is not None and self.bwrap is not None
         home = Path.home()
         login = self.spec.login(env)
-        inside = home / login.folder
+        inside = sandbox.login_place(self.bwrap, login.home, home / login.folder)
         note = None
         try:
             login.prepare()
