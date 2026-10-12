@@ -3,11 +3,13 @@ pids, which processes count as the run's, and (on a Mac) the real thing.
 
 Everything but the last test runs on every OS, on made-up processes.
 """
+import contextlib
 import os
 import secrets
 import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -126,21 +128,37 @@ def test_without_a_root_nothing_counts_by_its_parents(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="reads other processes' environments with sysctl, on macOS")
-def test_kill_tree_stops_a_process_that_left_the_session_but_carries_the_mark():
+@pytest.mark.parametrize("program", ["python", "/bin/sleep"])
+def test_kill_tree_stops_a_process_that_left_the_session_but_carries_the_mark(program):
+    # The run starts a program in a session of its own. A Python one shows its environment, mark included; macOS
+    # shows none for Apple's own programs like /bin/sleep, which counts while it is still under the run.
     mark = secrets.token_hex(8)
     env = {**os.environ, proc.RUN_VAR: mark}
-    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    sleeper = subprocess.Popen(["/bin/sleep", "60"], env=env, start_new_session=True, **quiet)
-    root = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env,
-                            start_new_session=True, **quiet)
+    stray = [sys.executable, "-c", "import time; time.sleep(60)"] if program == "python" else [program, "60"]
+    script = ("import subprocess, sys, time\n"
+              f"p = subprocess.Popen({stray!r}, start_new_session=True, stdin=subprocess.DEVNULL,\n"
+              "                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+              "print(p.pid, flush=True)\n"
+              "time.sleep(60)\n")
+    root = subprocess.Popen([sys.executable, "-c", script], env=env, start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    stray_pid = int(root.stdout.readline())
     try:
-        assert sleeper.pid in proc._descendants(proc._processes(), os.getpid())
-        assert sleeper.pid in proc._marked_darwin(mark, root.pid)
+        assert stray_pid in proc._marked_darwin(mark, root.pid)
         proc.kill_tree(root, mark)
-        assert sleeper.wait(timeout=5) == -signal.SIGKILL
         assert root.wait(timeout=5) is not None
+        for _ in range(50):  # the stray is launchd's child now, so it's gone once its pid is
+            try:
+                os.kill(stray_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("the stray process is still running")
     finally:
-        for p in (sleeper, root):
-            if p.poll() is None:
-                p.kill()
-                p.wait()
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(stray_pid, signal.SIGKILL)
+        if root.poll() is None:
+            root.kill()
+            root.wait()
+        root.stdout.close()

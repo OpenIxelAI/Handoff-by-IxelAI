@@ -202,7 +202,8 @@ def _descendants(table: list[tuple[int, int, int]], root: int) -> set[int]:
 
 def _marked_darwin(mark: str, root: int) -> list[int]:
     """macOS (no /proc): your processes that carry this run's mark, read with sysctl. One whose environment macOS
-    won't show counts when it was started under `root`. Never this process or its parent."""
+    won't show (it refuses, or shows none at all, as it does for Apple's own programs like /bin/sleep) counts when
+    it was started under `root`. Never this process or its parent."""
     want = f"{RUN_VAR}={mark}".encode()
     table = _processes()
     tree = _descendants(table, root) if root > 1 else set()
@@ -213,10 +214,8 @@ def _marked_darwin(mark: str, root: int) -> list[int]:
         if uid != me or pid in skip or pid <= 1:
             continue
         data = _procargs2(pid)
-        if data is None:
-            if pid in tree:
-                found.append(pid)
-        elif want in _parse_procargs2(data)[2]:
+        environment = _parse_procargs2(data)[2] if data is not None else []
+        if want in environment or (not environment and pid in tree):
             found.append(pid)
     return found
 
