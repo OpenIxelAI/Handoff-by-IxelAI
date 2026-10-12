@@ -21,11 +21,15 @@ Rules are enforced here, not trusted from the caller:
 """
 from __future__ import annotations
 
+import csv
+import functools
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -35,6 +39,7 @@ from typing import Callable, Iterable, Iterator, Mapping
 
 from handoff import approvals, usage
 from handoff.globs import PathError, normalize_path, overlaps
+from handoff.proc import system32
 from handoff.project import BOARD_DIR, BOARD_FILE, OUTPUTS_DIR
 from handoff.sanitize import clean_line, clean_text, find_secret
 from handoff.timefmt import parse as parse_time
@@ -62,6 +67,7 @@ CHECK_RESULTS = ("met", "not_met", "not_checked")  # a reviewer's mark on one ac
 HUMAN = "human"  # the person, through the CLI
 PERSON_WORDS = ("me", "you", "myself")  # what the person types for themselves, so never an agent's name
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)  # (only on Windows; tests check it elsewhere)
 
 MAX_TITLE_CHARS = 200
 MAX_TEXT_BYTES = 20 * 1024
@@ -519,15 +525,145 @@ def link_problem(root: Path) -> str | None:
     return None
 
 
+# The folders this process has already made owner-only (or tried to), so each is only asked about once
+_ACL_SET: set[str] = set()
+# An icacls listing line: the account, then its flags such as (OI)(CI)(F), (I)(RX) or (DENY)(W)
+_ACL_ENTRY = re.compile(r"^(.+?):((?:\([^()]*\))+)$")
+
+
+def _quiet_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run one of Windows' own tools and capture what it says: no shell, no console window, a short timeout.
+    Raises OSError or subprocess.SubprocessError (TimeoutExpired is one)."""
+    return subprocess.run(argv, capture_output=True, text=True, encoding="oem" if os.name == "nt" else "utf-8",
+                          errors="replace", timeout=15, creationflags=_NO_WINDOW)
+
+
+@functools.lru_cache(maxsize=None)
+def _whoami() -> tuple[str, str] | None:
+    """This account's name and SID, as Windows' whoami says them (None if it can't)."""
+    try:
+        done = _quiet_run([system32("whoami.exe"), "/user", "/fo", "csv", "/nh"])
+        rows = [row for row in csv.reader((done.stdout or "").splitlines()) if row]
+    except (OSError, ValueError, subprocess.SubprocessError, csv.Error):
+        return None
+    if done.returncode != 0 or not rows or len(rows[0]) < 2 or not rows[0][1].startswith("S-1-"):
+        return None
+    return rows[0][0], rows[0][1]
+
+
+def _env_account() -> str | None:
+    """This account's name from the environment, for when whoami can't say."""
+    user = os.environ.get("USERNAME", "")
+    domain = os.environ.get("USERDOMAIN", "")
+    if not user:
+        return None
+    return f"{domain}\\{user}" if domain else user
+
+
+def _grantee() -> str | None:
+    """Who icacls gives the folder to: this account by its SID (a name needs quoting, and Windows may print it
+    differently), or by its name if whoami can't say."""
+    account = _whoami()
+    return "*" + account[1] if account else _env_account()
+
+
+def _acl_command(folder: Path, grantee: str) -> list[str]:
+    """icacls: no inheritance from the parent, and only this account with full control, which the files and
+    folders inside inherit."""
+    return [system32("icacls.exe"), str(folder), "/inheritance:r", "/grant:r", f"{grantee}:(OI)(CI)F"]
+
+
+def _one_line(text: str | None) -> str:
+    return " ".join((text or "").split())
+
+
+def _set_acl(path: Path) -> None:
+    """Make the folder owner-only with icacls. If that fails, say so on stderr (stdout is the MCP server's) and
+    go on: the board works, and `handoff doctor` says how to fix it."""
+    grantee = _grantee()
+    reason = "it couldn't tell which account is yours"
+    if grantee:
+        try:
+            done = _quiet_run(_acl_command(Path(os.path.abspath(path)), grantee))
+            reason = "" if done.returncode == 0 else (_one_line(done.stderr) or _one_line(done.stdout)
+                                                       or f"icacls exited with {done.returncode}")
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            reason = _one_line(str(exc)) or type(exc).__name__
+    if reason:
+        try:
+            print(f"Handoff couldn't make {path} owner-only ({reason}); `handoff doctor` says how to fix it.",
+                  file=sys.stderr)
+        except (OSError, ValueError):
+            pass
+
+
 def _secure(path: Path, mode: int) -> None:
-    """Owner-only permissions on macOS and Linux (Windows keeps the folder's own ACLs)."""
+    """Owner-only: on macOS and Linux by mode, on Windows by an ACL on the folder that what's in it inherits."""
     if sys.platform == "win32":
+        if os.path.isdir(path):
+            key = os.path.normcase(os.path.abspath(path))
+            if key not in _ACL_SET:
+                _ACL_SET.add(key)
+                _set_acl(path)
         return
     try:
         if path.stat().st_mode & 0o777 != mode:
             os.chmod(path, mode)
     except OSError:
         pass  # not ours to change; `handoff doctor` reports it
+
+
+def _acl_problem(listing: str, folder: str, name: str, grantee: str) -> str | None:
+    """Why what `icacls <folder>` printed isn't owner-only (None if it is), with the command that fixes it on
+    one line. `name` is this account's name; `grantee` is how icacls is told who that is (a SID after a `*`)."""
+    mine = {name.lower(), grantee.lstrip("*").lower()}
+    lines = [text.strip() for text in listing.splitlines() if text.strip()]
+    if lines and lines[0].lower().startswith(folder.lower()):  # the first line is the folder, then an entry
+        lines[0] = lines[0][len(folder):].strip()
+    entries: list[tuple[str, set[str]]] = []
+    for text in lines:
+        found = _ACL_ENTRY.match(text)  # (anything else is Windows' summary, which it words in your language)
+        if found:
+            entries.append((found.group(1), {flag.upper() for flag in re.findall(r"[^(),\s]+", found.group(2))}))
+    allowed = [(who, flags) for who, flags in entries if "DENY" not in flags]
+    others = [who for who, flags in allowed if who.lower() not in mine]
+    full = any(who.lower() in mine and {"OI", "CI", "F"} <= flags for who, flags in allowed)
+    inherits = any("I" in flags for _, flags in entries)
+    if not inherits and not others and full:
+        return None
+    if inherits:
+        why = "it still inherits its parent folder's permissions"
+    elif others:
+        why = f"{', '.join(dict.fromkeys(others))} can open it too"
+    else:
+        why = "your account doesn't have full control of it and what's in it"
+    fix = f'icacls "{folder}" /inheritance:r /grant:r "{grantee}:(OI)(CI)F"'
+    explicit = (who for who, flags in allowed if "I" not in flags and who.lower() not in mine)
+    for who in dict.fromkeys(explicit):
+        fix += f' /remove:g "{who}"'
+    return f"{why}; run: {fix}"
+
+
+def owner_only_problem(folder: Path) -> str | None:
+    """Why other accounts can open `folder`, with the command that fixes it on one line; None if only yours
+    can. On macOS and Linux that's its mode, on Windows its ACL. A check that can't be made is a reason too."""
+    try:
+        if sys.platform != "win32":
+            mode = folder.stat().st_mode & 0o777
+            return f"mode {mode:o}; run: chmod 700 {folder}" if mode & 0o077 else None
+        grantee = _grantee()
+        account = _whoami()
+        name = account[0] if account else _env_account()
+        if not grantee or not name:
+            return "Windows wouldn't say which account is yours, so Handoff can't check it"
+        where = os.path.abspath(folder)
+        done = _quiet_run([system32("icacls.exe"), where])
+        if done.returncode != 0:
+            said = _one_line(done.stderr) or _one_line(done.stdout) or f"exit code {done.returncode}"
+            return f"icacls couldn't read its permissions ({said})"
+        return _acl_problem(done.stdout or "", where, name, grantee)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return f"it couldn't be checked ({_one_line(str(exc)) or type(exc).__name__})"
 
 
 def _keep_days(value: str | None) -> int | None:
@@ -565,9 +701,10 @@ class Board:
     @classmethod
     def open(cls, root: Path, *, create: bool = True, clock: Callable[[], str] = utc_now,
              expire: bool = True) -> "Board":
-        """The board for project `root`, creating `.handoff/board.db` (0700 folder, 0600 file) if asked. Opening
-        it also removes finished tasks it keeps no longer (_upkeep; they're in `expired`), unless `expire` is
-        False: for `handoff keep`, which is about to change how long that is."""
+        """The board for project `root`, creating `.handoff/board.db` (0700 folder, 0600 file; on Windows an ACL
+        for your account only on the folder) if asked. Opening it also removes finished tasks it keeps no longer
+        (_upkeep; they're in `expired`), unless `expire` is False: for `handoff keep`, which is about to change
+        how long that is."""
         folder = Path(root) / BOARD_DIR
         path = folder / BOARD_FILE
         problem = link_problem(root)

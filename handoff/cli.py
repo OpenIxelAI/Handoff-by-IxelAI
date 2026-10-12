@@ -2330,10 +2330,10 @@ def cmd_doctor(argv: list[str]) -> int:
     import sqlite3
 
     from handoff import hosts
-    from handoff.board import Board, BoardError, link_problem
+    from handoff.board import Board, BoardError, link_problem, owner_only_problem
     from handoff.project import ProjectError, board_path, gitignore_has_board, resolve_project
 
-    parser = _parser("doctor", "Check the project, the board and which apps have Handoff set up.")
+    parser = _parser("doctor","Check the project, the board and which apps have Handoff set up.")
     parser.add_argument("--json", action="store_true", help="print it as JSON")
     args = parser.parse_args(argv)
     problems = 0
@@ -2397,6 +2397,12 @@ def cmd_doctor(argv: list[str]) -> int:
                     line("✗", f"{item.name} is readable by others", f"mode {mode:o}; run: chmod {want:o} {item}")
                 elif before[item] & 0o077:
                     line("⚠", f"{item.name} was readable by others", f"mode {before[item]:o}; now {mode:o}")
+            loose = owner_only_problem(path.parent)
+            if loose is None:
+                line("✓", ".handoff is owner-only")
+            elif sys.platform == "win32":  # (on macOS and Linux, the loop above said it)
+                problems += 1
+                line("✗", ".handoff isn't owner-only", loose)
         if gitignore_has_board(root) or (root / ".handoff" / ".gitignore").exists():
             line("✓", "The board stays out of git")
         else:

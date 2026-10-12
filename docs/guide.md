@@ -482,8 +482,8 @@ Ixel's own `ixel_review` tool, once `ixel mcp --setup` has added Ixel's tools to
 ## Where things live
 
 - The board is `<project>/.handoff/board.db`. The project is the nearest folder with a `.git`, and a linked
-  git worktree shares its main checkout's board. On macOS and Linux the folder is private to you (0700,
-  and 0600 for the file).
+  git worktree shares its main checkout's board. The folder is private to you: 0700 (and 0600 for the file) on
+  macOS and Linux, and on Windows an ACL that gives it to your account only. `handoff doctor` checks it.
 - Finished tasks stay on the board until you delete them, run `handoff clean`, or set `handoff keep DAYS`.
   Deleting overwrites the task's text in the board file, so it isn't left behind in the file's free space.
 - `.handoff/` keeps itself out of git, with a `.gitignore` of its own. If that file goes missing or

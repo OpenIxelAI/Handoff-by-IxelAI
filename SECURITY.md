@@ -163,6 +163,12 @@ as passwords, aren't detected, so never write them on the board.
 
 - On macOS and Linux, `.handoff` is created with mode 0700 and `board.db` with 0600. Handoff tightens
   them again when it opens a board it owns, and `handoff doctor` reports loose ones.
+- On Windows, Handoff sets an ACL on `.handoff` with `icacls` (from System32, started without a shell): no
+  inheritance from the parent folder, and full control for your account only, which `board.db` and the rest
+  of the folder inherit. Like mode 0700, that leaves out SYSTEM and Administrators, though an administrator
+  can still take ownership of the folder and give themselves access. If `icacls` fails, Handoff says so on
+  stderr and goes on; the board still works. `handoff doctor` checks this on every OS (the mode on macOS and
+  Linux, the ACL on Windows) and prints the one command that fixes a folder that isn't owner-only.
 - `.handoff` contains a `.gitignore` that ignores everything in it, so the board is never committed by
   accident.
 - A `.handoff` that is a symbolic link is refused, so a cloned repository can't point the board somewhere
@@ -275,7 +281,7 @@ shell or network access of its own.
 
 | Test | What it proves |
 |---|---|
-| `tests/test_board.py` | Every state transition, legal and illegal; authorization; limits; secrets refused and never written; history can't be edited; file permissions; symlinked folder refused; a deleted, cleaned or expired task's text is in neither `board.db` nor `board.db-wal`, byte for byte, with or without SQLite overwriting by default, on a busy board once it's free, and on a board an older Handoff left; a delete writes no temporary file (on Linux, where the test can see one); its results go too, never through a link, and results whose task is gone are found |
+| `tests/test_board.py` | Every state transition, legal and illegal; authorization; limits; secrets refused and never written; history can't be edited; file permissions, and on Windows the owner-only ACL (the icacls command, and how its listing is read); symlinked folder refused; a deleted, cleaned or expired task's text is in neither `board.db` nor `board.db-wal`, byte for byte, with or without SQLite overwriting by default, on a busy board once it's free, and on a board an older Handoff left; a delete writes no temporary file (on Linux, where the test can see one); its results go too, never through a link, and results whose task is gone are found |
 | `tests/test_board_concurrency.py` | Two processes racing on one board: every task claimed exactly once, no note or task lost |
 | `tests/test_sanitize.py`, `tests/test_globs.py` | Control codes and bidi stripped; secret detection; linear time on hostile input |
 | `tests/test_crafted_board.py` | A board crafted to inject text through names, event kinds, paths, review marks and malformed data reaches neither an agent nor the terminal unfiltered |
