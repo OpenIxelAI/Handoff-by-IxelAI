@@ -68,3 +68,45 @@ def test_a_run_with_no_recorded_process_is_refused(project, capsys):  # noqa: F8
     code, _, err = run(capsys, "reopen", "T-1")
     assert code == 1 and "T-1 is in_progress, not done, cancelled or blocked" in err
     assert Board.open(project).get(1).status == "in_progress"
+
+
+def orphan():
+    """A program a killed run started, still going: in a session of its own, as run_tree starts them."""
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32"
+             else {"start_new_session": True})
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], **group)
+
+
+def test_a_killed_run_whose_agent_goes_on_is_refused_until_it_stops(project, capsys):  # noqa: F811
+    start_a_run_with_pid(project, dead_pid())
+    child = orphan()
+    try:
+        Board.open(project).note_run_child(1, child.pid)
+
+        code, _, err = run(capsys, "reopen", "T-1")
+        assert code == 1 and "being run by the codex worker now" in err
+        assert Board.open(project).get(1).status == "in_progress"
+    finally:
+        child.kill()
+        child.wait()
+
+    code, out, _ = run(capsys, "reopen", "T-1")
+    assert code == 0 and "T-1 is open again" in out
+    assert not (project / ".handoff" / "runs" / "1.pids").exists()
+
+
+def test_run_tree_tells_what_it_starts_while_noted():
+    from handoff import proc
+
+    seen = []
+    with proc.children_noted(seen.append):
+        done = proc.run_tree([sys.executable, "-c", "print('hi')"], "", dict(os.environ), 30.0)
+    proc.run_tree([sys.executable, "-c", "pass"], "", dict(os.environ), 30.0)
+    assert done.stdout.strip() == "hi" and len(seen) == 1 and isinstance(seen[0], int)
+
+
+def test_a_new_run_forgets_what_an_earlier_one_started(project):  # noqa: F811
+    board = Board.open(project)
+    board.note_run_child(1, 4242)
+    start_a_run_with_pid(project, dead_pid())
+    assert not (project / ".handoff" / "runs" / "1.pids").exists()

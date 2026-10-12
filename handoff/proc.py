@@ -13,6 +13,8 @@ import signal
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
+from typing import Callable, Iterator
 
 WINDOWS = os.name == "nt"
 # What CreateProcess can start (anything else in PATHEXT, like .py or .js, it can't)
@@ -45,6 +47,8 @@ _running: dict[subprocess.Popen, str] = {}
 _running_lock = threading.Lock()
 # Set by stop_all: from then on nothing new starts, and what was stopped says so
 _stopping = threading.Event()
+# What to tell about each program run_tree starts on this thread (children_noted)
+_noted = threading.local()
 
 
 class Stopped(Exception):
@@ -69,6 +73,19 @@ def stop_all() -> int:
     for proc, mark in procs:
         kill_tree(proc, mark)
     return len(procs)
+
+
+@contextmanager
+def children_noted(note: Callable[[int], None]) -> Iterator[None]:
+    """While this is open, `note` gets the process id of each program run_tree starts on this thread: a board
+    run keeps them, so a run whose worker was killed outright isn't taken for stopped while what it started goes
+    on (on Linux the sandbox stops with its worker; elsewhere it may not)."""
+    before = getattr(_noted, "note", None)
+    _noted.note = note
+    try:
+        yield
+    finally:
+        _noted.note = before
 
 
 def taskkill() -> str:
@@ -161,6 +178,21 @@ def pid_alive(pid: object) -> bool | None:
         kernel32.CloseHandle(handle)
 
 
+def group_alive(pid: object) -> bool | None:
+    """Is the program run_tree started as `pid`, or anything still in its process group, there? As pid_alive."""
+    if sys.platform == "win32" or pid_alive(pid) is None:
+        return pid_alive(pid)
+    try:
+        os.killpg(pid, 0)  # run_tree starts each program in a session, and so a process group, of its own
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
 def run_tree(command: list[str], stdin: str, env: dict, timeout: float,
              cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
     """Run a program with text on stdin. On timeout, stop its whole process tree and raise TimeoutExpired.
@@ -176,6 +208,8 @@ def run_tree(command: list[str], stdin: str, env: dict, timeout: float,
         with _running_lock:
             _running[proc] = mark
         try:
+            if (note := getattr(_noted, "note", None)) is not None:
+                note(proc.pid)
             if _stopping.is_set():  # stop_all ran while this was starting, after it looked at what was running
                 kill_tree(proc, mark)
             out, err = proc.communicate(stdin, timeout=timeout)
