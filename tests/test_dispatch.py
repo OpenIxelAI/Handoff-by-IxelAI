@@ -51,7 +51,8 @@ def repo(tmp_path):
 def fake_ixel(tmp_path, monkeypatch):
     """A stand-in `ixel` on PATH: lists AGENTS and PROVIDERS, answers `ask`, saves pictures for `image`, and
     logs every call. FAKE_IXEL_ASK=error makes `ask` fail the way Ixel does; FAKE_IXEL_UNSAVED=1 makes `image`
-    report pictures it never wrote; FAKE_IXEL_OLD=1 is an Ixel MAT whose `ask` can't read new files."""
+    report pictures it never wrote; FAKE_IXEL_OLD=1 is an Ixel MAT whose `ask` can't read new files.
+    FAKE_IXEL_USAGE (JSON) is the usage `ask` reports."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     log = tmp_path / "ixel.jsonl"
@@ -109,6 +110,8 @@ def fake_ixel(tmp_path, monkeypatch):
             result = {{"agent": agent, "label": agent.capitalize(), "model": "m-" + agent, "answer": answer, "ms": 5}}
             if "--new-files" in args:
                 result["notes"] = ["New files left out: auth.json (its name says it holds keys or logins)."]
+            if os.environ.get("FAKE_IXEL_USAGE"):
+                result["usage"] = json.loads(os.environ["FAKE_IXEL_USAGE"])
             print(json.dumps(result))
         elif args[0] == "image":
             out = os.environ.get("FAKE_IXEL_OUT") or opt("--out")
