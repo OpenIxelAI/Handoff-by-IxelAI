@@ -572,11 +572,14 @@ def _grantee() -> str | None:
 _DEFAULT_GRANTEES = ("*S-1-5-18", "*S-1-5-32-544", "*S-1-3-4")
 
 
-def _acl_command(folder: Path, grantee: str) -> list[str]:
-    """icacls: no inheritance from the parent, no entries of its own for the accounts a new folder can come with,
-    and only this account with full control, which the files and folders inside inherit."""
-    removals = [word for sid in _DEFAULT_GRANTEES for word in ("/remove:g", sid)]
-    return [system32("icacls.exe"), str(folder), "/inheritance:r", *removals, "/grant:r", f"{grantee}:(OI)(CI)F"]
+def _acl_commands(folder: Path, grantee: str) -> list[list[str]]:
+    """icacls, as two commands run in order: this account gets full control, which the files and folders inside
+    inherit; then no inheritance from the parent and no entries of its own for the accounts a new folder can
+    come with. icacls isn't transactional, so the grant comes first: if the second fails, you still have access."""
+    icacls = system32("icacls.exe")
+    removals = [word for sid in _DEFAULT_GRANTEES if sid != grantee for word in ("/remove:g", sid)]
+    return [[icacls, str(folder), "/grant:r", f"{grantee}:(OI)(CI)F"],
+            [icacls, str(folder), "/inheritance:r", *removals]]
 
 
 def _one_line(text: str | None) -> str:
@@ -590,9 +593,12 @@ def _set_acl(path: Path) -> None:
     reason = "it couldn't tell which account is yours"
     if grantee:
         try:
-            done = _quiet_run(_acl_command(Path(os.path.abspath(path)), grantee))
-            reason = "" if done.returncode == 0 else (_one_line(done.stderr) or _one_line(done.stdout)
-                                                       or f"icacls exited with {done.returncode}")
+            for command in _acl_commands(Path(os.path.abspath(path)), grantee):
+                done = _quiet_run(command)
+                reason = "" if done.returncode == 0 else (_one_line(done.stderr) or _one_line(done.stdout)
+                                                           or f"icacls exited with {done.returncode}")
+                if reason:
+                    break  # (the next one takes access away, so it only runs after this one worked)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             reason = _one_line(str(exc)) or type(exc).__name__
     if reason:
@@ -643,11 +649,12 @@ def _acl_problem(listing: str, folder: str, name: str, grantee: str) -> str | No
         why = f"{', '.join(dict.fromkeys(others))} can open it too"
     else:
         why = "your account doesn't have full control of it and what's in it"
-    fix = f'icacls "{folder}" /inheritance:r /grant:r "{grantee}:(OI)(CI)F"'
+    grant = f'icacls "{folder}" /grant:r "{grantee}:(OI)(CI)F"'  # (first, as in _acl_commands)
+    restrict = f'icacls "{folder}" /inheritance:r'
     explicit = (who for who, flags in allowed if "I" not in flags and who.lower() not in mine)
     for who in dict.fromkeys(explicit):
-        fix += f' /remove:g "{who}"'
-    return f"{why}; run: {fix}"
+        restrict += f' /remove:g "{who}"'
+    return f"{why}; run: {grant} && {restrict}"
 
 
 def owner_only_problem(folder: Path) -> str | None:
