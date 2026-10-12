@@ -134,7 +134,7 @@ def _resolve(root: Path, path: object) -> Path:
     if not isinstance(path, str) or not path.strip() or "\0" in path:
         raise _Refused("give a path, relative to the project's folder")
     rel = Path(path.strip().replace("\\", "/"))
-    if rel.is_absolute() or rel.drive or ".." in rel.parts:
+    if rel.is_absolute() or rel.anchor or ".." in rel.parts:  # (on Windows, /etc/x has a root but no drive)
         raise _Refused(f"{path} is outside the project: give a path inside it, like src/app.py")
     if ".git" in rel.parts:
         raise _Refused("the .git folder is off limits")

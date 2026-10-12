@@ -247,13 +247,13 @@ def test_hermes_waits_until_you_enable_it_then_runs_with_its_file_tools_only(tmp
     task = approve(board, "hermes")
     hermes = Worker(board, repo, "hermes", runner=agent, command=command)
     with pytest.raises(WorkerUnavailable, match="handoff agents enable hermes"):
-        hermes.check()
+        hermes.check_login()
     [waiting] = hermes.run_pending()
     assert not waiting.ok and "handoff agents enable hermes" in waiting.waiting and agent.calls == []
     assert board.pending_runs("hermes"), "the approval is kept for when you enable it"
 
     adapters.set_enabled("hermes", True)
-    hermes.check()
+    hermes.check_login()
     [result] = hermes.run_pending()
     assert result.ok, result.message
     argv = agent.calls[0]["argv"]
@@ -278,7 +278,8 @@ def test_openclaw_reads_the_task_from_a_private_file_and_works_in_the_worktree(t
     approve(board, "openclaw", models=["anthropic/claude-haiku-5-5"], efforts={"anthropic/claude-haiku-5-5": "low"})
     [result] = Worker(board, repo, "openclaw", runner=agent, command=command).run_pending()
     assert result.ok, result.message
-    assert "Add a hello script" in seen["text"] and seen["mode"] == 0o600
+    assert "Add a hello script" in seen["text"]
+    assert seen["mode"] == 0o600 or sys.platform == "win32"
     call = agent.calls[0]
     assert call["argv"][1:3] == ["agent", "--local"] and call["stdin"] == ""
     assert call["env"]["OPENCLAW_WORKSPACE_DIR"] == call["cwd"]
@@ -395,7 +396,8 @@ def test_a_local_model_edits_files_through_handoffs_tools_and_costs_nothing(boar
     assert said[0] == "README.md"
     assert "outside the project" in said[1] and "outside the project" in said[2]
     assert ".git folder is off limits" in said[3] and "no tool 'run_command'" in said[4]
-    assert said[5] == "# Shop\n" and said[6].startswith("Created src/hello.py") and said[7] == "Changed README.md."
+    assert said[5].replace("\r\n", "\n") == "# Shop\n"  # (Windows' write_text wrote \r\n)
+    assert said[6].startswith("Created src/hello.py") and said[7] == "Changed README.md."
     first = s.requests[0]
     assert first["model"] == "qwen3:4b" and first["reasoning_effort"] == "none" and first["think"] is False
     assert first["messages"][0]["content"].endswith("/no_think")
