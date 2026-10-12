@@ -66,6 +66,8 @@ COMMANDS = [
                                               "pictures"),
     ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL] [--effort E]",
      "Let an agent run a task, once (on a model, or a chain of models)"),
+    ("handoff rankings [update] [--job JOB] [--json]",
+     "Which models are best at what (who takes over when one hits its usage limit)"),
     ("handoff run [T-12 ...]", "Run approved tasks now, side by side"),
     ("handoff worker --agent AGENT [--once] [--share FOLDER]",
      "Run approved tasks headlessly, each in its own worktree"),
@@ -85,7 +87,7 @@ GROUPS = [
     ("Make and change tasks", ("add", "assign", "note", "done", "reopen", "block", "cancel", "delete", "clean",
                                "status")),
     ("Review work", ("review", "merge")),
-    ("Hand work to agents", ("dispatch", "agents", "approve", "run", "worker")),
+    ("Hand work to agents", ("dispatch", "agents", "approve", "rankings", "run", "worker")),
     ("Set up", ("setup", "doctor", "done-rule", "keep", "update", "version", "help")),
     ("For apps", ("mcp",)),
 ]
@@ -126,6 +128,7 @@ EXAMPLES = {
     "agents": ["handoff agents", "handoff agents enable kimi", "handoff agents --json"],
     "approve": ["handoff approve T-3 claude", "handoff approve T-3 gemini --kind answer",
                 "handoff approve T-3 --revoke"],
+    "rankings": ["handoff rankings", "handoff rankings --job video", "handoff rankings update"],
     "run": ["handoff run", "handoff run T-3 T-4"],
     "worker": ["handoff worker --agent claude", "handoff worker --agent codex --once"],
     "setup": ["handoff setup", "handoff setup --write", "handoff setup --remove"],
@@ -1524,6 +1527,9 @@ def cmd_approve(argv: list[str]) -> int:
                              "medium, high, xhigh or max; codex minimal, low, medium, high, xhigh, max or ultra; the "
                              "others, as handoff agents --json lists them (default: the model's own). With --chain, "
                              "for each model that has no effort of its own")
+    parser.add_argument("--no-fallback", action="store_true",
+                        help="stop the run when a model is out of usage, instead of going on with the next best "
+                             "model you have (handoff rankings shows the order)")
     parser.add_argument("--revoke", action="store_true", help="withdraw an approval the worker hasn't used yet")
     parser.add_argument("--yes", action="store_true", help="don't ask; approve the task as shown")
     args = parser.parse_args(argv)
@@ -1582,6 +1588,7 @@ def cmd_approve(argv: list[str]) -> int:
     # What's sealed is what was shown: if an agent changes the task while you read it, you see it again.
     from handoff.board import Changed, content_of
     whose = f" ({ref}'s assignee)" if asked else ""
+    fallbacks = None if args.no_fallback else (suggested_fallbacks(args.kind, agent, models, _root(args)) or None)
     for attempt in range(1, 6):
         task, events, _, _ = board.task_with_history(task_id)
         console.print(f"\n  [{C['dim']}]The {escape(agent)} worker{whose} gets {ref} as it is now, with its "
@@ -1593,6 +1600,10 @@ def cmd_approve(argv: list[str]) -> int:
             _print_text(Text(f"      ☐ {n}. {clean_line(check)}"))
         for line in [Text("  History", style=C["dim"]), *_history(events)]:
             _print_text(line)  # (notes and handoffs, which agents may have written, go to the agent too)
+        if fallbacks:
+            from handoff.rankings import shown as in_words
+            console.print(f"  [{C['dim']}]If a model hits its usage limit, the run goes on with: "
+                          f"{escape(in_words(fallbacks))}[/]", soft_wrap=True)
         if not args.yes and _interactive():
             answer = console.input(f"  Approve {ref} for the {escape(agent)} worker? [Y/n] ")
             if answer.strip().lower().startswith("n"):
@@ -1600,7 +1611,7 @@ def cmd_approve(argv: list[str]) -> int:
                 return 1
         try:
             task = board.approve(HUMAN, task_id, agent, return_to, args.kind, shown=content_of(task, events),
-                                 models=models, efforts=efforts)
+                                 models=models, efforts=efforts, fallbacks=fallbacks)
             break
         except Changed:
             if attempt == 5:
@@ -1610,6 +1621,8 @@ def cmd_approve(argv: list[str]) -> int:
                           soft_wrap=True)
     if args.kind != "edit":
         _ok(f"Approved {task.ref} for {agent} to {KIND_VERBS[args.kind]}, once, through Ixel MAT.")
+        if fallbacks:
+            _hint(f"If {agent} hits its usage limit, {', then '.join(fallbacks)} take over, in turn.")
         _hint(f"Nothing in the project changes; the result goes to .handoff/outputs/{task.ref} and the task to "
               f"{_who(return_to)}.")
         console.print(f"  [{C['dim']}]Run it with:[/] handoff run {task.ref}", soft_wrap=True)
@@ -1622,6 +1635,9 @@ def cmd_approve(argv: list[str]) -> int:
           f", as a chain: {at(models[0])} plans, then {', '.join(at(m) for m in models[1:])} do the steps"
           ) if models else (f", at {efforts['']} effort" if "" in efforts else "")
     _ok(f"Approved {task.ref} for the {agent} worker{on}.")
+    if fallbacks:
+        from handoff.rankings import shown as in_words
+        _hint(f"If a model hits its usage limit, the run goes on with {in_words(fallbacks)}, and says so.")
     how = _sandbox_word(agent)
     if how is None:
         console.print(f"  [{C['gold']}]⚠[/] {escape(agent)} only runs inside its sandbox, which can't run here "
@@ -1632,6 +1648,32 @@ def cmd_approve(argv: list[str]) -> int:
     console.print(f"  [{C['dim']}]Start it with:[/] handoff run {task.ref}  [{C['dim']}](or keep a worker "
                   f"running: handoff worker --agent {escape(agent)})[/]", soft_wrap=True)
     return 0
+
+
+def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: Path) -> list[str]:
+    """Who takes over a run when a model is out of usage, best first: the models ranked below its own for its
+    kind of work (rankings.py) that this computer has an agent for. A chain's planner falls back to the next
+    best planner, its steps to the next best coders. [] for a run that can't fall back (pictures)."""
+    from handoff import rankings
+    from handoff.approvals import FALLBACK_KINDS, MAX_FALLBACKS
+    if kind not in FALLBACK_KINDS:
+        return []
+    if kind == "edit":
+        from handoff import adapters
+        from handoff.worker import AGENTS
+        have = {name for name, spec in AGENTS.items()
+                if (spec.kind == "local" or (spec.command and adapters.find_on_path(spec.command)))
+                and (not spec.needs_ok or adapters.enabled(name))}
+        if models and len(models) > 1:
+            found = rankings.fallbacks("planning", agent, models[0], have) + \
+                rankings.fallbacks("coding", agent, models[1], have)
+            return list(dict.fromkeys(found))[:MAX_FALLBACKS]
+        return rankings.fallbacks("coding", agent, models[0] if models else None, have)
+    from handoff import asks
+    from handoff.board import safe_name
+    roster = asks.ixel_roster(root)
+    have = {safe_name(a.get("name")) or "" for a in roster.agents if a.get("ready")}
+    return rankings.fallbacks(rankings.KIND_JOB[kind], agent, None, have, agents_only=True)
 
 
 def _models(parser, args) -> tuple[list[str] | None, dict[str, str] | None]:
@@ -1978,6 +2020,45 @@ def cmd_run(argv: list[str]) -> int:
     if args.json:
         print(json.dumps({"results": results}, indent=2))
     return 0 if all(r["ok"] for r in results) else 1
+
+
+def cmd_rankings(argv: list[str]) -> int:
+    import json
+
+    from handoff import rankings
+
+    parser = _parser("rankings", "Which models are best at what, best first, from public benchmarks: coding, "
+                                 "planning, reviewing, writing, pictures and video. When a model hits its usage "
+                                 "limit, a run goes on with the next one down that you have. `update` gets the "
+                                 "newest rankings from Handoff's own repository (nothing about you is sent).",
+                     project=False)
+    parser.add_argument("action", nargs="?", choices=("update",), metavar="update", help="get the newest rankings")
+    parser.add_argument("--job", choices=tuple(rankings.JOBS), help="show one job only")
+    parser.add_argument("--json", action="store_true", help="print it as JSON")
+    args = parser.parse_args(argv)
+    if args.action == "update":
+        try:
+            updated = rankings.update()
+        except rankings.RankingsError as exc:
+            raise CommandError(str(exc)) from None
+        console.print(f"  [{C['green']}]✓[/] Rankings updated (as of {escape(updated)}).")
+        return 0
+    ranks, updated = rankings.load()
+    jobs = [args.job] if args.job else list(rankings.JOBS)
+    if args.json:
+        print(json.dumps({"updated": updated, "ranks": {j: ranks.get(j, []) for j in jobs},
+                          "sources": [{"name": n, "url": u} for n, u in rankings.SOURCES]}, indent=2))
+        return 0
+    print_banner()
+    console.print(f"  [{C['dim']}]Best first, as of {escape(updated)}. Update with: handoff rankings update[/]")
+    for job in jobs:
+        console.print(f"\n  [{C['blue']}]{escape(rankings.JOBS[job].capitalize())}[/]")
+        for n, entry in enumerate(ranks.get(job, []), 1):
+            console.print(f"    {n:>2}. {escape(rankings.shown([entry]))}", soft_wrap=True)
+    console.print(f"\n  [{C['dim']}]Sources:[/]")
+    for name, url in rankings.SOURCES:
+        console.print(f"    [{C['dim']}]{escape(name)}{' ' + escape(url) if url else ''}[/]", soft_wrap=True)
+    return 0
 
 
 def cmd_agents(argv: list[str]) -> int:
@@ -2484,6 +2565,7 @@ HANDLERS = {
     "dispatch": cmd_dispatch,
     "run": cmd_run,
     "agents": cmd_agents,
+    "rankings": cmd_rankings,
     "worker": cmd_worker,
     "setup": cmd_setup,
     "doctor": cmd_doctor,

@@ -1245,3 +1245,22 @@ def test_json_keeps_stdout_for_the_json_alone(project, no_inner_gitignore, capsy
         assert code == 0 and data["tasks"] == []
     else:
         assert data["checks"] and code == (1 if data["problems"] else 0)
+
+
+def test_approve_shows_who_takes_over_at_a_usage_limit_and_seals_it(project, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "suggested_fallbacks", lambda kind, agent, models, root: ["claude:claude-sonnet-5-5"])
+    run(capsys, "add", "Task")
+    code, out, err = run(capsys, "approve", "T-1", "claude", "--model", "claude-opus-5-5", "--yes")
+    assert code == 0, err
+    assert "If a model hits its usage limit, the run goes on with: claude-sonnet-5-5" in out
+    assert Board.open(project).events(1)[-1].data["fallbacks"] == ["claude:claude-sonnet-5-5"]
+    code, out, err = run(capsys, "approve", "T-1", "claude", "--model", "claude-opus-5-5", "--no-fallback", "--yes")
+    assert code == 0 and "usage limit" not in out
+    assert "fallbacks" not in Board.open(project).events(1)[-1].data
+
+
+def test_rankings(project, capsys):
+    code, out, _ = run(capsys, "rankings", "--job", "coding")
+    assert code == 0 and "1. claude-sonnet-5-5" in out and "Making pictures" not in out
+    code, out, _ = run(capsys, "rankings", "--json")
+    assert code == 0 and '"video"' in out and '"updated"' in out

@@ -381,10 +381,17 @@ def _started(board: Board, root: Path, task: Task, approval: Event, runner: Runn
         target = approvals.check_target(approval.data["target"])
         if target is None:
             return fail("The commits this review was approved for aren't readable.")
+    from handoff.board import run_fallbacks
+    fallbacks = run_fallbacks(approval) if kind in ("answer", "review") else []
     try:
-        if kind in ("image", "review") and roster is None:
+        if (kind in ("image", "review") or fallbacks) and roster is None:
             roster = ixel_roster(root, runner)
-        command, stdin, reads = command_for(ixel, root, task, kind, agent, roster, outputs, target)
+        asked = agent
+        if fallbacks:  # Ixel asks the next of them when one is out of usage (`ixel ask --agent a,b`)
+            ready = {safe_name(a.get("name")) for a in roster.agents if a.get("ready")} if roster else set()
+            names = [agent] + [f.partition(":")[0] for f in fallbacks]
+            asked = ",".join(dict.fromkeys(n for n in names if n == agent or n in ready))
+        command, stdin, reads = command_for(ixel, root, task, kind, asked, roster, outputs, target)
         output_folder(root, outputs)
     except RunProblem as exc:
         return fail(str(exc))
@@ -470,6 +477,11 @@ def _answer(data: dict, root: Path, outputs: Path, reads: str) -> tuple[str, str
         raise RunProblem(f"Couldn't save the answer to {path.as_posix()}: {exc}") from exc
     who = clean_line(data.get("label") or data.get("agent") or "")[:80]
     model = clean_line(data.get("model") or "")[:80]
+    # The models Ixel asked first that were out of usage: it went on with the next (its run's fallbacks)
+    skipped = [clean_line(str(s.get("label") or s.get("agent") or ""))[:80] for s in data.get("skipped") or []
+               if isinstance(s, dict)][:5]
+    swapped = (f"{' and '.join(n for n in skipped if n)} hit {'its' if len(skipped) == 1 else 'their'} usage limit, "
+               f"so {who or 'the next model'} took over." if any(skipped) else "")
     done = _clip(answer)
     cut = done.endswith("[… cut]") or done.startswith("[withheld")
     # What Ixel left out of what it read (new files that hold keys, say), in its words
@@ -477,7 +489,7 @@ def _answer(data: dict, root: Path, outputs: Path, reads: str) -> tuple[str, str
     left = " ".join(n for n in (
         f"Answered by {who}{f' ({model})' if model else ''} through Ixel; nothing in the project changed." if who
         else "Answered through Ixel; nothing in the project changed.",
-        reads, *notes,
+        swapped, reads, *notes,
         f"The full answer is in {path.as_posix()}." if cut else "") if n)
     return done, left, f"Read it here, or in {path.as_posix()}.", [path.as_posix()]
 

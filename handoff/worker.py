@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
-from handoff import approvals, gitwork, sandbox, usage
+from handoff import approvals, gitwork, limits, sandbox, usage
 from handoff.board import HUMAN, Board, BoardError, Event, Task, run_efforts, run_kind, run_models, safe_name
 from handoff.describe import describe
 from handoff.fence import Reply, numbered, quote_event
@@ -199,6 +199,11 @@ class RunResult:
 
 class _Withheld(Exception):
     """The changes look like they hold a secret, so nothing was committed; the message says where."""
+
+
+def _and(items: list[str]) -> str:
+    """["a", "b", "c"] → "a, b and c"."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def _on(agent: str, model: str | None, effort: str | None) -> str:
@@ -708,6 +713,7 @@ class Worker:
         # Tasks that couldn't start (task id: its approval, and the login problem then): run_pending passes
         # them by until the approval or the login changes, so a worker doesn't retry one every few seconds
         self._waiting: dict[int, tuple[int, str | None]] = {}
+        self._helpers: dict[str, "Worker"] = {}  # the workers of other agents a run's fallbacks name
 
     def check(self) -> None:
         """Refuse to start where the worker's protections can't hold, or fall back to a mode where they do."""
@@ -1030,21 +1036,24 @@ class Worker:
             return fail(f"The worktree has links pointing outside it ({shown}), so Handoff won't run an agent "
                         f"there. Remove them from {branch}, then approve the task again.", branch=branch)
 
+        from handoff.board import run_fallbacks
         models, efforts = run_models(approval), run_efforts(approval)
         if len(models) > 1:
-            return self._chain(task, history, branch, return_to, target, worktree, models, efforts, fail)
+            return self._chain(task, history, branch, return_to, target, worktree, models, efforts, fail,
+                               run_fallbacks(approval))
         model = models[0] if models else None
         effort = self._effort(efforts.get(model or ""))
         prompt = build_prompt(self.spec, task, history, branch, target)
-        login_note, used, reply = None, None, ""
+        deadline = time.monotonic() + self.timeout
+        swaps: list[str] = []
         try:
-            proc, login_note = self._launch(worktree, prompt, model, effort=effort)
-            reply, used, error = self._read(proc)
-            problem = None if proc.returncode == 0 and not error else self._exit_problem(proc, error)
+            reply, used, problem, (agent, model, effort), login_note = self._launch_or_fallback(
+                worktree, prompt, model, effort, run_fallbacks(approval), set(), swaps,
+                lambda: max(deadline - time.monotonic(), 1.0))
         except subprocess.TimeoutExpired:
-            proc, problem = None, f"{agent} was stopped after {duration(self.timeout)}."
-        except (OSError, WorkerUnavailable) as exc:
-            proc, problem = None, f"Couldn't start {agent}: {exc}"
+            reply, used, problem, login_note = "", None, f"{agent} was stopped after {duration(self.timeout)}.", None
+        if swaps:
+            login_note = "\n\n".join(n for n in (" ".join(swaps), login_note) if n)
 
         try:  # keep whatever it changed, even from a run that failed, unless it holds a secret
             commit, tokens = self._commit(worktree, f"{task.ref}: {task.title}\n\nMade by the Handoff worker "
@@ -1064,17 +1073,19 @@ class Worker:
         if commit is None:
             done = "No files were changed.\n\n" + done
         return self._finish(task, return_to, branch, worktree, commit, files, done, left, verify, token, login_note,
-                            used, fail)
+                            used, fail, by=agent, took_over=[s for s in swaps if "took over" in s])
 
     def _chain(self, task: Task, history: list[Event], branch: str, return_to: str, target: dict | None,
                worktree: gitwork.Worktree, models: list[str], efforts: dict[str, str],
-               fail: Callable[..., RunResult]) -> RunResult:
+               fail: Callable[..., RunResult], fallbacks: list[str] | None = None) -> RunResult:
         """A chain of models, biggest first: models[0] reads the task and plans the steps, giving each to one of the
         others; then each step runs in turn, in the same worktree, and is committed on its own, so the branch shows
         which model made what. `efforts`: how hard each model thinks. The whole chain gets the run's time limit.
         If a step fails, the chain stops there: the steps before it stay committed, and the reason says what they
-        did."""
+        did. `fallbacks` take a model's place when it's out of usage (the planner's only on an agent that can
+        plan), and that model is benched for the rest of the chain."""
         agent, planner = self.spec.name, models[0]
+        fallbacks = fallbacks or []
         if not self.spec.reports_usage:
             return fail(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}, not {agent}.")
         deadline = time.monotonic() + self.timeout
@@ -1087,20 +1098,25 @@ class Worker:
         def left_time() -> float:
             return max(deadline - time.monotonic(), 1.0)
 
+        benched: set[tuple[str, str]] = set()  # out of usage: not tried again in this chain
+        ran: dict[str, tuple[str, str, str | None]] = {}  # each model of the chain → who last ran in its place
+        took: list[str] = []  # who took over from whom, for the run's summary
+
         def launch(prompt: str, model: str, plan: bool = False) -> tuple[str, str | None]:
-            """Run one model; its reply, and what went wrong (None if nothing did)."""
+            """Run one model (or, when it's out of usage, the next of the run's fallbacks); its reply, and what
+            went wrong (None if nothing did)."""
+            swaps: list[str] = []
             try:
-                proc, note = self._launch(worktree, prompt, model, plan=plan, timeout=left_time(),
-                                          effort=self._effort(efforts.get(model)))
+                reply, used, problem, who, note = self._launch_or_fallback(
+                    worktree, prompt, model, self._effort(efforts.get(model)), fallbacks, benched, swaps, left_time,
+                    plan=plan)
             except subprocess.TimeoutExpired:
                 return "", f"{model} was stopped: the chain ran past its {duration(self.timeout)}."
-            except (OSError, WorkerUnavailable) as exc:
-                return "", f"Couldn't start {agent} on {model}: {exc}"
-            if note:
-                notes.append(note)
-            reply, used, error = self._read(proc)
+            ran[model] = who
+            notes.extend(n for n in (" ".join(swaps), note) if n)
+            took.extend(s for s in swaps if "took over" in s)
             spent.append(used)
-            return reply, (None if proc.returncode == 0 and not error else self._exit_problem(proc, error))
+            return reply, problem
 
         def stop(reason: str) -> RunResult:
             """The chain stops here: why, and what the steps before it did and where their work is."""
@@ -1125,11 +1141,12 @@ class Worker:
             reply, problem = launch(step_prompt(self.spec, task, history, branch, target, planner, steps, number),
                                     step.model)
             cost = usage.total_cost(usage.merge(*spent[before:]))
-            effort = efforts.get(step.model)
+            by_agent, by_model, effort = ran.get(step.model, (agent, step.model, efforts.get(step.model)))
             try:
                 made, found = self._commit(worktree, f"{task.ref} step {number}/{len(steps)}: {step.title}\n\nMade by "
-                                           f"the Handoff worker ({_on(agent, step.model, effort)}), planned by "
-                                           f"{planner}, from the task as the person approved it.\n")
+                                           f"the Handoff worker ({_on(by_agent, by_model, effort)}), planned by "
+                                           f"{ran.get(planner, (agent, planner, None))[1]}, from the task as the "
+                                           "person approved it.\n")
             except _Withheld as exc:
                 return stop(f"Step {number} of {len(steps)} ({step.model}: {step.title}): "
                             f"{problem + ' ' if problem else ''}{exc}")
@@ -1141,7 +1158,8 @@ class Worker:
                 return stop(f"Step {number} of {len(steps)} ({step.model}: {step.title}) failed: {problem}{kept}")
             commit, tokens = made or commit, tokens + found
             step_done, step_left, step_verify = parse_reply(reply)
-            by = f"{step.model}, {effort} effort" if effort else step.model
+            shown_model = by_model if by_agent == agent else f"{by_agent} ({by_model})" if by_model else by_agent
+            by = f"{shown_model}, {effort} effort" if effort else shown_model
             done_parts.append(f"Step {number} of {len(steps)}, by {by} (about ${cost:.4f}): {step.title}"
                               f"{'' if made else ' (changed no files)'}\n{step_done}")
             if step_verify and step_verify not in verify_parts:
@@ -1151,14 +1169,74 @@ class Worker:
             files = gitwork.changed_files(self.root, worktree)
         except gitwork.GitError as exc:
             return stop(f"Reading what the chain changed failed: {exc}")
-        done = _clip(f"{planner} planned {len(steps)} step{'s' if len(steps) > 1 else ''}.\n\n"
+        planned_by = ran.get(planner, (agent, planner, None))[1] or planner
+        done = _clip(f"{planned_by} planned {len(steps)} step{'s' if len(steps) > 1 else ''}.\n\n"
                      + "\n\n".join(done_parts))
         if commit is None:
             done = "No files were changed.\n\n" + done
         token = _token_note(sorted(set(tokens))) if commit else None
         verify = _clip("\n\n".join(verify_parts))
         return self._finish(task, return_to, branch, worktree, commit, files, done, left, verify, token,
-                            "\n\n".join(notes) or None, usage.merge(*spent), fail)
+                            "\n\n".join(notes) or None, usage.merge(*spent), fail, took_over=took)
+
+    def _launch_or_fallback(self, worktree: gitwork.Worktree, prompt: str, model: str | None, effort: str | None,
+                            fallbacks: list[str], benched: set[tuple[str, str]], swaps: list[str],
+                            time_left: Callable[[], float], plan: bool = False,
+                            ) -> tuple[str, dict | None, str | None, tuple[str, str, str | None], str | None]:
+        """Run `model` on this agent; when it's out of usage (limits.py), bench it and run the next of the run's
+        `fallbacks` ("agent:model", sealed in its approval) that isn't benched, and so on: a model that hits its
+        plan's limit doesn't stop the work. Returns the reply, the usage of every try, what went wrong (None if
+        nothing did), who ran it (agent, model, effort) and a login note; `swaps` gets a sentence for each
+        model that was out of usage. Any other failure stops there: it needs fixing, and the next model
+        working would hide it. TimeoutExpired is raised as it comes."""
+        from handoff.rankings import split
+        tries = [(self.spec.name, model or "", effort)] + [(*split(entry), None) for entry in fallbacks]
+        spent: list[dict | None] = []
+        out: list[str] = []  # the models found out of usage, in words
+        first = True
+        for agent, name, level in tries:
+            if (agent, name) in benched or (plan and agent not in CHAIN_AGENTS):
+                continue
+            label = name or agent
+            try:
+                worker = self if agent == self.spec.name else self._helper(agent)
+                proc, note = worker._launch(worktree, prompt, name or None, plan=plan, timeout=time_left(),
+                                            effort=worker._effort(level))
+            except (OSError, WorkerUnavailable) as exc:
+                if first:
+                    return "", usage.merge(*spent), f"Couldn't start {agent}{f' on {name}' if name else ''}: {exc}", \
+                        (agent, name, level), None
+                swaps.append(f"{label} couldn't take over ({clean_line(str(exc))[:200]}).")
+                continue
+            first = False
+            reply, used, error = worker._read(proc)
+            spent.append(used)
+            if proc.returncode == 0 and not error:
+                if out:
+                    swaps.append(f"{_and(out)} hit {'its' if len(out) == 1 else 'their'} usage limit, so {label} "
+                                 "took over.")
+                return reply, usage.merge(*spent), None, (agent, name, level), note
+            said = error or proc.stderr or proc.stdout or ""
+            if fallbacks and limits.out_of_usage(said[-2000:]):
+                benched.add((agent, name))
+                out.append(label)
+                continue
+            return reply, usage.merge(*spent), self._exit_problem(proc, error), (agent, name, level), note
+        why = " ".join(swaps[-5:])  # (who couldn't take over, and why)
+        if out:
+            return "", usage.merge(*spent), (f"{_and(out)} hit {'its' if len(out) == 1 else 'their'} usage limit, and "
+                                             f"there was no other model to take over. {why}").strip(), tries[0], None
+        return "", usage.merge(*spent), f"No model could run it: every one is out of usage. {why}".strip(), \
+            tries[0], None
+
+    def _helper(self, agent: str) -> "Worker":
+        """Another agent's worker, for a fallback the approval names (checked once per run)."""
+        if agent not in self._helpers:
+            helper = Worker(self.board, self.root, agent, self.runner, self.timeout, share=self.share)
+            helper.check()
+            helper.check_login()  # (one you haven't enabled doesn't take over either)
+            self._helpers[agent] = helper
+        return self._helpers[agent]
 
     def _read(self, proc: "subprocess.CompletedProcess[str]") -> tuple[str, dict | None, str | None]:
         """The agent's reply, what it used and what went wrong, from its output."""
@@ -1195,14 +1273,18 @@ class Worker:
 
     def _finish(self, task: Task, return_to: str, branch: str, worktree: gitwork.Worktree, commit: str | None,
                 files: list[str], done: str, left: str, verify: str, token: str | None, login_note: str | None,
-                used: dict | None, fail: Callable[..., RunResult]) -> RunResult:
+                used: dict | None, fail: Callable[..., RunResult], by: str | None = None,
+                took_over: list[str] | None = None) -> RunResult:
+        """`by`: the agent that did the work, when a fallback of another agent took over (its note is the one that
+        holds); `took_over`: what the run's summary says about models that were out of usage."""
         agent = self.spec.name
+        doer = self._helpers[by] if by and by != agent and by in self._helpers else self
         fallback = (f"Its sandbox can't run here, so {agent} ran edit-only; `handoff doctor` says what it needs."
-                    if self.fallback_reason else None)
+                    if self.fallback_reason and doer is self else None)
         shared = (f"You shared these folders with it, read-only: {', '.join(_home_relative(p) for p in self.shared)}."
                   if self.shared and self.spec.sandboxed else None)
         spent = ("Used: " + "; ".join(usage.lines(used)) + " (estimated at API prices)") if used else None
-        notes = "\n\n".join(n for n in (token, self.spec.note, shared, fallback, login_note, spent) if n)
+        notes = "\n\n".join(n for n in (token, doer.spec.note, shared, fallback, login_note, spent) if n)
         left = f"{left}\n\n{notes}" if left else notes
         try:
             finished = self.board.finish_run(agent, task.id, return_to, done, left, verify, files, branch,
@@ -1210,8 +1292,9 @@ class Worker:
         except BoardError as exc:  # (it can't stay in progress: nobody is running it now)
             return fail(f"The board didn't take the result: {exc} The work is on {branch}.", used, branch=branch,
                         commit=commit)
-        return RunResult(finished, True, f"handed to {return_to}" + (f". {token}" if token else ""), branch, commit,
-                         used=used)
+        said = ". ".join([f"handed to {return_to}", *(t.rstrip(".") for t in took_over or [])]) + \
+            (f". {token}" if token else "")
+        return RunResult(finished, True, said, branch, commit, used=used)
 
     @staticmethod
     def _exit_problem(proc: "subprocess.CompletedProcess[str]", error: str | None = None) -> str:

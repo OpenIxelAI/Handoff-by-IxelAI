@@ -905,7 +905,8 @@ def test_the_edit_worker_hands_other_kinds_to_ixel(repo, fake_ixel, run_cli):
     code, out, _ = run_cli("worker", "--agent", "claude", "--once")
     assert code == 0 and "T-1 handed back to you" in out and "the work is on" not in out
     assert "▶ T-1 claude answers, through Ixel MAT…" in out and "worktrees" not in out
-    assert [c["argv"][:3] for c in fake_ixel("ask")] == [["ask", "--agent", "claude"]]
+    # (with the next best models Ixel has after it, for when claude is out of usage: rankings.py)
+    assert [c["argv"][:3] for c in fake_ixel("ask")] == [["ask", "--agent", "claude,codex,gemini,grok"]]
     assert not (repo / ".handoff" / "worktrees" / "T-1").exists()  # an answer never gets a worktree
 
 

@@ -18,7 +18,9 @@ by writing to the board. A review or a change of a pull request also seals its t
 `target`: a review reads them, a change starts from its head), so it can't be pointed at other code.
 An edit can name the models it runs on (its `models`: one model, or a chain where the first plans and the
 rest do the steps), sealed too, so a board can't move a run to a bigger, dearer model. So is how hard each
-of them thinks (its `efforts`: a level for each model, in the agent's own words, like high or max).
+of them thinks (its `efforts`: a level for each model, in the agent's own words, like high or max), and who
+takes over when a model is out of usage (its `fallbacks`, from rankings.py, shown to the person when they
+approve): a board can't add a model to that list either.
 
 Each approval is good for one run. When a run starts, its nonce is added to a list next to the key
 (approvals-used), and an approval whose nonce is on it never runs again, even if it's copied back into
@@ -133,6 +135,24 @@ def check_models(models: object) -> list[str] | None:
 
 
 _EFFORT = re.compile(r"^[a-z]{1,16}$")
+FALLBACK_KINDS = ("edit", "answer", "review")  # the runs that can go on with another model when one is out of usage
+MAX_FALLBACKS = 5
+_FALLBACK_AGENT = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+
+def check_fallbacks(fallbacks: object) -> list[str] | None:
+    """A run's fallbacks as an approval keeps them (rankings.py): 1 to MAX_FALLBACKS entries, each "agent:model"
+    or a bare "agent", best first, no repeats: who takes over, in turn, when a model is out of usage. None when
+    it isn't one."""
+    if not isinstance(fallbacks, list) or not 0 < len(fallbacks) <= MAX_FALLBACKS:
+        return None
+    for entry in fallbacks:
+        if not isinstance(entry, str):
+            return None
+        agent, colon, model = entry.partition(":")
+        if not _FALLBACK_AGENT.fullmatch(agent) or (colon and not _MODEL.fullmatch(model)):
+            return None
+    return list(fallbacks) if len(set(fallbacks)) == len(fallbacks) else None
 
 
 def check_efforts(efforts: object, models: list[str] | None) -> dict[str, str] | None:
@@ -163,7 +183,7 @@ def check_target(target: object) -> dict[str, str] | None:
 
 def _message(board_path: Path, task_id: int, worker: str, kind: str, return_to: str, at: str, nonce: str,
              target: Mapping | None = None, content: str | None = None, models: list[str] | None = None,
-             efforts: Mapping | None = None) -> bytes:
+             efforts: Mapping | None = None, fallbacks: list[str] | None = None) -> bytes:
     fields = {"board": board_identity(board_path), "task": task_id, "worker": worker, "kind": kind,
               "return_to": return_to, "at": at, "nonce": nonce}
     if target is not None:  # (approvals without one seal what they always did)
@@ -172,6 +192,8 @@ def _message(board_path: Path, task_id: int, worker: str, kind: str, return_to: 
         fields["models"] = list(models)
     if efforts is not None:
         fields["efforts"] = dict(efforts)
+    if fallbacks is not None:
+        fields["fallbacks"] = list(fallbacks)
     if content is not None:  # (approvals from before Handoff sealed it don't run: see Board._sealed)
         fields["content"] = content
     return json.dumps(fields, sort_keys=True, ensure_ascii=True).encode("ascii")
@@ -179,17 +201,19 @@ def _message(board_path: Path, task_id: int, worker: str, kind: str, return_to: 
 
 def seal(key: bytes, board_path: Path, task_id: int, worker: str, return_to: str, at: str,
          kind: str = "edit", target: Mapping | None = None, content: str | None = None,
-         models: list[str] | None = None, efforts: Mapping | None = None) -> dict[str, str]:
+         models: list[str] | None = None, efforts: Mapping | None = None,
+         fallbacks: list[str] | None = None) -> dict[str, str]:
     """The fields an approval event stores: a fresh nonce and the seal over everything it approves."""
     nonce = secrets.token_hex(16)
     mac = hmac.new(key, _message(board_path, task_id, worker, kind, return_to, at, nonce, target, content, models,
-                                 efforts), hashlib.sha256).hexdigest()
+                                 efforts, fallbacks), hashlib.sha256).hexdigest()
     return {"nonce": nonce, "seal": mac}
 
 
 def is_sealed(key: bytes | None, board_path: Path, task_id: int, data: Mapping, at: str) -> bool:
     """Was this approval made here, by `handoff approve`, for exactly this board, task and kind of run (and
-    the commits it's of, the models it runs on and how hard they think, and the content it sealed)?"""
+    the commits it's of, the models it runs on, how hard they think and who takes over when one is out of usage,
+    and the content it sealed)?"""
     nonce, mac, worker, return_to = (data.get(k) for k in ("nonce", "seal", "worker", "return_to"))
     kind = data.get("kind", "edit")  # approvals for an edit didn't always say so
     if key is None or not all(isinstance(v, str) and v for v in (nonce, mac, worker, return_to, kind)):
@@ -209,9 +233,14 @@ def is_sealed(key: bytes | None, board_path: Path, task_id: int, data: Mapping, 
         efforts = check_efforts(data["efforts"], models)
         if efforts is None or kind not in MODEL_KINDS:
             return False
+    fallbacks = None
+    if "fallbacks" in data:
+        fallbacks = check_fallbacks(data["fallbacks"])
+        if fallbacks is None or kind not in FALLBACK_KINDS:
+            return False
     content = data.get("content")
     if content is not None and not (isinstance(content, str) and _HEX.fullmatch(content)):
         return False
     expected = hmac.new(key, _message(board_path, task_id, worker, kind, return_to, at, nonce, target, content,
-                                      models, efforts), hashlib.sha256).hexdigest()
+                                      models, efforts, fallbacks), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, mac)
