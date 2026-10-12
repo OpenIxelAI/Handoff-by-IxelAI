@@ -3,7 +3,9 @@
 Skipped where `opencode` isn't installed. The model is a local HTTP server speaking the OpenAI chat API (as
 Ollama does), set up as a provider in a private OpenCode config; it asks OpenCode's tools to read a file
 outside the worktree, write one outside it, and write HELLO.txt inside it. The run must offer no shell, web or
-subagent tool at all, refuse both escapes, and commit only HELLO.txt.
+subagent tool at all, refuse both escapes, and commit only HELLO.txt. OpenCode 2 offers those tools (its free
+models refuse a run without them), so there it also tries each one: every call must be rejected. Its execute tool (JavaScript that can make HTTP
+requests) mustn't be offered at all.
 """
 import json
 import os
@@ -26,17 +28,43 @@ def git(root, *args):
     return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", check=True)
 
 
+def opencode_2() -> bool:
+    """OpenCode 2 (no --pure): its other tools are offered but rejected, rather than taken away."""
+    help_text = subprocess.run([find_on_path("opencode"), "run", "--help"], capture_output=True, text=True,
+                               encoding="utf-8", timeout=60)
+    return "--pure" not in help_text.stdout + help_text.stderr
+
+
 class Model:
-    def __init__(self, outside: Path):
+    def __init__(self, outside: Path, v2: bool = False):
         self.requests = []
-        steps = [("read", {"filePath": str(outside / "secret.txt")}),
-                 ("write", {"filePath": str(outside / "escaped.txt"), "content": "out"}),
-                 ("write", {"filePath": "HELLO.txt", "content": "hi\n"})]
+        self.fetched = []  # (anything that reached this server other than the model's own API)
+        self.httpd = HTTPServer(("127.0.0.1", 0), self.handler())
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v1"
+        key = "path" if v2 else "filePath"
+        self.steps = [("read", {key: str(outside / "secret.txt")}),
+                      ("write", {key: str(outside / "escaped.txt"), "content": "out"})]
+        if v2:  # (each one needs your say-so, which a run with no one to ask can't get)
+            here = self.url.removesuffix("/v1")
+            self.steps += [("shell", {"command": "touch SHELL_RAN.txt", "description": "make a file"}),
+                           ("webfetch", {"url": f"{here}/webfetch"}),
+                           ("subagent", {"agent": "general", "description": "x",
+                                         "prompt": "Write SUBAGENT_RAN.txt."})]
+        self.steps.append(("write", {key: "HELLO.txt", "content": "hi\n"}))
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def handler(self):
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
+
+            def do_GET(self):
+                outer.fetched.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"fetched")
 
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -50,6 +78,7 @@ class Model:
                     return
                 done = sum(1 for m in request["messages"] if m.get("role") == "tool")
                 tools = {t["function"]["name"] for t in request.get("tools") or []}
+                steps = outer.steps
                 if tools and done < len(steps):
                     name, args = steps[done]
                     delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": f"c{done}", "type": "function",
@@ -69,17 +98,15 @@ class Model:
                     self.wfile.write(b"data: " + json.dumps({"id": "x", "object": "chat.completion.chunk",
                                                              "model": "stub", **chunk}).encode() + b"\n\n")
                 self.wfile.write(b"data: [DONE]\n\n")
-
-        self.httpd = HTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v1"
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        return Handler
 
 
 def test_opencode_edits_only_inside_its_worktree(tmp_path, monkeypatch):
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.txt").write_text("the secret", encoding="utf-8")
-    model = Model(outside)
+    v2 = opencode_2()
+    model = Model(outside, v2)
     # A private home: OpenCode's config (the stand-in provider) and its data, nothing of yours
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
@@ -110,10 +137,17 @@ def test_opencode_edits_only_inside_its_worktree(tmp_path, monkeypatch):
     assert result.ok, result.message
     chats = [r for r in model.requests if r.get("tools")]
     offered = {t["function"]["name"] for r in chats for t in r["tools"]}
-    assert offered and not offered & {"bash", "task", "webfetch", "websearch", "skill"}, offered
+    results = [m for m in chats[-1]["messages"] if m.get("role") == "tool"]
+    assert len(results) == len(model.steps), results  # (every step was tried)
+    if v2:
+        assert {"shell", "webfetch", "subagent"} <= offered and "execute" not in offered, offered
+        assert all("permission.rejected" in m["content"] for m in results[:-1]), results
+    else:
+        assert offered and not offered & {"bash", "task", "webfetch", "websearch", "skill"}, offered
     assert not (outside / "escaped.txt").exists()
-    said = json.dumps([m for m in chats[-1]["messages"] if m.get("role") == "tool"])
+    said = json.dumps(results)
     assert "the secret" not in said
+    assert model.fetched == []
     assert git(repo, "show", f"handoff/{task.ref}:HELLO.txt").stdout == "hi\n"
     changed = git(repo, "diff", "--name-only", f"HEAD..handoff/{task.ref}").stdout.split()
     assert changed == ["HELLO.txt"]

@@ -138,6 +138,7 @@ class AgentSpec:
     default_model: str = ""              # the model it runs when the approval names none ("" : its own choice)
     models_args: tuple[str, ...] = ()    # `<command> <models_args>` lists the models it can run, one per line
     custom: bool = False                 # you added it yourself (agents.toml), rather than Handoff knowing it
+    newer: "AgentSpec | None" = None     # the same agent's newer command line, run where its --help has those flags
 
 
 _CLAUDE_FLAGS = ("--restricted", "--tools", "--strict-mcp-config", "--permission-mode", "--no-session-persistence",
@@ -744,6 +745,10 @@ class Worker:
                                     f"{self.spec.name} takes the task on its command line, where cmd.exe would read "
                                     "it. Handoff won't run it that way on Windows.")
         missing = [flag for flag in self.spec.required_flags if flag not in self.help]
+        newer = self.spec.newer
+        if missing and newer and newer.help_args == self.spec.help_args \
+                and all(flag in self.help for flag in newer.required_flags):
+            self.spec, missing = newer, []
         if missing:
             raise WorkerUnavailable(f"This version of {self.spec.command} doesn't have {', '.join(missing)}, which "
                                     "the worker needs to keep the agent in its worktree. Update it and try again.")

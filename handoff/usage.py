@@ -73,7 +73,8 @@ def parse_opencode(stdout: str, model: str) -> tuple[str, dict | None, str | Non
         elif event.get("type") == "error":
             found = event.get("error") if isinstance(event.get("error"), dict) else {}
             data = found.get("data") if isinstance(found.get("data"), dict) else {}
-            error = str(data.get("message") or found.get("name") or "OpenCode reported an error")[:500]
+            error = str(data.get("message") or found.get("message") or found.get("name")
+                        or "OpenCode reported an error")[:500]
     reply = "".join(texts[order[-1]]) if order else ""
     used = check({"models": {model: totals}}) if steps else None
     return reply, used, error

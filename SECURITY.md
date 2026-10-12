@@ -458,7 +458,7 @@ depends on the agent, and `handoff agents` and the Board say which, for each:
 
 | Agent | What it can reach | Runs |
 |---|---|---|
-| OpenCode | its file tools only (read, edit, write, search), in the worktree: `OPENCODE_CONFIG_CONTENT` denies its shell, web, subagents, skills and other folders, and wins over your config and the project's (which isn't read at all) | once found |
+| OpenCode | its file tools only (read, edit, write, search), in the worktree: `OPENCODE_CONFIG_CONTENT` denies its shell, web, subagents, skills and other folders, and wins over your config and the project's (which isn't read at all). OpenCode 2, whose free models refuse a run with tools taken away, runs with a private server (`--standalone`) and no `--auto`: its shell, web, subagent and skill tools and other folders are set to "ask", which a run with no one to ask rejects, and its `execute` tool (JavaScript that can make HTTP requests, which "ask" doesn't stop) is denied | once found |
 | A model on your computer (Ollama, LM Studio, any OpenAI-style server) | four tools that Handoff runs itself, on files in the worktree only (no `..`, absolute paths, links or `.git`); no commands | once found |
 | Hermes Agent | its file toolset only (`-t file`), with no terminal, browser, web or code execution; its file tools can read outside the worktree | once you enable it |
 | Kimi Code, Cline, OpenClaw, agents you add | their own permissions: they can run commands as you, with the network | once you enable it |
@@ -476,7 +476,10 @@ the run. On Windows, an agent that takes the task on its command line is refused
 a private OpenCode config. Your config and the project's both try to allow its shell and subagents. The fake
 model asks it to read a file outside the worktree and to write one there, then to write a file in the
 worktree. It fails if a shell, web, subagent or skill tool is offered at all, if the outside file's contents
-reach the model or the outside write lands, or if anything but the legitimate file is committed.
+reach the model or the outside write lands, or if anything but the legitimate file is committed. With
+OpenCode 2, which offers those tools, the fake model also calls its shell, web fetch and subagent tools, and the
+test fails unless each call is rejected, nothing reaches the fake server but the model's own API, and `execute`
+isn't offered.
 
 ### The attack tests
 

@@ -1409,6 +1409,10 @@ def _sandbox_word(agent: str) -> str | None:
     from handoff import sandbox
     from handoff.worker import AGENTS
     spec = AGENTS[agent]
+    if not spec.sandboxed:  # (OpenCode, a local model, an agent you added: they don't use Handoff's sandbox)
+        from handoff import adapters
+        return {"edit-only": "edit-only (no commands)", "files": "with its file tools only",
+                "full": "with its own permissions"}.get(spec.access, adapters.ACCESS.get(spec.access, spec.access))
     try:
         sandbox.check(spec.needs)
         return "in its sandbox"
@@ -1642,9 +1646,17 @@ def _models(parser, args) -> tuple[list[str] | None, dict[str, str] | None]:
     items = [args.model.strip()] if args.model else [m.strip() for m in args.chain.split(",") if m.strip()]
     if args.chain and len(items) < 2:
         parser.fail("A chain is two or more models, biggest first, like: --chain claude-opus-5-5,claude-haiku-5-5")
+    from handoff import adapters
+    from handoff.worker import CLAUDE_EFFORTS, CODEX_EFFORTS
+    # (a colon is also part of some models' names, like Ollama's qwen3:4b: what follows the last one is an effort
+    # only when it's a level some agent takes)
+    levels = {*CLAUDE_EFFORTS, *CODEX_EFFORTS, *adapters.OPENCODE_EFFORTS, *adapters.CLINE_EFFORTS,
+              *adapters.OPENCLAW_EFFORTS, *adapters.LOCAL_EFFORTS}
     names, efforts = [], {}
     for item in items:
-        name, _, level = (part.strip() for part in item.lower().partition(":"))
+        name, _, level = (part.strip() for part in item.lower().rpartition(":"))
+        if not name or level not in levels:
+            name, level = item.lower().strip(), ""
         names.append(name)
         if level or effort:
             efforts[name] = level or effort

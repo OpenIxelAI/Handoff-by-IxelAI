@@ -14,7 +14,8 @@ is told so. Nothing runs commands. The run stops when the model answers without 
 MAX_TURNS turns, or at its time limit.
 
 Small models think out loud (Qwen3's <think> blocks): that's taken out of the reply, and effort "none" asks the
-server not to think at all (reasoning_effort "none", Ollama's think = false, and Qwen3's /no_think).
+server not to think at all (Ollama's think = false, and Qwen3's /no_think). A thinking-only model (Qwen3-4B-Thinking-2507,
+say) thinks anyway; its thinking comes back apart from the reply.
 """
 from __future__ import annotations
 
@@ -237,7 +238,10 @@ def run_tool(root: Path, name: str, raw_args: object) -> str:
 # ── The run ──────────────────────────────────────────────────────────────────
 
 def strip_thinking(text: str) -> str:
-    return _THINK.sub("", text or "").strip()
+    text = _THINK.sub("", text or "")
+    if "</think>" in text:  # (the chat template opened it, so only its end is in the reply)
+        text = text.rsplit("</think>", 1)[1]
+    return text.strip()
 
 
 def run(url: str, model: str, prompt: str, cwd: str, timeout: float, effort: str | None = None,
@@ -262,10 +266,12 @@ def run(url: str, model: str, prompt: str, cwd: str, timeout: float, effort: str
         if left <= 0:
             raise subprocess.TimeoutExpired([url, model], timeout)
         body: dict = {"model": model, "messages": messages, "tools": TOOLS, "stream": False}
-        if effort:
+        if effort == "none":
+            # Ollama's own switch (other servers ignore it). Not reasoning_effort "none": Ollama's OpenAI API takes
+            # that to mean "don't split the thinking out", and a model that thinks anyway puts it in the reply
+            body["think"] = False
+        elif effort:
             body["reasoning_effort"] = effort
-            if effort == "none":
-                body["think"] = False  # (Ollama's own switch; other servers ignore it)
         try:
             data = _open(f"{url}/chat/completions", body, key, left)
         except TimeoutError:

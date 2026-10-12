@@ -76,6 +76,19 @@ OPENCODE_CONFIG = json.dumps({
                    "skill": "deny", "external_directory": "deny", "doom_loop": "deny"},
 }, separators=(",", ":"))
 
+# OpenCode 2 drops --pure and --variant, and its free models (OpenCode Zen) refuse a run whose tools were taken away
+# ("OpenCode's free tier can only be used from within OpenCode"). So there every other tool is left on "ask": a
+# non-interactive run can't ask, so OpenCode rejects each such call itself. Its tools have new names there: shell,
+# subagent, and execute: a JavaScript runtime whose HTTP requests "ask" doesn't stop, so it's taken away (which the
+# free models allow).
+# --standalone gives the run a private server, which reads these settings, rather than your background one.
+OPENCODE2_CONFIG = json.dumps({
+    "share": "disabled", "autoupdate": False,
+    "permission": {"edit": "allow", "bash": "ask", "shell": "ask", "execute": "deny", "webfetch": "ask",
+                   "websearch": "ask", "task": "ask", "subagent": "ask", "skill": "ask", "external_directory": "ask",
+                   "doom_loop": "ask"},
+}, separators=(",", ":"))
+
 # Their levels, in their own words, least first
 OPENCODE_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")  # --variant: what the model offers
 CLINE_EFFORTS = ("none", "low", "medium", "high", "xhigh")
@@ -114,7 +127,16 @@ def presets() -> dict:
             output="opencode", access="edit-only",
             env=(("OPENCODE_CONFIG_CONTENT", OPENCODE_CONFIG), ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
                  ("OPENCODE_DISABLE_AUTOUPDATE", "1"), ("OPENCODE_DISABLE_SHARE", "1")),
-            models_args=("models",)),
+            models_args=("models",), newer=AgentSpec(
+                name="opencode", label="OpenCode", command="opencode",
+                args=("run", "--standalone", "--format", "json"),  # (no --auto: what isn't allowed is rejected)
+                help_args=("run", "--help"), required_flags=("--standalone", "--format", "--model"),
+                env_prefixes=("OPENCODE_",), powers=_EDIT_POWERS,
+                note=note_free.format(name="opencode"), model_flag="--model",
+                output="opencode", access="edit-only",
+                env=(("OPENCODE_CONFIG_CONTENT", OPENCODE2_CONFIG), ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
+                     ("OPENCODE_DISABLE_AUTOUPDATE", "1"), ("OPENCODE_DISABLE_SHARE", "1")),
+                models_args=("models", "--standalone"))),
         "hermes": AgentSpec(
             name="hermes", label="Hermes Agent", command="hermes",
             # -z: one shot, only the reply on stdout; -t file: its file tools and nothing else; --ignore-rules: no

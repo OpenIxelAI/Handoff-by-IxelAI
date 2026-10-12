@@ -228,6 +228,77 @@ def test_parse_opencode_keeps_only_the_last_message():
     assert usage.parse_opencode("not json\n", "opencode/x") == ("", None, None)
 
 
+OPENCODE2_HELP = "opencode run [flags] [<message...>]\n --standalone  --server  --model, -m  --format  --auto"
+
+
+def test_opencode_2_runs_with_its_own_flags_and_rejects_what_isnt_a_file_tool(tmp_path, board, repo):
+    # OpenCode 2 has no --pure or --variant, and its free models refuse a run with tools taken away ("deny"), so
+    # the rest is left on "ask", which a run with no one to ask rejects (and no --auto, which would allow it)
+    agent = FakeAgent(write_hello, stdout=opencode_events(cost=0))
+    task = approve(board, "opencode", models=["opencode/step-5-preview-free"])
+    worker.load_agents()
+    AGENTS["opencode"] = adapters.presets()["opencode"]
+    ran = Worker(board, repo, "opencode", runner=agent, command=fake_program(tmp_path, "opencode", OPENCODE2_HELP))
+    ran.check()
+    [result] = ran.run_pending()
+    assert result.ok, result.message
+    [call] = agent.calls
+    argv = call["argv"]
+    assert argv[1:5] == ["run", "--standalone", "--format", "json"]
+    assert "--pure" not in argv and "--auto" not in argv and "--variant" not in argv
+    assert argv[argv.index("--model") + 1] == "opencode/step-5-preview-free"
+    permissions = json.loads(call["env"]["OPENCODE_CONFIG_CONTENT"])["permission"]
+    assert permissions["edit"] == "allow" and "allow" not in [v for k, v in permissions.items() if k != "edit"]
+    assert all(permissions[tool] == "ask" for tool in ("bash", "shell", "webfetch", "websearch", "task", "subagent",
+                                                       "external_directory"))
+    assert permissions["execute"] == "deny"
+    assert git(repo, "show", f"handoff/{task.ref}:src/hello.py").stdout == "print('hi')\n"
+
+
+def test_an_opencode_without_either_set_of_flags_still_cant_run(tmp_path, board, repo):
+    AGENTS["opencode"] = adapters.presets()["opencode"]
+    old = Worker(board, repo, "opencode", command=fake_program(tmp_path, "opencode", "opencode run --model"))
+    with pytest.raises(WorkerUnavailable, match="--format, --pure"):
+        old.check()
+
+
+def test_an_error_opencode_2_reports_says_what_it_was():
+    error = json.dumps({"type": "error", "error": {"type": "provider.auth", "status": 403,
+                                                   "message": "OpenCode's free tier can only be used from within "
+                                                              "OpenCode"}})
+    assert "free tier" in usage.parse_opencode(error + "\n", "opencode/x")[2]
+
+
+def test_a_model_name_with_a_colon_isnt_taken_for_an_effort():
+    from types import SimpleNamespace
+
+    from handoff import cli
+
+    class Parser:
+        def fail(self, message):
+            raise AssertionError(message)
+
+    def models(model=None, chain=None, effort=None):
+        return cli._models(Parser(), SimpleNamespace(model=model, chain=chain, effort=effort))
+    assert models("qwen3:4b", effort="none") == (["qwen3:4b"], {"qwen3:4b": "none"})
+    assert models("qwen3:4b") == (["qwen3:4b"], None)
+    assert models("qwen3:4b:high") == (["qwen3:4b"], {"qwen3:4b": "high"})
+    assert models("llama3:latest") == (["llama3:latest"], None)
+    assert models(chain="claude-fable-5-1:max,claude-haiku-5-5") == (["claude-fable-5-1", "claude-haiku-5-5"],
+                                                                     {"claude-fable-5-1": "max"})
+
+
+def test_approving_an_agent_without_handoffs_sandbox_doesnt_say_it_waits_for_one():
+    from handoff import cli
+    AGENTS["opencode"] = adapters.presets()["opencode"]
+    assert cli._sandbox_word("opencode") == "edit-only (no commands)"
+
+
+def test_thinking_whose_start_was_in_the_chat_template_is_taken_out():
+    assert local_model.strip_thinking("I should fix it.\n</think>\n\nDONE: fixed") == "DONE: fixed"
+    assert local_model.strip_thinking("<think>hm</think>DONE: x") == "DONE: x"
+
+
 # ── Agents that wait for your OK ─────────────────────────────────────────────
 
 HERMES_HELP = "usage: hermes  -z, --oneshot PROMPT  --usage-file PATH  -t, --toolsets  --ignore-rules  -m MODEL"
@@ -399,7 +470,7 @@ def test_a_local_model_edits_files_through_handoffs_tools_and_costs_nothing(boar
     assert said[5].replace("\r\n", "\n") == "# Shop\n"  # (Windows' write_text wrote \r\n)
     assert said[6].startswith("Created src/hello.py") and said[7] == "Changed README.md."
     first = s.requests[0]
-    assert first["model"] == "qwen3:4b" and first["reasoning_effort"] == "none" and first["think"] is False
+    assert first["model"] == "qwen3:4b" and "reasoning_effort" not in first and first["think"] is False
     assert first["messages"][0]["content"].endswith("/no_think")
     assert {t["function"]["name"] for t in first["tools"]} == set(local_model.TOOL_RUNNERS)
     assert git(repo, "show", f"handoff/{task.ref}:src/hello.py").stdout == "print('hi')\n"
