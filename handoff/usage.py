@@ -3,7 +3,8 @@ What a worker run used: tokens and cost per model, as the agent reported them.
 
 Claude Code says it when run with `--output-format json`: its result has `modelUsage`, one entry per model
 that answered, with tokens and an estimated cost in US dollars (at API prices, so on a subscription it's what
-the run would have cost, not what you paid). That's also the proof of which model did the work.
+the run would have cost, not what you paid). That's also the proof of which model did the work. Grok Build's
+`--output-format json` result carries the same `modelUsage` (parse_grok).
 
 A board can come from somewhere else, so usage read back from it is checked again (`check`) before it's shown.
 """
@@ -21,6 +22,17 @@ MAX_TOKENS = 10 ** 12
 MAX_COST = 10 ** 6
 
 
+def _model_usage(data: dict) -> dict | None:
+    """What a JSON result's `modelUsage` says (Claude Code's and Grok Build's have the same): one entry per model
+    that answered, as `check` keeps it. None if it has none."""
+    found = data.get("modelUsage")
+    models = {}
+    for name, info in found.items() if isinstance(found, dict) else ():
+        if isinstance(info, dict):
+            models[name] = {short: info.get(long) for long, short in _FIELDS} | {"cost": info.get("costUSD")}
+    return check({"models": models}) if models else None
+
+
 def parse_claude(stdout: str) -> tuple[str, dict | None, str | None]:
     """Claude Code's `--output-format json` result: its reply, its usage (or None) and its error (or None).
     Output that isn't that (plain text) comes back as the reply, with no usage."""
@@ -31,13 +43,36 @@ def parse_claude(stdout: str) -> tuple[str, dict | None, str | None]:
     if not isinstance(data, dict) or data.get("type") != "result":
         return stdout, None, None
     reply = data.get("result") if isinstance(data.get("result"), str) else ""
-    models = {}
-    for name, info in (data.get("modelUsage") or {}).items() if isinstance(data.get("modelUsage"), dict) else ():
-        if isinstance(info, dict):
-            models[name] = {short: info.get(long) for long, short in _FIELDS} | {"cost": info.get("costUSD")}
-    usage = check({"models": models}) if models else None
     error = (reply or "the agent reported an error") if data.get("is_error") else None
-    return reply, usage, error
+    return reply, _model_usage(data), error
+
+
+def parse_grok(stdout: str) -> tuple[str, dict | None, str | None]:
+    """Grok Build's `--output-format json` result (one object): its reply (`text`), its usage (`modelUsage`, as
+    Claude Code's) and its error. Only an object whose `stopReason` is exactly "end_turn" is a finished run:
+    output that isn't JSON (a crash, or stdout cut off), JSON that isn't an object, no stopReason, or any other
+    one is an error, so a run cut short is never taken for a finished one. "cancelled" is how it stops when a
+    tool call was refused. An error comes back with the reply and usage there were, for the board to show."""
+    try:
+        data = json.loads(stdout)
+    except (ValueError, RecursionError):
+        snippet = " ".join((stdout or "").split())[-100:]  # (the end: where a crash says why)
+        said = f' It printed: "{snippet}"' if snippet else " It printed nothing."
+        return stdout or "", None, ("Grok's output wasn't its JSON result (the run may have crashed, or its output "
+                                    f"was cut off).{said}")
+    if not isinstance(data, dict):
+        return "", None, "Grok's output wasn't a JSON object, so the run isn't taken as finished."
+    reply = data["text"] if isinstance(data.get("text"), str) else ""
+    stop = data.get("stopReason")
+    if stop == "end_turn":
+        error = None
+    elif stop == "cancelled":
+        error = "Grok stopped the run because a tool call was refused (stopReason cancelled)."
+    elif isinstance(stop, str) and stop.strip():
+        error = f"Grok stopped the run before it finished (stopReason {' '.join(stop.split())[:60]})."
+    else:
+        error = "Grok's result has no stopReason, so the run isn't taken as finished."
+    return reply, _model_usage(data), error
 
 
 def parse_opencode(stdout: str, model: str) -> tuple[str, dict | None, str | None]:

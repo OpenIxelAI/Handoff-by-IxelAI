@@ -35,6 +35,7 @@ SOURCES = (
     ("Artificial Analysis text-to-image arena", "https://artificialanalysis.ai/image/leaderboard/text-to-image"),
     ("Artificial Analysis text-to-video arena", "https://artificialanalysis.ai/video/leaderboard/text-to-video"),
     ("Handoff's own runs: Fable plans best, Haiku and qwen3:4b-instruct do small steps well (2026-10-11)", ""),
+    ("Model prices as reported in posts (not vendor pages), Oct 12 2026", ""),
 )
 # Open models' scores are mostly their makers' own, gathered by the sites above: their order is a best guess
 
@@ -55,8 +56,8 @@ JOBS = {
 RANKS: dict[str, list[str]] = {
     "coding": [
         "claude:claude-sonnet-5-5", "claude:claude-opus-5-5", "claude:claude-fable-5-1", "codex:gpt-6-astra",
-        "codex:gpt-6.1-sol", "codex:gpt-6-sol", "codex:gpt-5.5", "kimi:kimi-k3", "cline:claude-sonnet-5-5",
-        "ollama:qwen3.6:27b", "ollama:qwen3.6:35b", "opencode:opencode/step-5-preview-free",
+        "codex:gpt-6.1-sol", "grok:grok-4.7", "codex:gpt-6-sol", "codex:gpt-5.5", "kimi:kimi-k3",
+        "cline:claude-sonnet-5-5", "ollama:qwen3.6:27b", "ollama:qwen3.6:35b", "opencode:opencode/step-5-preview-free",
         "claude:claude-haiku-5-5", "ollama:gpt-oss:120b", "ollama:qwen3-coder:30b", "codex:gpt-6-luna",
         "ollama:gpt-oss:20b", "ollama:granite4.2:8b", "ollama:qwen3.5:9b", "ollama:qwen2.5-coder:14b",
         "ollama:qwen3:4b-instruct", "lmstudio:qwen3-4b-instruct-2507",
@@ -92,6 +93,8 @@ TIERS: dict[str, list[dict[str, str]]] = {
         {"model": "claude:claude-fable-5-1", "note": "the best planner; the dearest, so for hard tasks"},
         {"model": "claude:claude-opus-5-5", "note": "plans and reviews well at about 40% of Fable's price"},
         {"model": "codex:gpt-6-astra", "note": "on a ChatGPT plan"},
+        {"model": "antigravity:gemini-3.1-pro-preview",
+         "note": "Google's; for answers and reviews through Ixel MAT, not an edit worker here"},
         {"model": "kimi:kimi-k3", "note": "open (about 2.8T, 104B active): the best open planner; Kimi's own "
                                           "service, or a very large GPU server"},
         {"model": "DeepSeek V4 Pro / V4.1 Flash", "note": "open (1.6T and 552B): on a hosted open-model server"},
@@ -100,7 +103,9 @@ TIERS: dict[str, list[dict[str, str]]] = {
     ],
     "mid": [
         {"model": "claude:claude-sonnet-5-5", "note": "the best builder for its price"},
+        {"model": "grok:grok-4.7", "note": "on SuperGrok through grok, edit-only: strong and cheap"},
         {"model": "codex:gpt-6-sol", "note": "on a ChatGPT plan"},
+        {"model": "codex:gpt-6.1-sol", "note": "on a ChatGPT plan"},
         {"model": "ollama:qwen3.6:27b", "note": "open, 27B: needs a 32 GB Mac or a 24 GB GPU"},
         {"model": "ollama:qwen3.6:35b", "note": "open, 35B (3B active): fast for its size; 32 GB or more"},
         {"model": "ollama:qwen3-coder:30b", "note": "open, 30B (3.3B active): 32 GB or more"},
@@ -108,6 +113,7 @@ TIERS: dict[str, list[dict[str, str]]] = {
     ],
     "low": [
         {"model": "claude:claude-haiku-5-5", "note": "small steps, very cheap"},
+        {"model": "codex:gpt-6-luna", "note": "on a ChatGPT plan; very cheap"},
         {"model": "opencode:opencode/step-5-preview-free", "note": "free through OpenCode"},
         {"model": "ollama:qwen3.5:9b", "note": "open, 9B: runs on a 16 GB Mac"},
         {"model": "ollama:qwen2.5-coder:14b", "note": "open, 14B: the most a 16 GB Mac runs well"},
@@ -129,7 +135,17 @@ ALIASES = {"claude": {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "s
 # Claude Code's own cost reports, 2026-10-11). A model is only ever replaced by one that costs the same or less, or
 # by a free or local one: a usage limit never moves a run onto a dearer model. A model with no price here (another
 # company's, on its own plan) isn't held back by it.
-COST = {"claude-fable-5-1": 95, "claude-opus-5-5": 38, "claude-sonnet-5-5": 19, "claude-haiku-5-5": 1}
+# The new ones are in the same unit: each model's input price per million tokens in USD (Haiku's $0.10 is 1), as
+# reported on 2026-10-12 in posts, not on vendor pages. Grok 4.7: $2 in, $6 out, cached $0.50 (cached unsure).
+# Gemini 3.1 Pro: $2 in, $12 out (inferred; exact API ID not confirmed). GPT-6 Astra: $10 in, $50 out, cached about
+# $1 (unsure). GPT-6.1 Sol: $2 in, $10 out, cached $0.10. GPT-6 Luna: $0.10 in, $0.50 out, cached $0.01 (unsure;
+# ID not confirmed). The Claude values come from Claude Code's cost reports, so a tie or a near tie is not exact.
+# COST is a price and TIERS is a role: a model can be top-tier and cheap (Gemini 3.1 Pro, $2, like Grok 4.7 and
+# Sol), so a price never says which tier a model is in; "the same or less" above means price only. GPT-6 Sol has no
+# price reported yet, so it isn't held back by one (and crew_auto treats it as on a plan). Add its price here
+# when there is one, as the same unit; don't guess it.
+COST = {"claude-fable-5-1": 95, "claude-opus-5-5": 38, "claude-sonnet-5-5": 19, "claude-haiku-5-5": 1,
+        "gpt-6-astra": 100, "grok-4.7": 20, "gemini-3.1-pro-preview": 20, "gpt-6.1-sol": 20, "gpt-6-luna": 1}
 # The model an agent runs when the approval names none
 DEFAULT_MODEL = {"claude": "claude-opus-5-5"}
 # The kind of run → the job its fallbacks come from

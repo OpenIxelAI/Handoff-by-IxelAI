@@ -6,6 +6,13 @@ Handoff knows these, and offers each one once it finds it here:
 - OpenCode (`opencode`), edit-only: its permissions are set for the run so it has only its file tools (read,
   edit, write, search), confined to the worktree, with no shell, web or subagents, whatever your own or the
   project's OpenCode config says. Its free models (opencode/…-free) cost nothing.
+- Grok Build (`grok`), edit-only: only its file tools (read, edit, write, list, search), with no MCP servers, web
+  search or subagents, inside its own OS sandbox (`--sandbox strict`: it writes only the worktree, /tmp and
+  ~/.grok; checked on macOS with the real grok: writes to ~/.grok, ~/.grok/plugins and ~/.grok/hooks are refused).
+  It uses your SuperGrok login, never a key, and runs once you've said so. It loads your own Grok
+  plugins, hooks and MCP servers whatever its switches say, so before every run the worker reads `grok inspect
+  --json` in the worktree (with the run's --cwd) and refuses the run, changing nothing, when any of them would
+  run, or when what it says can't be read.
 - Hermes Agent (`hermes`), file tools only: no terminal, browser, web or code execution. Its file tools can
   read files outside the worktree, so it runs once you've said so.
 - Kimi Code (`kimi`), Cline (`cline`) and OpenClaw (`openclaw`): they run with their own permissions, which
@@ -52,6 +59,7 @@ from pathlib import Path
 
 from handoff import approvals
 from handoff.proc import find_on_path
+from handoff.sanitize import clean_line
 
 try:
     import tomllib
@@ -94,6 +102,34 @@ OPENCODE_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")  # --var
 CLINE_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 OPENCLAW_EFFORTS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 LOCAL_EFFORTS = ("none", "low", "medium", "high")  # reasoning_effort; none turns a thinking model's thinking off
+GROK_EFFORTS = ("low", "medium", "high", "xhigh")  # --reasoning-effort
+
+# Grok Build's file tools, and all it's left with (--tools). search_tool and use_tool are taken away too
+# (--disallowed-tools): left on, they still reach your MCP servers, Handoff's own included
+GROK_TOOLS = "read_file,search_replace,write,list_dir,grep"
+GROK_DISALLOWED = "search_tool,use_tool"
+
+# Grok Build's settings for a run, as environment variables. "0" turns off its memory, web fetch, subagents,
+# telemetry and feedback, and the summaries, recaps, titles and suggestions it makes with extra model calls;
+# GROK_DISABLE_AUTOUPDATER is the other way round ("1" stops its auto-updater)
+_GROK_SWITCHES = ("GROK_MEMORY", "GROK_SUBAGENTS", "GROK_WEB_FETCH", "GROK_TELEMETRY_ENABLED",
+                  "GROK_TELEMETRY_MIXPANEL_ENABLED", "GROK_TELEMETRY_TRACE_UPLOAD", "GROK_FEEDBACK_ENABLED",
+                  "GROK_EXTERNAL_OTEL", "GROK_TURN_SUMMARY", "GROK_SESSION_RECAP", "GROK_TITLE_REFRESH",
+                  "GROK_PROMPT_SUGGESTIONS")
+GROK_ENV = (
+    *((name, "0") for name in _GROK_SWITCHES),
+    ("GROK_DISABLE_AUTOUPDATER", "1"),
+    # Grok also loads Claude Code's and Cursor's hooks, MCP servers, rules, skills and agents: none of them here
+    *((f"GROK_{app}_{what}_ENABLED", "0") for app in ("CLAUDE", "CURSOR")
+      for what in ("HOOKS", "MCPS", "RULES", "SKILLS", "AGENTS")),
+)
+
+# Those switches don't cover Grok's own plugins and hooks (from ~/.grok, or the project): a plugin can run a hook
+# that writes into the folder it works in, and --tools doesn't stop hooks. `grok inspect --json` only reads config
+# and lists what it would load, so the worker runs it before every run (worker.py _check_inspect) and refuses the
+# run when a plugin with hooks or a hook would run (inspect_report); MCP servers are named in a note instead.
+GROK_INSPECT = ("inspect", "--json")
+INSPECT_TIMEOUT = 60.0
 
 OLLAMA_URL = "http://127.0.0.1:11434/v1"
 LMSTUDIO_URL = "http://127.0.0.1:1234/v1"
@@ -137,6 +173,35 @@ def presets() -> dict:
                 env=(("OPENCODE_CONFIG_CONTENT", OPENCODE2_CONFIG), ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
                      ("OPENCODE_DISABLE_AUTOUPDATE", "1"), ("OPENCODE_DISABLE_SHARE", "1")),
                 models_args=("models", "--standalone"))),
+        # --always-approve is what lets its edits happen with nobody there to approve them, and it's safe only
+        # together with the three flags that confine it: --tools (its file tools and nothing else),
+        # --disallowed-tools (without it search_tool and use_tool still reach your MCP servers, Handoff's own
+        # included) and --sandbox strict (its OS sandbox: it reads only the working directory and system paths,
+        # and is documented to write only there, /tmp and ~/.grok). Never run it with --always-approve and without
+        # them. It's signed in with your SuperGrok plan, found through HOME: env_prefixes is empty, so none of your
+        # GROK_* or XAI_* variables pass (an xAI API key, GROK_CONFIG and GROK_CONFIG_PATH among them).
+        # The confinement is not complete, and this can't close it: the run uses your real HOME, so ~/.grok (its
+        # login, settings, sessions, skills) and /tmp stay inside what the sandbox lets it write. A private HOME or
+        # GROK_CONFIG would hide the SuperGrok login, and Handoff has no private-login copy for Grok as it has for
+        # Claude and Codex (worker.py, the Login classes), since where Grok keeps its login isn't known here. What
+        # was checked by hand (SECURITY.md) is that plugins/ and hooks/ under ~/.grok were refused on macOS; the
+        # rest of ~/.grok was not, and neither was Linux or Windows. The note below says so to the person.
+        # No models_args: how `grok models` prints its list isn't known, so it isn't parsed.
+        # inspect_args: its own plugins, hooks and MCP servers are checked before every run (GROK_INSPECT).
+        "grok": AgentSpec(
+            name="grok", label="Grok Build", command="grok",
+            args=("--output-format", "json", "--tools", GROK_TOOLS, "--disallowed-tools", GROK_DISALLOWED,
+                  "--disable-web-search", "--no-subagents", "--sandbox", "strict", "--always-approve",
+                  "--cwd", "{worktree}", "--prompt-file", "{prompt_file}"),
+            help_args=("--help",),
+            required_flags=("--output-format", "--tools", "--disallowed-tools", "--sandbox", "--always-approve",
+                            "--disable-web-search", "--no-subagents", "--cwd", "--prompt-file"),
+            env_prefixes=(), env=GROK_ENV, powers=_EDIT_POWERS,
+            note="The worker ran grok edit-only: its file tools, inside its OS sandbox (--sandbox strict), which "
+                 "reads the worktree and system paths but may still write to /tmp and your ~/.grok, so look there "
+                 "if it matters. No commands or tests were run.",
+            model_flag="-m", effort_args=("--reasoning-effort", "{effort}"), effort_levels=GROK_EFFORTS,
+            output="grok", access="edit-only", needs_ok=True, inspect_args=GROK_INSPECT),
         "hermes": AgentSpec(
             name="hermes", label="Hermes Agent", command="hermes",
             # -z: one shot, only the reply on stdout; -t file: its file tools and nothing else; --ignore-rules: no
@@ -197,6 +262,164 @@ def _local(name: str, label: str, url: str, model: str = "", key_env: str = "", 
         model_flag="model", effort_args=("{effort}",), effort_levels=LOCAL_EFFORTS,
         kind="local", output="local", access="edit-only", url=url, key_env=key_env, default_model=model,
         custom=custom)
+
+
+# ── What Grok Build would load (`grok inspect --json`) ───────────────────────
+
+_INSPECT_MAX_CHARS = 1_000_000
+_INSPECT_SHOWN = 8
+_INSPECT_MCP_KEYS = ("mcpServers", "mcp_servers")  # the MCP servers' list, under either name
+# What a plugin may name, in any case and with its hyphens, underscores and spaces left out, for hooks or MCP
+# servers: hooks, hook, mcpServers, mcp_servers, mcp-servers, mcp
+_HOOK_NAMES = ("hooks", "hook")
+_MCP_NAMES = ("mcpservers", "mcpserver", "mcp")
+
+
+def _spelled(name: object, names: tuple[str, ...]) -> bool:
+    """Whether a name (a key, or an item of "provides") is one of `names`, however it's spelled."""
+    return isinstance(name, str) and re.sub(r"[-_\s]", "", name.lower()) in names
+
+
+def _inspect_entries(value: object, what: str) -> list[tuple[str, object]]:
+    """The items of one list in inspect's JSON, as (name, item). ValueError if it isn't a list."""
+    if not isinstance(value, list):
+        raise ValueError(f"no {what} list" if value is None else f"its {what} aren't a list")
+    entries = []
+    for n, item in enumerate(value, 1):
+        name = next((item[k] for k in ("name", "id") if isinstance(item, dict) and isinstance(item.get(k), str)),
+                    item if isinstance(item, str) else "")
+        entries.append((clean_line(name)[:60] or f"#{n}", item))
+    return entries
+
+
+def _inspect_brings(plugin: dict, name: str) -> tuple[list[str], list[str]]:
+    """What an enabled plugin brings that would run in a run, as (hooks, MCP servers), each as it spells them.
+    Counted: a key of the plugin itself (hooks, mcpServers, mcp ...) with something in it, and what its "provides"
+    names, as an object's key with something in it, or as a list's (or a lone string's) item. ValueError for a
+    "provides" of another shape, or no "provides" and none of those keys: it can't be told what the plugin brings."""
+    own = [key for key in plugin if _spelled(key, _HOOK_NAMES + _MCP_NAMES)]
+    hooks = [key for key in own if _spelled(key, _HOOK_NAMES) and plugin[key]]
+    mcp = [key for key in own if _spelled(key, _MCP_NAMES) and plugin[key]]
+    provides = plugin.get("provides")
+    if isinstance(provides, dict):  # {"hooks": 2, "mcpServers": [], "skills": 1}: a name whose value isn't empty
+        hooks += [key for key, item in provides.items() if _spelled(key, _HOOK_NAMES) and item]
+        mcp += [key for key, item in provides.items() if _spelled(key, _MCP_NAMES) and item]
+    elif isinstance(provides, str):
+        hooks += [provides] if _spelled(provides, _HOOK_NAMES) else []
+        mcp += [provides] if _spelled(provides, _MCP_NAMES) else []
+    elif isinstance(provides, list) and all(isinstance(item, str) for item in provides):
+        hooks += [item for item in provides if _spelled(item, _HOOK_NAMES)]
+        mcp += [item for item in provides if _spelled(item, _MCP_NAMES)]
+    elif provides is not None or not own:
+        raise ValueError(f'the "provides" of plugin "{name}" is neither a list nor an object')
+    return (list(dict.fromkeys(clean_line(item)[:40] for item in hooks)),
+            list(dict.fromkeys(clean_line(item)[:40] for item in mcp)))
+
+
+def _hook_label(name: str, hook: dict) -> str:
+    """How a hook is shown: its own name or id if it has one, else what it runs (its event and target, which
+    the real hooks have, since they carry no name). Falls back to `name` when there's nothing else."""
+    if any(isinstance(hook.get(key), str) for key in ("name", "id")):
+        return name
+    parts = [hook[key] for key in ("event", "target") if isinstance(hook.get(key), str) and hook[key]]
+    return clean_line(" ".join(parts))[:100] or name
+
+
+def inspect_findings(text: str) -> list[str]:
+    """What `grok inspect --json` lists that would stop a Board run, in words ([] when none would): an enabled
+    plugin that provides hooks, and a hook that counts as enabled (its compatibilityStatus is "enabled", or there
+    is none, which counts as enabled; only a status that is other text is left out). MCP servers are not in it
+    (inspect_report names them). See inspect_report for how the text is read."""
+    return inspect_report(text)[0]
+
+
+def inspect_report(text: str) -> tuple[list[str], list[str]]:
+    """Read `grok inspect --json`: (refusals, MCP servers). The refusals are what would run and stop a Board run
+    (an enabled plugin that provides hooks, and a hook that counts as enabled, as inspect_findings says). The MCP
+    servers are their names: the top-level ones, then each enabled plugin that provides MCP servers but no hooks.
+    Those don't stop a run (the run's --tools and --disallowed-tools keep their tools from the model), so they're
+    named in a note. Fails closed: the text isn't trusted, so anything that isn't the JSON object with all of
+    `plugins`, `hooks` and `mcpServers` (or `mcp_servers`) as lists of the shape this knows, or that carries an
+    error, is a ValueError that says why, never a pass: a list that's missing is one it didn't say, not an empty one."""
+    if len(text) > _INSPECT_MAX_CHARS:
+        raise ValueError("its answer is too long")
+    try:
+        data = json.loads(text)
+    except (ValueError, RecursionError):
+        raise ValueError("it didn't print JSON") from None
+    if not isinstance(data, dict):
+        raise ValueError("it didn't print a JSON object")
+    for key in ("error", "errors"):
+        if data.get(key):
+            raise ValueError(f"it reported an error: {clean_line(str(data[key]))[:100]}")
+    mcp_keys = [key for key in _INSPECT_MCP_KEYS if key in data]
+    for key in ("plugins", "hooks"):
+        if key not in data:
+            raise ValueError(f"no {key} list")
+    if not mcp_keys:
+        raise ValueError("no mcpServers list")
+    refusals: list[str] = []
+    plugin_mcp: list[str] = []  # the enabled plugins that provide MCP servers but no hooks, after the top-level ones
+    for name, plugin in _inspect_entries(data["plugins"], "plugins"):
+        if not isinstance(plugin, dict) or not isinstance(plugin.get("enabled"), bool):
+            raise ValueError(f'plugin "{name}" has no true or false "enabled"')
+        hooks, servers = _inspect_brings(plugin, name) if plugin["enabled"] else ([], [])
+        if hooks:
+            refusals.append(f'plugin "{name}" (enabled, provides {" and ".join(hooks)})')
+        elif servers:
+            plugin_mcp.append(f"{name} (plugin)")
+    for name, hook in _inspect_entries(data["hooks"], "hooks"):
+        if not isinstance(hook, dict):
+            raise ValueError(f'hook "{name}" is not an object')
+        status = hook.get("compatibilityStatus", "enabled")  # no status at all: it runs, so it counts as enabled
+        if not isinstance(status, str):
+            raise ValueError(f'hook "{name}" has a "compatibilityStatus" that is not text')
+        if status.strip().lower() == "enabled":
+            refusals.append(f'hook "{_hook_label(name, hook)}" (enabled)')
+    servers = [name for key in mcp_keys for name, _ in _inspect_entries(data[key], "MCP servers")]
+    return refusals, list(dict.fromkeys(servers)) + plugin_mcp
+
+
+def inspect_note(spec, names: list[str]) -> str:
+    """The handback's note on the MCP servers a run loaded: named, and kept from the model by --disallowed-tools."""
+    if not names:
+        return ""
+    more = len(names) - _INSPECT_SHOWN
+    listed = ", ".join(names[:_INSPECT_SHOWN]) + (f", and {more} more" if more > 0 else "")
+    return (f"{spec.label or spec.name} loaded your MCP servers {listed}; their tools were kept from the model with "
+            "--disallowed-tools.")
+
+
+def _inspect_command(spec) -> str:
+    return f"`{spec.command} {' '.join(spec.inspect_args)}`"
+
+
+def inspect_refusal(spec, findings: list[str]) -> str:
+    """Why a run was refused: what would run, and how to turn it off for Board runs."""
+    from handoff import hosts
+    more = len(findings) - _INSPECT_SHOWN
+    listed = "; ".join(findings[:_INSPECT_SHOWN]) + (f"; and {more} more" if more > 0 else "")
+    plugins: list[str] = []
+    for finding in findings:
+        match = re.match(r'plugin "(.*)" \(enabled', finding)
+        if match and match.group(1) not in plugins:
+            plugins.append(match.group(1))
+    commands = "; ".join(f"`{spec.command} plugin disable {name}`" for name in plugins[:_INSPECT_SHOWN])
+    here = f"Here: {commands}. " if commands else ""
+    return (f"{_inspect_command(spec)} says {spec.label or spec.name} would load: {listed}. Handoff's switches don't "
+            "turn these off, so the run was refused before it started, and nothing was changed. To run it on the "
+            f"Board, turn them off: `{spec.command} plugin disable NAME` for a plugin (a hook from a plugin goes "
+            "with it), or remove the hook where it's set: your Grok config "
+            f"({hosts.grok_config_path()}) or the project's own Grok config, whichever lists it when you run that "
+            f"command in the project. {here}Hooks run code, so they are refused; the run's --tools and "
+            "--disallowed-tools keep MCP tools away, so MCP servers alone don't stop a run.")
+
+
+def inspect_unreadable(spec, why: str) -> str:
+    """Why a run was refused when inspect couldn't be run or read."""
+    return (f"{_inspect_command(spec)} {why}, so Handoff can't tell which of your Grok plugins, hooks or MCP "
+            "servers would run, and the run was refused before it started. Nothing was changed. Run that command "
+            "yourself in the project to see what it says.")
 
 
 def load_config(path: Path | None = None) -> dict:

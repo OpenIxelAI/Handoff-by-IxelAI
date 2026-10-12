@@ -65,9 +65,11 @@ COMMANDS = [
      "Split one request across your agents and run the parts side by side"),
     ("handoff agents [enable|disable AGENT]", "Who can take tasks here: changing files, answering, reviewing, "
                                               "pictures"),
-    ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL] "
-     "[--effort E] [--no-fallback | --no-fallback-to A,...]",
-     "Let an agent run a task, once (on a model, or a chain of models)"),
+    ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL | --auto] "
+     "[--effort E | --effort-all E] [--no-fallback | --no-fallback-to A,...]",
+     "Let an agent run a task, once (on a model, a chain, or the crew Handoff picks)"),
+    ('handoff crew "task text" | T-12 [--effort-all E]',
+     "Preview the models and efforts Handoff would pick for a task (nothing runs)"),
     ("handoff rankings [update] [--job JOB] [--json]",
      "Which models are best at what (who takes over when one hits its usage limit)"),
     ("handoff run [T-12 ...]", "Run approved tasks now, side by side"),
@@ -89,7 +91,7 @@ GROUPS = [
     ("Make and change tasks", ("add", "assign", "claim", "note", "done", "reopen", "block", "cancel", "delete",
                                "clean", "status")),
     ("Review work", ("review", "merge")),
-    ("Hand work to agents", ("dispatch", "agents", "approve", "rankings", "run", "worker")),
+    ("Hand work to agents", ("dispatch", "agents", "approve", "crew", "rankings", "run", "worker")),
     ("Set up", ("setup", "doctor", "done-rule", "keep", "update", "version", "help")),
     ("For apps", ("mcp",)),
 ]
@@ -129,8 +131,9 @@ EXAMPLES = {
     "dispatch": ['handoff dispatch "codex review my changes, claude fix the footer"',
                  'handoff dispatch --plan "gemini list five ideas for the shop"'],
     "agents": ["handoff agents", "handoff agents enable kimi", "handoff agents --json"],
-    "approve": ["handoff approve T-3 claude", "handoff approve T-3 gemini --kind answer",
-                "handoff approve T-3 --revoke"],
+    "approve": ["handoff approve T-3 claude", "handoff approve T-3 --auto",
+                "handoff approve T-3 gemini --kind answer"],
+    "crew": ['handoff crew "Fix the login page"', "handoff crew T-3", "handoff crew T-3 --effort-all max"],
     "rankings": ["handoff rankings", "handoff rankings --job video", "handoff rankings update"],
     "run": ["handoff run", "handoff run T-3 T-4"],
     "worker": ["handoff worker --agent claude", "handoff worker --agent codex --once"],
@@ -1585,6 +1588,12 @@ def cmd_approve(argv: list[str]) -> int:
                              "others, as handoff agents --json lists them (default: the model's own). With --chain, "
                              "for each model that has no effort of its own. For an answer or a review, one level, "
                              "passed to Ixel MAT, which applies it when it can")
+    parser.add_argument("--auto", action="store_true",
+                        help="for a claude edit, let Handoff pick the models and each one's effort from the task's "
+                             "title and text (handoff crew shows the pick first); not with --model or --chain")
+    parser.add_argument("--effort-all", metavar="LEVEL",
+                        help="with --auto, one effort for every model, or the nearest level each takes, like "
+                             "max or low")
     parser.add_argument("--no-fallback", action="store_true",
                         help="stop the run when a model is out of usage, instead of going on with the next best "
                              "model you have (handoff rankings shows the order)")
@@ -1594,6 +1603,16 @@ def cmd_approve(argv: list[str]) -> int:
     parser.add_argument("--revoke", action="store_true", help="withdraw an approval the worker hasn't used yet")
     parser.add_argument("--yes", action="store_true", help="don't ask; approve the task as shown")
     args = parser.parse_args(argv)
+    if args.auto:
+        if args.model or args.chain:
+            parser.fail("--auto picks the models itself, so it can't go with --model or --chain. Use one or the "
+                        "other.")
+        if args.effort:
+            parser.fail("--auto picks each model's effort; to set one level for every model use --effort-all "
+                        "LEVEL instead of --effort.")
+    elif args.effort_all is not None:
+        parser.fail("--effort-all is for --auto. To set an effort yourself use --effort LEVEL (or one after each "
+                    "model in --chain).")
     models, efforts = _models(parser, args)
     if args.agent and args.worker and args.agent.lower() != args.worker.lower():
         parser.fail(f"Name the agent once, like: handoff approve {args.task} {args.agent}")
@@ -1618,6 +1637,17 @@ def cmd_approve(argv: list[str]) -> int:
         raise CommandError(f"{ref} is waiting for a review; an agent can run it once the review is done.\n"
                            f"See it with: handoff show {ref}")
     asked = False
+    crew = crew_from = None
+    if args.auto:
+        if args.kind != "edit":
+            parser.fail(f"--auto picks the models for an edit, not for {KIND_NAMES.get(args.kind, args.kind)} yet. "
+                        f"Name the agent yourself: handoff approve {ref} AGENT --kind {args.kind}")
+        if agent and agent not in CHAIN_AGENTS:
+            parser.fail(f"--auto's crew runs on {names(CHAIN_AGENTS, 'or')}, not {agent}. Leave the agent out, "
+                        f"or name {CHAIN_AGENTS[0]}: handoff approve {ref} {CHAIN_AGENTS[0]} --auto")
+        agent = agent or CHAIN_AGENTS[0]
+        crew, crew_from = _auto_crew(board, task, args.effort_all), (task.title, task.body)
+        models, efforts = crew.seal()
     if not agent:
         assignee = task.assignee
         fits = assignee in AGENTS if args.kind == "edit" else assignee not in (None, HUMAN)
@@ -1678,6 +1708,12 @@ def cmd_approve(argv: list[str]) -> int:
         suggested_fallbacks(args.kind, agent, models, _root(args), leave_out=leave_out) or None)
     for attempt in range(1, 6):
         task, events, _, _ = board.task_with_history(task_id)
+        if crew is not None and (task.title, task.body) != crew_from:
+            # the text the crew was picked from changed while you read it: pick again, and show it as it is now
+            crew, crew_from = _auto_crew(board, task, args.effort_all), (task.title, task.body)
+            models, efforts = crew.seal()
+            fallbacks = None if args.no_fallback else (
+                suggested_fallbacks(args.kind, agent, models, _root(args), leave_out=leave_out) or None)
         console.print(f"\n  [{C['dim']}]The {escape(agent)} worker{whose} gets {ref} as it is now, with its "
                       "history:[/]", soft_wrap=True)
         _print_text(Text(f"  {clean_line(task.title)}", style="bold"))
@@ -1687,6 +1723,10 @@ def cmd_approve(argv: list[str]) -> int:
             _print_text(Text(f"      ☐ {n}. {clean_line(check)}"))
         for line in [Text("  History", style=C["dim"]), *_history(events)]:
             _print_text(line)  # (notes and handoffs, which agents may have written, go to the agent too)
+        if crew is not None:
+            console.print(f"  [{C['dim']}]Auto crew picked these models for it (it's sealed as shown):[/]",
+                          soft_wrap=True)
+            _print_crew(crew)
         if fallbacks:
             from handoff.rankings import shown as in_words
             console.print(f"  [{C['dim']}]If a model hits its usage limit, the run goes on with: "
@@ -1841,6 +1881,132 @@ def _models(parser, args) -> tuple[list[str] | None, dict[str, str] | None]:
 
 
 KIND_VERBS = {"edit": "change files", "answer": "answer", "review": "review your changes", "image": "make pictures"}
+KIND_NAMES = {"answer": "an answer", "review": "a review", "image": "pictures"}
+
+
+def _auto_crew(board, task, effort_all: str | None):
+    """Auto crew's pick for a task, from its title and body only (crew_auto.py). Who is benched comes from the
+    board. Asks a small model what kind of job it is; keywords decide when none answers. A pick that can't be
+    made (no model to plan, pictures, an effort that isn't one) is an error to say, not a crew."""
+    from handoff import crew_auto
+    try:
+        return crew_auto.sealable_crew(task.title, task.body or "", board, effort_all)
+    except crew_auto.CrewError as exc:
+        raise CommandError(str(exc)) from None
+
+
+def _print_roles(crew, indent: str = "    ") -> None:
+    """A line for each model of the crew (its role, name and effort) and one under it saying why."""
+    from handoff.sanitize import clean_line
+    for role in crew.roles:
+        effort = f", {role.effort} effort" if role.effort else ""
+        console.print(Text.assemble((indent, ""), (f"{role.role:<12}", C["dim"]), (clean_line(role.model), C["blue"]),
+                                    (effort, "")), soft_wrap=True)
+        console.print(f"{indent}  [{C['dim']}]{escape(clean_line(role.why))}[/]", soft_wrap=True)
+
+
+def _print_notes(crew, indent: str = "  ") -> None:
+    from handoff.sanitize import clean_line
+    for note in crew.notes:
+        console.print(f"{indent}[{C['gold']}]⚠[/] [{C['dim']}]{escape(clean_line(note))}[/]", soft_wrap=True)
+
+
+def _print_crew(crew) -> None:
+    """A crew as the person reads it before saying yes: the job and size, a line per role, then the notes."""
+    console.print(Text.assemble(("    ", ""), (f"{crew.job} job, {crew.size}", C["moon"]),
+                                (f"  (decided by {crew.how})", C["dim"])), soft_wrap=True)
+    _print_roles(crew)
+    _print_notes(crew, "    ")
+
+
+def cmd_crew(argv: list[str]) -> int:
+    from handoff import crew_auto
+    from handoff.project import ProjectError, board_path
+    from handoff.sanitize import clean_line
+
+    parser = _parser("crew", "Preview the crew Auto crew would pick for a task: its job and size, which models "
+                             "work in which role, and how hard each thinks. Describe the task in words, or name "
+                             "one on the board (only its title and text are read). Handoff asks a small model "
+                             "(qwen3:4b-instruct if Ollama has it, else Claude Haiku) what kind of job it is, "
+                             "and falls back to keywords. Nothing is approved or run; handoff approve T-3 --auto "
+                             "approves the task with this pick.",
+                     needs={"task": 'Say what the task is, like: handoff crew "Fix the login page" (or a task: '
+                                    "handoff crew T-3)"})
+    parser.add_argument("task", nargs="+", metavar="TEXT|T-12",
+                        help="what the task is, in words, or a task on the board: T-12, t12 or just 12")
+    parser.add_argument("--effort-all", metavar="LEVEL",
+                        help="one effort for every model, or the nearest level each takes: low, medium, high, "
+                             "xhigh, max…")
+    args = parser.parse_args(argv)
+    named = args.task[0] if len(args.task) == 1 and _is_task_id(args.task[0]) else None
+    board = None
+    try:
+        root = _root(args)
+    except ProjectError:
+        # (words need no project, and with none nobody is out of usage; a task, or a --project that isn't one, does)
+        if named or args.project:
+            raise
+        root = None
+    if root is not None and board_path(root).exists():  # (looking never makes a board: it only says who's out)
+        board = _board(args)  # (as approve opens it, so the same finished tasks are gone and the same are benched)
+    if named:
+        if board is None:
+            raise CommandError(f"This project has no board yet, so there's no task {named}.")
+        task = board.get(_task_id(named))
+        ref, title, body = task.ref, task.title, task.body or ""
+        shown = f"{ref}  {clean_line(title)}"
+    else:
+        ref, title, body = None, " ".join(args.task), ""
+        shown = clean_line(title)
+    if console.is_terminal:
+        _hint("Asking a small model what kind of job this is (keywords decide if none answers)…")
+    efforts: dict[str, str] = {}
+    try:
+        crew = crew_auto.auto_crew(title, body, board, args.effort_all)
+        if not crew.problem:  # (the same checks approve --auto makes, on the crew shown: no second pick)
+            efforts = crew_auto.check_sealable(crew).seal()[1] or {}
+    except crew_auto.CrewError as exc:
+        raise CommandError(str(exc)) from None
+    print_banner()
+    console.print(Text.assemble(("  ", ""), (shown[:100], "bold")), soft_wrap=True)
+    for label, value in (("Job", crew.job), ("Size", crew.size), ("Decided by", crew.how)):
+        console.print(Text.assemble((f"  {label + ':':<12}", C["dim"]), (value, "")), soft_wrap=True)
+    if crew.problem:
+        _print_notes(crew)
+        _say_problem(crew.problem)
+        return 1
+    console.print(f"\n  [{C['blue']}]Crew[/]", soft_wrap=True)
+    _print_roles(crew)
+    if crew.notes:
+        console.print()
+        _print_notes(crew)
+    more = f" --effort-all {args.effort_all.strip()}" if args.effort_all else ""
+    if ref is None:
+        # Words aren't a task: any T-N printed here would be some other task, so say how to make this one first
+        console.print(f"\n  [{C['dim']}]Nothing is approved or run. These words aren't a task yet. Add them as "
+                      "one, then approve that task with this crew (use the id add prints):[/]", soft_wrap=True)
+        console.print(Text("    " + _with_project(_add_command(title), args)), soft_wrap=True)
+        console.print(Text("    " + _with_project(f"handoff approve <id> --auto{more}", args)), soft_wrap=True)
+        return 0
+    entries = ",".join(f"{m}:{efforts[m]}" if m in efforts else m for m in crew.chain)
+    console.print(f"\n  [{C['dim']}]Nothing is approved or run. To approve {escape(ref)} with this crew:[/]",
+                  soft_wrap=True)
+    console.print(Text("    " + _with_project(f"handoff approve {ref} --auto{more}", args)), soft_wrap=True)
+    if len(crew.chain) > 1:
+        console.print(f"  [{C['dim']}]or name the same models yourself:[/]", soft_wrap=True)
+        console.print(Text("    " + _with_project(f"handoff approve {ref} claude --chain {entries}", args)),
+                      soft_wrap=True)
+    return 0
+
+
+def _add_command(words: str) -> str:
+    """`handoff add` for these words (a task's title and no body: what the crew was picked from), quoted when that
+    is safe to copy as it is; else a placeholder where the person types them."""
+    from handoff.sanitize import clean_line
+    plain = bool(words.strip()) and clean_line(words) == words and not words.startswith("-")
+    if plain and len(words) <= 200 and not any(ch in words for ch in '"\\$`!%^'):
+        return f'handoff add "{words}"'
+    return 'handoff add "WHAT YOU TYPED ABOVE"'
 
 
 def cmd_worker(argv: list[str]) -> int:
@@ -2708,6 +2874,7 @@ HANDLERS = {
     "done-rule": cmd_done_rule,
     "keep": cmd_keep,
     "approve": cmd_approve,
+    "crew": cmd_crew,
     "dispatch": cmd_dispatch,
     "run": cmd_run,
     "agents": cmd_agents,

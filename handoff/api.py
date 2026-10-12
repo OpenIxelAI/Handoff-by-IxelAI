@@ -70,7 +70,7 @@ MAX_OUTPUTS = 50
 _OUTPUT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 WRITE_OPS = ("init", "add", "assign", "note", "review", "status", "delete", "approve", "revoke", "run.start",
              "merge", "agents.enable")
-READ_OPS = ("hello", "revision", "board", "task", "agents", "inbox", "models", "fallbacks", "rankings")
+READ_OPS = ("hello", "revision", "board", "task", "agents", "inbox", "models", "fallbacks", "rankings", "crew")
 OPS = READ_OPS + WRITE_OPS
 
 
@@ -421,9 +421,13 @@ def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
 # any-worker: the worker runs more agents than claude and codex (a board's `workers`, each with its `label`,
 # `access`, `local` and `needs_ok`/`enabled`: adapters.py), op models lists the models one can run, and op
 # agents.enable lets one run, or stops it (args.agent, args.on). ask-effort: an answer or a review can carry
-# approve's args.efforts {"": level}, which goes to Ixel MAT when it can take it.
+# approve's args.efforts {"": level}, which goes to Ixel MAT when it can take it. auto-crew: op crew previews the
+# models, roles and efforts Handoff would pick for a task (args.task, or args.text; optional args.effort_all) and
+# a `crew_token` for it. An edit's approve takes args.auto (true: Handoff picks and seals that crew; not with
+# models or efforts), args.effort_all, and args.crew_token, the crew op's, which auto requires: approve picks
+# again and refuses (code changed) a crew that isn't the one shown, so the client calls crew again.
 FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge", "any-worker",
-            "run-fallback", "ask-effort")
+            "run-fallback", "ask-effort", "auto-crew")
 
 
 def _workers() -> dict:
@@ -538,6 +542,51 @@ def op_init(request: dict) -> dict:
     return {"exists": True, "project": str(root)}
 
 
+def _effort_all(args: dict) -> str | None:
+    """args.effort_all: one effort level for every model of an auto crew (each gets the nearest it takes)."""
+    value = args.get("effort_all")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ApiError("usage", 'args.effort_all must be an effort level, like "high" or "max".')
+    return value.strip()
+
+
+def _auto_crew(board: Board | None, title: str, body: str, effort_all: str | None):
+    """Auto crew's pick (crew_auto.py) from a title and a body only, with who's out of usage taken from the board.
+    A pick that can't be made, or can't be sealed, is a refusal to say, not a crew."""
+    from handoff import crew_auto
+    try:
+        return crew_auto.sealable_crew(title, body, board, effort_all)
+    except crew_auto.CrewError as exc:
+        raise BoardError(str(exc)) from None
+
+
+def op_crew(request: dict) -> dict:
+    """The crew Auto crew would pick, for the window to show before the person approves with `auto`: the task's
+    job and size, how that was decided (`how`: a model, or keywords), the `chain` and `efforts` an approval would
+    seal, each model's role and why, and `crew_token`: a hash of the job, size, chain and efforts, which approve's
+    `auto` takes back, so that what it seals is the crew you showed. `task` (T-12: only its title and text are
+    read) or `text` (the task in words), and optional `effort_all` (one level for every model). Nothing is
+    approved or run; a small model may be asked what kind of job it is, for up to 30 seconds."""
+    root = _project(request)
+    args = request.get("args", {})
+    if (args.get("task") is None) == (args.get("text") is None):
+        raise ApiError("usage", "Give args.task (a task, like T-12) or args.text (the task in words), not both "
+                                "and not neither.")
+    effort_all = _effort_all(args)
+    if args.get("task") is not None:
+        board = _board(root)
+        task = board.get(_task_arg(args))
+        title, body = task.title, task.body or ""
+    else:
+        text = _arg(args, "text", str)
+        if not text.strip():
+            raise ApiError("usage", "args.text must say what the task is.")
+        board, title, body = _existing_board(root), text, ""
+    return _auto_crew(board, title, body, effort_all).as_dict()
+
+
 def _task_reply(board: Board, task: Task) -> dict:
     return {"task": _summaries(board, [task])[0]}
 
@@ -618,16 +667,44 @@ def op_approve(request: dict) -> dict:
     """Approve a task for an agent to run, once. `fallbacks` (the ones the `fallbacks` op suggested and the window
     showed) are sealed with it; `no_fallback_to` (["codex"]: agent names) leaves those agents out of them: when
     the request has no `fallbacks`, Handoff works out the suggested ones without them, and from a `fallbacks`
-    list it drops their entries. A picture has no fallbacks, so it takes no `no_fallback_to`."""
+    list it drops their entries. A picture has no fallbacks, so it takes no `no_fallback_to`.
+    `auto` (true) has Handoff pick the models and their efforts from the task's title and text (the `crew` op shows
+    the pick) and seal exactly those: for an edit only, without `models` or `efforts`; `agent` may be left out
+    (the chain's agent), and `effort_all` sets one level for every model. `auto` needs `crew_token`, the one the
+    `crew` op returned for the crew you showed (with the same `effort_all`): the pick is made again here, and one
+    that isn't the crew shown (the task, who's out of usage or the classifier changed) is refused as `changed`,
+    sealing nothing; call `crew` again and show it."""
     from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem, names, step_agent
     board = _board(_project(request))
     args = request.get("args", {})
     agent = _name(args.get("agent"), "agent")
     kind = _arg(args, "kind", str, required=False, default="edit")
-    if agent is None:
-        raise ApiError("usage", "Say which agent runs it.")
+    auto = _arg(args, "auto", bool, required=False, default=False)
+    effort_all = _effort_all(args)
+    crew_token = _arg(args, "crew_token", str, required=False, default=None)
+    if effort_all is not None and not auto:
+        raise ApiError("usage", "args.effort_all is for auto: true. To set an effort yourself, use args.efforts.")
+    if crew_token is not None and not auto:
+        raise ApiError("usage", "args.crew_token is for auto: true.")
     if kind not in RUN_KINDS:
         raise ApiError("usage", f"args.kind must be one of: {', '.join(RUN_KINDS)}.")
+    if auto:
+        if kind != "edit":
+            raise BoardError(f'auto picks the models for an edit, and this approval is kind "{kind}". Name the '
+                             "agent yourself, without auto.")
+        if args.get("models") is not None or args.get("efforts") is not None:
+            raise BoardError("auto picks the models and their efforts itself, so it can't go with models or "
+                             "efforts. Use one or the other (effort_all sets one level for every model).")
+        if agent is None:
+            agent = CHAIN_AGENTS[0]
+        elif agent not in CHAIN_AGENTS:
+            raise BoardError(f"auto's crew runs on {names(CHAIN_AGENTS, 'or')}, not {agent}. Leave the agent "
+                             f"out, or name {CHAIN_AGENTS[0]}.")
+        if not (crew_token or "").strip():
+            raise ApiError("usage", "auto seals the crew you showed, so it needs args.crew_token: the crew_token "
+                                    "the crew op returned for it. Call crew, show it, then approve with its token.")
+    if agent is None:
+        raise ApiError("usage", "Say which agent runs it.")
     if kind == "edit" and agent not in AGENTS:
         raise BoardError(f"Only {names(AGENTS)} can change files. {agent} can answer, review your changes "
                          "or make pictures instead.")
@@ -636,13 +713,23 @@ def op_approve(request: dict) -> dict:
     if target is not None and not isinstance(target, dict):
         raise ApiError("usage", "args.target must be an object: base, head and label.")
     models = args.get("models")
+    picked_efforts = None
+    if auto:  # (the task's title and text as they are now; `shown` below refuses it if they've changed since)
+        task = board.get(_task_arg(args))
+        picked = _auto_crew(board, task.title, task.body or "", effort_all)
+        # (a model's pick isn't stable, and the board moves: only the crew that was shown is sealed)
+        if picked.token() != crew_token.strip():
+            raise Changed(f"The crew for {task.ref} is not the one you were shown (the task, who is out of usage "
+                          "or the pick changed), so nothing was approved. Ask for the crew again and show it "
+                          "before you approve.")
+        models, picked_efforts = picked.seal()
     if models is not None and not isinstance(models, list):
         raise ApiError("usage", "args.models must be a list of model names, biggest first.")
     if models is not None and len(models) > 1 and agent not in CHAIN_AGENTS:
         raise BoardError(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}; {agent} takes one model.")
     if models and len(models) > 1 and isinstance(models[0], str) and step_agent(models[0], agent)[0] != agent:
         raise BoardError(f"A chain's first model plans, on {agent}; the models after it can run on other agents.")
-    efforts = args.get("efforts")
+    efforts = picked_efforts if auto else args.get("efforts")
     if efforts is not None and not isinstance(efforts, dict):
         raise ApiError("usage", 'args.efforts must be an object: a level for each model, like {"claude-opus-5-5": '
                                 '"high"}, or {"": "high"} for the agent\'s own model.')
@@ -800,7 +887,7 @@ HANDLERS = {
     "inbox": op_inbox, "init": op_init, "add": op_add, "assign": op_assign, "note": op_note, "review": op_review,
     "status": op_status, "delete": op_delete, "approve": op_approve, "revoke": op_revoke, "run.start": op_run_start,
     "merge": op_merge, "models": op_models, "agents.enable": op_agents_enable, "fallbacks": op_fallbacks,
-    "rankings": op_rankings,
+    "rankings": op_rankings, "crew": op_crew,
 }
 assert set(HANDLERS) == set(OPS)
 
