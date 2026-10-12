@@ -125,6 +125,28 @@ def list_models(url: str, key: str | None = None, timeout: float = LIST_TIMEOUT_
     return [m["id"] for m in found if isinstance(m, dict) and isinstance(m.get("id"), str)][:200]
 
 
+def complete(url: str, model: str, prompt: str, timeout: float, key: str | None = None) -> str:
+    """One chat reply: a single user message, temperature 0, no tools. The reply's text, with thinking removed.
+    ServerError when the server doesn't answer as a chat completion (no message, or a message whose content isn't
+    text, or only its thinking); TimeoutError when it runs out of time. A model that answers with an empty text
+    gives "" (the caller decides what no answer means)."""
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "stream": False}
+    data = _open(f"{url}/chat/completions", body, key, timeout)
+    choices = data.get("choices") if isinstance(data, dict) else None
+    message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) \
+        else None
+    if not isinstance(message, dict):
+        raise ServerError("its answer had no message")
+    content = message.get("content")
+    if not isinstance(content, str):  # (missing, null, or a list of parts: not a reply to read)
+        raise ServerError("its answer had no text")
+    reply = strip_thinking(content)
+    if not reply and any(isinstance(message.get(field), str) and message[field].strip()
+                         for field in ("reasoning_content", "reasoning")):
+        raise ServerError("its answer was only its thinking")
+    return reply
+
+
 # ── The tools, on files in the worktree only ─────────────────────────────────
 
 class _Refused(Exception):

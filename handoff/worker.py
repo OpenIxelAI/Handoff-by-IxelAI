@@ -150,11 +150,11 @@ class AgentSpec:
     reports_usage: bool = False      # its output is Claude Code's JSON result, with what it used
     effort_args: tuple[str, ...] = ()    # how it's told how hard to think, with {effort} for the level
     effort_levels: tuple[str, ...] = ()  # the levels it takes, least first (none: it can't be told)
-    # The agents Handoff doesn't ship a sandbox for (adapters.py): OpenCode, Hermes Agent, Kimi Code, Cline,
-    # OpenClaw, a model on your own computer, and any agent you add yourself
+    # The agents Handoff doesn't ship a sandbox for (adapters.py): OpenCode, Grok Build, Hermes Agent, Kimi Code,
+    # Cline, OpenClaw, a model on your own computer, and any agent you add yourself
     label: str = ""                      # its name for people ("" : the name, capitalized)
     kind: str = "cli"                    # cli: a program; local: a model server, driven by Handoff (local_model.py)
-    output: str = "text"                 # how its reply and usage are read: text, claude, opencode, hermes, local
+    output: str = "text"                 # how its reply and usage are read: text, claude, opencode, hermes, grok, local
     access: str = "sandbox"              # what it can reach (ACCESS): sandbox, edit-only, files or full
     needs_ok: bool = False               # it runs only once you've said so (handoff agents enable NAME)
     env: tuple[tuple[str, str], ...] = ()  # set for the run, with {worktree} for its folder
@@ -164,6 +164,11 @@ class AgentSpec:
     models_args: tuple[str, ...] = ()    # `<command> <models_args>` lists the models it can run, one per line
     custom: bool = False                 # you added it yourself (agents.toml), rather than Handoff knowing it
     newer: "AgentSpec | None" = None     # the same agent's newer command line, run where its --help has those flags
+    # Before every run, in the worktree and with the run's environment: `<command> <inspect_args>` prints, as JSON,
+    # the plugins, hooks and MCP servers it would load from your own config (it only reads). A run that would load
+    # a plugin with hooks, or a hook, is refused; MCP servers are named in a note (adapters.inspect_report; Grok
+    # Build). () : nothing to check.
+    inspect_args: tuple[str, ...] = ()
 
 
 _CLAUDE_FLAGS = ("--restricted", "--tools", "--strict-mcp-config", "--permission-mode", "--no-session-persistence",
@@ -978,7 +983,7 @@ class Worker:
         if self.spec.kind == "local":
             return self._run_local(worktree, prompt, model, timeout, effort), None
         if not self.spec.sandboxed:
-            return self._run_unsandboxed(worktree, prompt, model, plan, timeout, effort), None
+            return self._run_unsandboxed(worktree, prompt, model, plan, timeout, effort)
         assert self.spec.login is not None and self.bwrap is not None
         home = Path.home()
         login = self.spec.login(env)
@@ -1017,15 +1022,68 @@ class Worker:
         return local_model.run(self.spec.url, model, prompt, str(worktree.path), timeout, effort or "none",
                                self._server_key())
 
+    def _check_inspect(self, worktree: gitwork.Worktree, env: dict[str, str]) -> str | None:
+        """An agent that loads your own plugins, hooks and MCP servers (Grok Build's switches don't turn them off)
+        says what it would load, run in the worktree with this run's environment (so the same HOME, and the
+        project's own config) and the run's own --cwd (so the project config it reads is the one the run reads).
+        WorkerUnavailable, before anything starts or changes, when a plugin with hooks or a hook would run, or when
+        the answer can't be had or read: the run fails with the reason, and its worktree is as it was. MCP servers
+        don't refuse the run: the returned note (or None) names them, as the run's --disallowed-tools keeps their
+        tools from the model. Nothing checks again between this and the run: a plugin or hook turned on in that
+        window isn't seen, and Grok gives no way to close it."""
+        from handoff import adapters
+        if not self.command:
+            raise WorkerUnavailable(f"The `{self.spec.command}` command isn't on PATH, so the {self.spec.name} "
+                                    "worker can't run.")
+        # (the run's --cwd and its value, before the subcommand, where grok takes it as it does for a run)
+        args = list(self.spec.args)
+        at = args.index("--cwd") if "--cwd" in args and args.index("--cwd") + 1 < len(args) else None
+        where = [] if at is None else ["--cwd", str(worktree.path) if args[at + 1] == "{worktree}" else args[at + 1]]
+        try:  # (through run_tree, so Ctrl+C's stop_all stops it; a Stopped goes up to run(), as for a run)
+            proc = run_tree([str(self.command), *where, *self.spec.inspect_args], "", env, adapters.INSPECT_TIMEOUT,
+                            cwd=str(worktree.path))
+        except subprocess.TimeoutExpired:
+            raise WorkerUnavailable(adapters.inspect_unreadable(
+                self.spec, f"didn't answer within {duration(adapters.INSPECT_TIMEOUT)}")) from None
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise WorkerUnavailable(adapters.inspect_unreadable(
+                self.spec, f"couldn't be run ({clean_line(str(exc))[:200]})")) from None
+        if proc.returncode != 0:
+            lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+            said = f": {clean_line(lines[-1])[:200]}" if lines else ""
+            raise WorkerUnavailable(adapters.inspect_unreadable(
+                self.spec, f"stopped with exit code {proc.returncode}{said}"))
+        try:
+            refusals, mcp = adapters.inspect_report(proc.stdout or "")
+        except ValueError as exc:
+            raise WorkerUnavailable(adapters.inspect_unreadable(
+                self.spec, f"printed something Handoff can't read ({exc})")) from None
+        if refusals:
+            raise WorkerUnavailable(adapters.inspect_refusal(self.spec, refusals))
+        return adapters.inspect_note(self.spec, mcp) or None
+
     def _run_unsandboxed(self, worktree: gitwork.Worktree, prompt: str, model: str | None, plan: bool,
-                         timeout: float, effort: str | None) -> "subprocess.CompletedProcess[str]":
+                         timeout: float, effort: str | None) -> tuple["subprocess.CompletedProcess[str]", str | None]:
         """An agent with no sandbox of Handoff's: Claude edit-only, or one of adapters.py's. The task goes in on
         stdin, or, for an agent that only takes it on its command line, as the value it's given there (the brief
-        starts it, so it never reads as a flag), or in a file it reads."""
+        starts it, so it never reads as a flag), or in a file it reads. An argument that is "{worktree}" is the
+        worktree's folder, for an agent that's told where to work (Grok Build's --cwd). Returns its result and the
+        note from _check_inspect (the MCP servers it loaded), or None."""
         env = self._env(worktree.path)
+        note = self._check_inspect(worktree, env) if self.spec.inspect_args else None
         argv = self.argv(model=model, plan=plan, effort=effort)
         stdin = prompt
-        scratch = Path(tempfile.mkdtemp(prefix="handoff-run-"))  # 0700
+        # Grok Build's sandbox reads only its working directory and system paths, and on macOS a temp folder
+        # (/var/folders/...) is neither: its task file goes in the worktree, in a .handoff folder (never committed:
+        # gitwork.stage_all leaves .handoff out), and is removed after the run. Any other agent: a temp folder.
+        in_worktree = self.spec.output == "grok"
+        kept = worktree.path / ".handoff"
+        made = in_worktree and not kept.exists()
+        if in_worktree:
+            if kept.is_symlink() or (kept.exists() and not kept.is_dir()):
+                raise WorkerUnavailable("The worktree's .handoff isn't a folder, so the task file can't go there.")
+            kept.mkdir(exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix="handoff-run-", dir=str(kept) if in_worktree else None))  # 0700
         try:
             usage_file = scratch / "usage.json"
             for n, arg in enumerate(argv):
@@ -1036,15 +1094,22 @@ class Worker:
                     argv[n], stdin = str(scratch / "task.md"), ""
                 elif arg == "{usage_file}":
                     argv[n] = str(usage_file)
+                elif arg == "{worktree}":
+                    argv[n] = str(worktree.path)
             proc = self.runner(argv, stdin, env, timeout, str(worktree.path))
             if self.spec.output == "hermes":
                 try:
                     proc.usage_report = usage_file.read_text(encoding="utf-8")[:100_000]  # type: ignore[attr-defined]
                 except OSError:
                     pass
-            return proc
+            return proc, note
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+            if made:  # (only the folder this run made, and only if nothing else is in it)
+                try:
+                    kept.rmdir()
+                except OSError:
+                    pass
 
     def run(self, task: Task, approval: Event) -> RunResult:
         from handoff.asks import NOT_STARTED
@@ -1394,6 +1459,12 @@ class Worker:
             return usage.parse_opencode(proc.stdout or "", self._model_named(proc))
         if self.spec.output == "hermes":
             return usage.parse_hermes(proc.stdout or "", getattr(proc, "usage_report", None))
+        if self.spec.output == "grok":
+            reply, used, error = usage.parse_grok(proc.stdout or "")
+            said = " ".join((proc.stderr or "").split())[-100:]
+            if error and said:  # what it said itself (a usage limit, say) is what a fallback and the reason need
+                error = f'{error} It said: "{said}"'
+            return reply, used, error
         if self.spec.output == "local":
             return usage.parse_local(proc.stdout or "")
         return proc.stdout or "", None, None

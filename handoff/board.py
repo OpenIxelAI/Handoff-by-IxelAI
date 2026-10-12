@@ -940,6 +940,17 @@ class Board:
                                 f"WHERE {where} GROUP BY task_id)", ids + skipped + (only or [])).fetchall()
         return {r["task_id"]: _event_from_row(r) for r in rows}
 
+    def events_since(self, at: str, kinds: Iterable[str]) -> list[Event]:
+        """Events at or after `at` (the timestamp the board writes) of those kinds, oldest first."""
+        wanted = list(kinds)
+        if not wanted:
+            return []
+        marks = ", ".join("?" for _ in wanted)
+        with self._read() as conn:
+            rows = conn.execute("SELECT * FROM events WHERE at >= ? AND kind IN "
+                                f"({marks}) ORDER BY at, id", [at, *wanted]).fetchall()
+        return [_event_from_row(r) for r in rows]
+
     def run_usage(self, task_ids: Iterable[int] | None = None) -> dict[int, tuple[float, dict | None]]:
         """What each task's worker runs used (every task's, or those of `task_ids`), as the agents reported it
         (checked again, since a board can come from somewhere else): what they cost, added up, and their usage,

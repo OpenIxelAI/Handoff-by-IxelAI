@@ -7,6 +7,7 @@
    "claude:claude-fable-5-1",
    "codex:gpt-6-astra",
    "codex:gpt-6.1-sol",
+   "grok:grok-4.7",
    "codex:gpt-6-sol",
    "codex:gpt-5.5",
    "kimi:kimi-k3",
@@ -92,6 +93,10 @@
     "note": "on a ChatGPT plan"
    },
    {
+    "model": "antigravity:gemini-3.1-pro-preview",
+    "note": "Google's; for answers and reviews through Ixel MAT, not an edit worker here"
+   },
+   {
     "model": "kimi:kimi-k3",
     "note": "open (about 2.8T, 104B active): the best open planner; Kimi's own service, or a very large GPU server"
    },
@@ -114,7 +119,15 @@
     "note": "the best builder for its price"
    },
    {
+    "model": "grok:grok-4.7",
+    "note": "on SuperGrok through grok, edit-only: strong and cheap"
+   },
+   {
     "model": "codex:gpt-6-sol",
+    "note": "on a ChatGPT plan"
+   },
+   {
+    "model": "codex:gpt-6.1-sol",
     "note": "on a ChatGPT plan"
    },
    {
@@ -138,6 +151,10 @@
    {
     "model": "claude:claude-haiku-5-5",
     "note": "small steps, very cheap"
+   },
+   {
+    "model": "codex:gpt-6-luna",
+    "note": "on a ChatGPT plan; very cheap"
    },
    {
     "model": "opencode:opencode/step-5-preview-free",

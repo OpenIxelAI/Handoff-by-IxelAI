@@ -289,6 +289,40 @@ MAT's list of models.
 The model, or the chain, and each model's effort are sealed into the approval with the rest, so a board can't
 move a run to a bigger, dearer model or turn one up. Codex takes `--model` too; a chain plans on claude.
 
+### Auto crew
+
+Auto crew is optional. With it off, you pick the models yourself, as above. With it on, you describe the task and
+Handoff picks the crew: which models, in which roles, and how hard each one thinks.
+
+```bash
+handoff crew "Fix the login page"              # preview a pick for words (nothing is approved or run)
+handoff crew T-7 --effort-all max              # preview one of your tasks, every model at max effort
+handoff approve T-7 --auto                     # approve T-7 with the crew Handoff picks, shown before you say yes
+handoff approve T-7 --auto --effort-all low    # the same, every model at low (or the nearest level it takes)
+```
+
+**What it reads.** A small model reads the task's title and text (nothing else, up to 4,000 characters) and says what
+kind of job it is (coding, writing, review, report or pictures) and how big it is (light, standard or heavy). The
+model is qwen3:4b-instruct when Ollama on this computer has it; otherwise it's Claude Haiku 5.5, with no tools. If
+neither answers, or the answer isn't the one line it's asked for, the words of the task decide by keyword.
+`handoff crew` says which one it used.
+
+**Who gets the work.** The chain runs on Claude, biggest first, at most four models. Fable 5.1 (or GPT-6 Astra) only
+plans, and only a heavy job gets a top planner. The biggest slices go to Grok 4.7 (and Gemini 3.1 Pro, once Handoff
+can run it) when they're here, then GPT-6.1 Sol and Opus 5.5, then Sonnet 5.5, then Haiku 5.5 or GPT-6 Luna for the
+small steps. A light job is Sonnet (or Haiku) and one small model. An agent you haven't enabled (`handoff agents`)
+gets no work, and neither does one that hit a usage limit in the last five hours; the next model takes its place.
+
+**How hard each thinks.** By size: a light job has medium for the planner and low for the builders; a standard job
+has high for the planner and the builders, and medium for the small steps; a heavy job has xhigh for the planner and
+high for the rest. Each level is one the agent takes. `--effort-all LEVEL` sets one level for every model instead, or
+the nearest level each one takes.
+
+**What's sealed.** `handoff approve T-7 --auto` shows the crew before you say yes, and seals exactly that chain and
+those efforts, as `--chain` and `--effort` do. It's for edits, and it can't go with `--model` or `--chain`. Answers and
+reviews name their agent yourself. `handoff crew "words"` previews words that aren't a task yet: it says how to add
+them (`handoff add "words"`), and then you approve that task with `--auto`.
+
 ### Recommended setups
 
 `handoff rankings` shows where each model fits in a chain, from the benchmarks it's ranked by, open models
@@ -355,6 +389,7 @@ Board and in `handoff agents`, with what it can reach:
 | Agent | Approve it as | What it can do | Costs |
 |---|---|---|---|
 | [OpenCode](https://opencode.ai) | `opencode`, with `--model provider/model` (`opencode/step-5-preview-free`, say) and `--effort` (its `--variant`: minimal … max, as the model offers; OpenCode 2 has no `--variant`, so there it runs at its default) | edits files in the worktree with its file tools; no commands, no web | its free models (`opencode/…-free`) nothing |
+| Grok Build (xAI's `grok`, signed in with your SuperGrok plan) | `grok`, with `--model` (`grok-4.7`, say) and `--effort` (low … xhigh) | edits files in the worktree with its file tools, inside its OS sandbox; no commands, no MCP tools, no web | your SuperGrok plan's |
 | [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any server with an OpenAI-style API | `ollama`, `lmstudio`, or a name you give it, with `--model qwen3:4b-instruct` and `--effort none`, low, medium or high | reads and writes files in the worktree through four tools Handoff runs itself; no commands | nothing: it runs on your computer |
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `hermes`, with `--model` | its file tools only, but they can read outside the worktree | its model's |
 | [Kimi Code](https://github.com/MoonshotAI/kimi-code), [Cline](https://cline.bot), [OpenClaw](https://github.com/openclaw/openclaw) | `kimi`, `cline`, `openclaw`, with `--model` (and `--effort`: Cline's none … xhigh, OpenClaw's off … max) | everything their own permissions allow: commands as you, with the network | their model's |
@@ -366,14 +401,28 @@ handoff agents enable kimi                                 # once: kimi runs wit
 handoff approve T-9 kimi
 ```
 
-Hermes, Kimi, Cline, OpenClaw and any agent you add run only once you've enabled them (`handoff agents
-enable NAME`, or the switch on the Board): until then, an approval for one waits. Nothing is pushed by any of
-them, each works in its own worktree and branch, and the Board shows what each run used, as it does for
-claude. OpenCode and Hermes report their tokens and cost; a model on your computer reports its tokens, at no
+Grok Build, Hermes, Kimi, Cline, OpenClaw and any agent you add run only once you've enabled them (`handoff
+agents enable NAME`, or the switch on the Board): until then, an approval for one waits. Nothing is pushed by
+any of them, each works in its own worktree and branch, and the Board shows what each run used, as it does for
+claude. OpenCode, Grok Build and Hermes report their tokens and cost; a model on your computer reports its tokens, at no
 cost. A small model is best at small, clear tasks (a rename, a test, a doc change): give it those, and the
 bigger models the rest. `--effort none` asks a local model not to think, but some builds think anyway (Ollama's
 `qwen3:4b` did, taking 5 minutes on a one-line change that `qwen3:4b-instruct` made in 9 seconds): for small
 edits, pick an instruct model, one made not to think.
+
+Grok Build also loads your own Grok plugins, hooks and MCP servers (from `~/.grok`, or the project), which
+Handoff's settings don't turn off. So before every run the worker asks `grok inspect --json` what it would load
+there (in the worktree, with the run's own `--cwd`), and refuses the run, changing nothing, if an enabled plugin
+provides hooks, a hook is enabled (or has no status, which counts as enabled), or the answer can't be read (a list
+missing from it counts as not read). The reason names them: turn a plugin off with `grok plugin disable NAME`, or
+remove the hook from your Grok config or the project's, and approve the task again. MCP servers don't stop a run:
+the run's `--tools` and `--disallowed-tools` keep their tools from the model, and their processes run inside Grok's
+strict sandbox, so the handback's note names them (a plugin that provides only MCP servers is named there too).
+A Grok run
+whose result isn't Grok's JSON, or doesn't say it stopped with `end_turn`, is a failed run, not a finished one.
+Grok's OS sandbox keeps its reads to the worktree and system paths, but it may still write to `/tmp` and your own
+`~/.grok` (Handoff runs it with your real home, which holds its login), so it isn't confined to the worktree for
+writes; if that matters, look at `~/.grok` after a run.
 
 **Your own agents and model servers** go in `agents.toml`, next to the approval key (in the folder above).
 Only you write that file; a project can't add an agent:
@@ -448,6 +497,8 @@ can't.
 | `handoff dispatch "codex review my changes, gemini list …" [--yes] [--plan] [--no-run]` | Split one request across your agents and run the parts side by side ([dispatch](#hand-out-work-to-any-agent-dispatch)) |
 | `handoff agents` | Who can take tasks here, and what kind: change files, answer, review, make pictures |
 | `handoff approve T-12 AGENT [--kind edit\|answer\|review\|image] [--return-to NAME]` · `--revoke` | Let an agent run one task, once, through the [worker](#the-worker-preview) (or withdraw that). With no AGENT, at a terminal, it offers the task's assignee and asks |
+| `handoff crew "task text" \| T-12 [--effort-all E]` | Preview the crew Auto crew would pick for a task: its job and size, the models in each role and how hard each thinks. Nothing is approved or run ([auto crew](#auto-crew)) |
+| `handoff approve T-12 --auto [--effort-all E]` | For an edit, let Handoff pick the models and each one's effort, shown before you say yes ([auto crew](#auto-crew)) |
 | `handoff rankings [update] [--job JOB] [--json]` | Which models are best at what, from public benchmarks: who takes over a run when a model hits its usage limit ([more](#when-a-model-hits-its-usage-limit)) |
 | `handoff run [T-12 …]` | Run approved tasks now, side by side (all of them, if you name none) |
 | `handoff worker --agent claude\|codex [--once] [--share FOLDER]` | Keep running the tasks you approve, each in its own git worktree |
