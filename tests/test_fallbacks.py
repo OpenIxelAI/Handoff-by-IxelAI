@@ -103,12 +103,12 @@ def test_every_ranking_entry_is_valid_and_named_once():
 def test_fallbacks_are_the_next_best_that_you_have():
     ranks = {"coding": ["claude:claude-sonnet-5-5", "claude:claude-opus-5-5", "codex:gpt-6-sol", "kimi:kimi-k3",
                         "claude:claude-haiku-5-5", "ollama:qwen3:4b-instruct"]}
+    # (Sonnet ranks above Opus and costs less: it's the first to take over)
     assert rankings.fallbacks("coding", "claude", "opus", {"claude", "codex", "ollama"}, ranks) == [
-        "codex:gpt-6-sol", "claude:claude-haiku-5-5", "ollama:qwen3:4b-instruct"]
-    # the best one falls back through everything below it, up to five, the last of them free
+        "claude:claude-sonnet-5-5", "codex:gpt-6-sol", "claude:claude-haiku-5-5", "ollama:qwen3:4b-instruct"]
+    # the best one falls back through what's below it that costs no more (not the dearer Opus), the last free
     assert rankings.fallbacks("coding", "claude", SONNET, None, ranks) == [
-        "claude:claude-opus-5-5", "codex:gpt-6-sol", "kimi:kimi-k3", "claude:claude-haiku-5-5",
-        "ollama:qwen3:4b-instruct"]
+        "codex:gpt-6-sol", "kimi:kimi-k3", "claude:claude-haiku-5-5", "ollama:qwen3:4b-instruct"]
     many = {"coding": [f"codex:gpt-{n}" for n in range(9)] + ["opencode:opencode/big-pickle-free", "ollama:qwen3"]}
     assert rankings.fallbacks("coding", "codex", "gpt-0", None, many) == [
         "codex:gpt-1", "codex:gpt-2", "codex:gpt-3", "codex:gpt-4", "opencode:opencode/big-pickle-free"]
@@ -119,6 +119,21 @@ def test_fallbacks_are_the_next_best_that_you_have():
     # no model: what's below the agent's best
     assert rankings.fallbacks("coding", "codex", None, {"claude", "ollama"}, ranks) == [
         "claude:claude-haiku-5-5", "ollama:qwen3:4b-instruct"]
+
+
+def test_a_model_is_never_replaced_by_a_dearer_one():
+    # Opus's list, with the real rankings: never Fable (about 2.5 times Opus's price), in any job
+    for job in ("coding", "planning", "review", "writing"):
+        for model in (OPUS, None):  # (claude's own model is Opus)
+            found = rankings.fallbacks(job, "claude", model, None, rankings.RANKS)
+            assert found and not any(FABLE in f for f in found), (job, model, found)
+    assert rankings.fallbacks("coding", "claude", OPUS, None, rankings.RANKS)[0] == f"claude:{SONNET}"
+    # Haiku goes only to what costs no more, or is free
+    found = rankings.fallbacks("coding", "claude", HAIKU, None, rankings.RANKS)
+    assert not any(m in f for f in found for m in (SONNET, OPUS, FABLE)) and "ollama:qwen3:4b-instruct" in found
+    # Fable, the dearest, can go to the cheaper Claude models
+    assert rankings.fallbacks("coding", "claude", FABLE, None, rankings.RANKS)[:2] == [f"claude:{SONNET}",
+                                                                                      f"claude:{OPUS}"]
 
 
 def test_answer_fallbacks_name_agents_once():

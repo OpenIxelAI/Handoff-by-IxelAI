@@ -265,9 +265,9 @@ time limit or Ctrl+C) has no report, so what it used isn't counted.
 ### When a model hits its usage limit
 
 A run doesn't stop because a model ran out of usage. When you approve a change, an answer or a review, Handoff
-works out who takes over if a model hits its plan's limit, its quota or its credits: the models ranked just
-below it for that kind of work, from public benchmarks, that you have an agent for, ending with the free and
-local ones. It shows you that list before you say yes, and seals it into the approval with the rest, so a board
+works out who takes over if a model hits its plan's limit, its quota or its credits: the next best models for
+that kind of work, from public benchmarks, that you have an agent for and that cost no more at API prices
+(Opus goes to Sonnet, never to Fable), ending with a free or local one. It shows you that list before you say yes, and seals it into the approval with the rest, so a board
 can't add a model to it.
 
 If the model hits its limit mid-run, the worker benches it for the rest of that run and goes on with the next

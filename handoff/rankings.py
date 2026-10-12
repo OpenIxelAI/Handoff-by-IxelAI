@@ -72,6 +72,13 @@ RANKS: dict[str, list[str]] = {
 # The short names an agent takes for a model, as the ranking names it
 ALIASES = {"claude": {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
                       "haiku": "claude-haiku-5-5"}}
+# What a model costs per token at API prices, relative (Haiku 5.5's input, $0.10 a million, is 1; measured from
+# Claude Code's own cost reports, 2026-10-11). A model is only ever replaced by one that costs the same or less, or
+# by a free or local one: a usage limit never moves a run onto a dearer model. A model with no price here (another
+# company's, on its own plan) isn't held back by it.
+COST = {"claude-fable-5-1": 95, "claude-opus-5-5": 38, "claude-sonnet-5-5": 19, "claude-haiku-5-5": 1}
+# The model an agent runs when the approval names none
+DEFAULT_MODEL = {"claude": "claude-opus-5-5"}
 # The kind of run → the job its fallbacks come from
 KIND_JOB = {"edit": "coding", "answer": "writing", "review": "review"}
 MAX_FALLBACKS = 5
@@ -159,27 +166,30 @@ def fallbacks(job: str, agent: str, model: str | None, have: set[str] | None = N
               ranks: dict[str, list[str]] | None = None, agents_only: bool = False) -> list[str]:
     """The run's fallbacks: the entries ranked below agent:model for this job that an agent in `have` runs
     (every agent if None), best first, up to MAX_FALLBACKS, the last of them free when one is ranked. A model
-    the ranking doesn't name falls back to the free and local ones only; no model (the agent's own default) to
-    what's below the agent's first entry.
+    the ranking doesn't name falls back to the free and local ones only; no model, to what's below the agent's
+    default (DEFAULT_MODEL), or its first entry. Never to a model that costs more (COST).
     `agents_only`: each agent once, without its model (a run through Ixel MAT, which picks the model)."""
     ranked = (ranks or load()[0]).get(job, [])
     entries = [split(e) for e in ranked]
-    wanted = canonical(agent, model) if model else None
+    wanted = canonical(agent, model) if model else DEFAULT_MODEL.get(agent)
     names = [(a, canonical(a, m)) for a, m in entries]
-    if wanted is None:
+    start = next((i + 1 for i, entry in enumerate(names) if entry == (agent, wanted)), None) if wanted else None
+    if start is None and not model:  # (its own model, unranked: what's below the agent's best)
         start = next((i + 1 for i, (a, _) in enumerate(names) if a == agent), None)
-    else:
-        start = next((i + 1 for i, entry in enumerate(names) if entry == (agent, wanted)), None)
     if start is None:  # (not ranked: only what's free)
         below = [(a, m) for a, m in names if a in FREE_AGENTS or m.endswith("-free")]
-    else:
-        below = names[start:]
+    else:  # what's ranked below it, and anything ranked above it that costs no more (a better, cheaper model)
+        cheaper = COST.get(wanted or "")
+        below = [(a, m) for i, (a, m) in enumerate(names)
+                 if i >= start or (cheaper is not None and COST.get(m, float("inf")) <= cheaper)]
     found: list[str] = []
     for a, m in below:
         if have is not None and a not in have:
             continue
         if (a, m) == (agent, wanted) or (agents_only and a == agent):
             continue
+        if not _free(f"{a}:{m}") and COST.get(m, 0) > COST.get(wanted or "", float("inf")):
+            continue  # (never a dearer model)
         entry = a if agents_only or not m else f"{a}:{m}"
         if entry not in found:
             found.append(entry)
