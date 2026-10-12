@@ -409,9 +409,9 @@ def commands(pwned, home: Path, decoy: Decoy, secrets: Secrets, share: Path, *, 
         _python(SYSCTL_PROBE, *looks_for),
         # Apple Events: another program runs the command, outside the sandbox
         f"osascript -e {q(shell)}",
-        # (with a time limit: refused, the Apple event otherwise waits for ever, and so does an agent that waits for
-        # what it started)
-        f"osascript -e 'with timeout of 15 seconds' -e {q(shell_finder)} -e 'end timeout'",
+        # (with a time limit from outside: with Launch Services refused, osascript waits for ever before it even
+        # sends the event, and so does an agent that waits for what it started)
+        f"perl -e 'alarm 20; exec @ARGV' osascript -e {q(shell_finder)}",
         # LaunchServices: an app, or a script an app runs, outside the sandbox
         f"open -g -a Terminal {q(str(share / COMMAND_FILE))}",
         f"open -g -a TextEdit {q(str(share / DOCUMENT_FILE))}",
