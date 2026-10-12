@@ -58,9 +58,18 @@ def fake_program(tmp_path, name, help_text):
     """A program on disk that prints `help_text` (the worker checks an agent's --help for the flags it needs)."""
     folder = tmp_path / "bin"
     folder.mkdir(exist_ok=True)
+    return script_program(folder, name, f"print({help_text!r})\n")
+
+
+def script_program(folder, name, code):
+    """A program on disk that runs this Python `code` (on Windows, through a .bat that runs python on it)."""
     path = folder / name
-    path.write_text(f"#!{sys.executable}\nprint({help_text!r})\n", encoding="utf-8")
+    path.write_text(f"#!{sys.executable}\n{code}", encoding="utf-8")
     path.chmod(0o755)
+    if sys.platform == "win32":
+        shim = folder / f"{name}.bat"
+        shim.write_text(f'@"{sys.executable}" "{path}" %*\r\n', encoding="utf-8")
+        return str(shim)
     return str(path)
 
 
@@ -270,12 +279,12 @@ def test_an_effort_approved_for_opencode_doesnt_stop_opencode_2(tmp_path, board,
 
 def test_opencode_2_lists_its_models_its_own_way(tmp_path):
     # `opencode models` on OpenCode 2 needs --standalone too, or the Board's first list comes back empty
-    path = Path(fake_program(tmp_path, "opencode", OPENCODE2_HELP))
-    path.write_text(f"#!{sys.executable}\nimport sys\n"
-                    "print('opencode/step-5-preview-free' if sys.argv[1:] == ['models', '--standalone'] else "
-                    f"{OPENCODE2_HELP!r})\n", encoding="utf-8")
+    (tmp_path / "bin").mkdir()
+    path = script_program(tmp_path / "bin", "opencode", "import sys\n"
+                          "print('opencode/step-5-preview-free' if sys.argv[1:] == ['models', '--standalone'] else "
+                          f"{OPENCODE2_HELP!r})\n")
     AGENTS["opencode"] = adapters.presets()["opencode"]
-    lister = Worker(None, tmp_path, "opencode", command=str(path))  # type: ignore[arg-type]
+    lister = Worker(None, tmp_path, "opencode", command=path)  # type: ignore[arg-type]
     assert lister.list_models() == ["opencode/step-5-preview-free"]
 
 
