@@ -170,7 +170,9 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, mac, login
         args = list(worker_module.CODEX.args)
         args[-1:-1] = provider
         monkeypatch.setitem(worker_module.AGENTS, "codex", dataclasses.replace(worker_module.CODEX, args=tuple(args)))
-        worker = Worker(board, repo, "codex", timeout_sec=300, share=[str(toolbox)])
+        # macOS: an Apple event to Finder is refused only after about two minutes
+        worker = Worker(board, repo, "codex", timeout_sec=600 if sys.platform == "darwin" else 300,
+                        share=[str(toolbox)])
         worker.check()
         [result] = worker.run_pending()
     egress.shutdown()
@@ -191,7 +193,6 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, mac, login
     assert "trap" not in (codex_home / "config.toml").read_text(encoding="utf-8"), "Codex's real config was changed"
     if login != "auth.json":
         assert not (codex_home / "auth.json").exists(), "the worker wrote a login into your Codex home"
-    mac.check(seen)
 
     # ...and the legitimate command ran, and its result came back to the person on the task's branch
     assert result.ok, result.message
@@ -201,3 +202,4 @@ def test_the_codex_worker_stays_in_its_sandbox(tmp_path, monkeypatch, mac, login
     assert task.status == "handed_off" and task.assignee == HUMAN
     assert board.events(task.id)[-1].data["files"] == ["answer.txt"]
     assert (wt / ".git").read_text(encoding="utf-8").startswith("gitdir: ")
+    mac.check(seen)  # last: on a Mac it ends the test as an expected failure (macos_attacks.ENV_LIMIT)

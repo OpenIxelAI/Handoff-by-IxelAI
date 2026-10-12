@@ -229,8 +229,15 @@ def test_claude_stays_in_its_sandbox(tmp_path, monkeypatch, mac, login):
             bash("python3 -c 'print(6*7)' > answer.txt"),  # the real work
         ]
         fake.tool_calls[-1:-1] = [bash(c) for c in mac.commands(home)]  # macOS's own, before the real work
+        # Whatever the agent was handed through a file descriptor (its API key, on macOS) is gone by now
+        rewind = ("import os\nfor fd in range(3, 64):\n    try:\n        os.lseek(fd, 0, 0)\n"
+                  "        print(fd, os.read(fd, 300))\n    except OSError:\n        pass")
+        fake.tool_calls[-1:-1] = [bash('for f in /dev/fd/*; do echo "== $f"; head -c 300 "$f"; done; '
+                                       + _python(rewind))]
         monkeypatch.setattr("cli_capture.ANSWER", "DONE: wrote answer.txt\nLEFT: nothing\nVERIFY: cat answer.txt")
-        worker = Worker(board, repo, "claude", timeout_sec=300, share=[str(toolbox)])
+        # macOS: an Apple event to Finder is refused only after about two minutes
+        worker = Worker(board, repo, "claude", timeout_sec=600 if sys.platform == "darwin" else 300,
+                        share=[str(toolbox)])
         worker.check()
         assert worker.spec is CLAUDE and worker.fallback_reason is None, worker.fallback_reason
         [result] = worker.run_pending()
@@ -260,7 +267,6 @@ def test_claude_stays_in_its_sandbox(tmp_path, monkeypatch, mac, login):
         "Claude's real settings were changed"
     if mac.active:
         assert REAL_LOGIN_SECRET not in seen, "the signed-in login in the home folder reached the model"
-    mac.check(seen)
 
     # ...and the legitimate command ran, and its result came back to the person on the task's branch
     assert result.ok, result.message
@@ -271,3 +277,4 @@ def test_claude_stays_in_its_sandbox(tmp_path, monkeypatch, mac, login):
     handoff = board.events(task.id)[-1]
     assert handoff.data["files"] == ["answer.txt"] and CLAUDE.note in handoff.data["left"]
     assert (wt / ".git").read_text(encoding="utf-8").startswith("gitdir: ")
+    mac.check(seen)  # last: on a Mac it ends the test as an expected failure (macos_attacks.ENV_LIMIT)

@@ -2323,6 +2323,11 @@ def _setup_remove(wanted: list[str]) -> int:
 
 # ── doctor ───────────────────────────────────────────────────────────────────
 
+# What the macOS sandbox can't stop (SECURITY.md, "The worker")
+MAC_ENV_NOTE = (". On a Mac its commands can still read your other programs' environment variables, so keep "
+                "tokens out of your shell's environment while it runs")
+
+
 def cmd_doctor(argv: list[str]) -> int:
     import json
     import os
@@ -2460,7 +2465,8 @@ def cmd_doctor(argv: list[str]) -> int:
             if worker.fallback_reason:
                 line("⚠", f"Worker ({agent})", f"ready, edit-only (no commands): {worker.fallback_reason}")
             elif worker.spec.access == "sandbox":
-                line("✓", f"Worker ({agent})", f"ready, in its sandbox: handoff approve T-12 {agent}")
+                line("✓", f"Worker ({agent})", f"ready, in its sandbox: handoff approve T-12 {agent}"
+                     + (MAC_ENV_NOTE if sys.platform == "darwin" else ""))
             else:
                 from handoff import adapters
                 line("✓", f"Worker ({agent})", f"ready; it {adapters.ACCESS[worker.spec.access]}: handoff approve "

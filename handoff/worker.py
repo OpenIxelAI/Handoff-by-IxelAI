@@ -792,7 +792,7 @@ class Worker:
                                     "another worker.")
         if self.spec.sandboxed:
             try:
-                self.bwrap = sandbox.check(self.spec.needs)
+                self.bwrap = sandbox.check(self.spec.needs, self.command)
             except sandbox.SandboxUnavailable as exc:
                 if self.spec.fallback is None:
                     raise WorkerUnavailable(str(exc)) from exc
