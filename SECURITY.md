@@ -288,7 +288,7 @@ shell or network access of its own.
 | `tests/test_worker_claude_live.py` | **Claude's attack test**, with the real Claude Code CLI inside real bubblewrap (below) |
 | `tests/test_worker_codex_live.py` | **Codex's attack test**, with the real Codex CLI inside real bubblewrap (below) |
 | `tests/test_worker_live.py` | **The attack test for Claude's edit-only mode**, where the sandbox can't run (below) |
-| `tests/test_sandbox.py` | The sandbox's command line (what's hidden, what's shown, in what order); which folders can be shared and what's hidden inside them; Claude's sandbox settings; each agent's private login and when a refreshed one is copied back; which environment variables count as credentials |
+| `tests/test_sandbox.py` | The sandbox's command line, and macOS's profile (what's hidden, what's shown, in what order); which folders can be shared and what's hidden inside them; Claude's sandbox settings; each agent's private login and when a refreshed one is copied back; which environment variables count as credentials |
 | `tests/test_worker.py` | Approvals (the person only; one run; lapse when the task moves; sealed to this computer and board, so a cloned or edited board carries none); the worktree, branch and commit; a rewritten `.git` file and the repository's own hooks can't make the worker's git run anything; links out of the worktree are refused; the agent's environment and command line; a secret added to a new or committed file is never committed, while one the branch already had doesn't block the change; deleting or cleaning a task leaves its worktree and branch, and says so |
 | `tests/test_adapters.py` | The other agents (OpenCode, Hermes Agent, Kimi Code, Cline, OpenClaw, agents you add) and models on your computer: which are offered, and what's wrong in `agents.toml` is said, never fatal; only you enable an agent that runs with its own permissions or reads outside its worktree (an approval for one waits until you do, and nothing Handoff started can enable it); OpenCode's run permissions allow only its file tools; each agent gets only the environment it names; the task reaches it on stdin, as one flag's value, or in a private file, never through `cmd.exe`; the local model's tools refuse paths that leave the worktree, `.git` and links, and offer no command; usage and cost are read from each agent's own report |
 | `tests/test_worker_opencode_live.py` | **OpenCode's attack test**, with the real OpenCode CLI (below) |
@@ -321,9 +321,10 @@ We pointed each CLI at a fake model API that answers with attacks, from inside a
 | `claude -p --restricted` with Bash and its own sandbox, inside Handoff's bubblewrap sandbox | blocked | blocked | blocked | blocked | yes |
 
 No CLI's own sandbox, left to its defaults, confines what commands can *read*. So both agents run inside
-an OS sandbox that Handoff controls (bubblewrap, on Linux; macOS is next), with their own sandbox inside
-it. Where Handoff's sandbox can't run, Claude runs edit-only, with no way to run anything, and Codex
-doesn't run. Findings from the reviews:
+an OS sandbox that Handoff controls (bubblewrap on Linux, sandbox-exec on macOS), with their own sandbox
+inside it. Where Handoff's sandbox can't run, Claude runs edit-only, with no way to run anything, and
+Codex doesn't run. The measurements above and the attack tests below are from Linux, against bubblewrap:
+macOS has no live attack test yet. Findings from the reviews:
 
 - **Commands can read every process's environment.** Codex passes `OPENAI_API_KEY` to the commands it
   runs, and inside the sandbox `/proc/*/environ` shows every process's variables. So a sandboxed agent
@@ -373,9 +374,15 @@ doesn't run. Findings from the reviews:
   program that already runs as you and can read it; such a program could run anything anyway.
 - **Its own worktree and branch.** `.handoff/worktrees/T-7` on `handoff/T-7`, made from your current
   commit. The worker commits the result there and never pushes, fetches or touches your checkout.
-- **Handoff's sandbox.** The worker runs the agent inside bubblewrap. It sees the system (`/usr`, `/etc`,
-  `/opt`) read-only, its own install read-only, the worktree, and a private home; your home folder, other
-  homes, `/root`, `/tmp`, `/run`, `/var`, `/mnt`, `/media` and the rest of the project are empty or absent.
+- **Handoff's sandbox.** On Linux the worker runs the agent inside bubblewrap. It sees the system (`/usr`,
+  `/etc`, `/opt`) read-only, its own install read-only, the worktree, and a private home; your home folder,
+  other homes, `/root`, `/tmp`, `/run`, `/var`, `/mnt`, `/media` and the rest of the project are empty or
+  absent. On macOS, which has one filesystem, it runs the agent under `sandbox-exec` with a profile that
+  denies reads of `/Users`, `/Volumes`, your home folder, the project, `/tmp`, `/var/folders` and
+  `/var/root`, except the worktree, a private home and temp folder, the agent's install, the folders you
+  share and what the network needs (the rest of the system stays readable, and credential folders in your
+  home stay denied). Writes are allowed only in the worktree and the private folders, and the agent can't
+  look at or signal other processes, or reach the security server that opens your keychain.
 - **Claude: commands, in two sandboxes.** Claude Code runs as `claude -p --restricted --tools
   Read,Edit,Write,Glob,Grep,Bash --allowedTools Bash --permission-mode acceptEdits --strict-mcp-config`,
   with settings that turn its own sandbox on for every command (`failIfUnavailable`, no
@@ -383,19 +390,21 @@ doesn't run. Findings from the reviews:
   `--restricted` ignores your Claude settings and the repository's (which could allow anything, switch the
   sandbox off or run commands), keeps the file tools inside the worktree, and leaves out web and MCP
   servers. Claude's own sandbox needs `socat`.
-- **Claude edit-only, where the sandbox can't run** (macOS and Windows for now, or Linux without
-  bubblewrap or `socat`): the same, but with only Read, Edit, Write, Glob and Grep, so no shell at all, and
-  the handback says it ran that way. `--restricted` carries most of this: without it, permissive settings
-  in the repository or your home folder let the agent read `~/.ssh` (the attack test proves it).
+- **Claude edit-only, where the sandbox can't run** (Windows for now, or Linux without bubblewrap or
+  `socat`, or a Mac where `sandbox-exec` can't start): the same, but with only Read, Edit, Write, Glob and
+  Grep, so no shell at all, and the handback says it ran that way. `--restricted` carries most of this:
+  without it, permissive settings in the repository or your home folder let the agent read `~/.ssh` (the
+  attack test proves it).
 - **Codex: commands, in two sandboxes.** Inside Handoff's sandbox, Codex's own `workspace-write` sandbox
   (as a permission profile) keeps its commands' writes in the worktree and takes their network away, and
   marks the private home unreadable to them. Codex runs with `--ignore-user-config` (none of your MCP
   servers, notify commands or profiles), `--ephemeral`, and web search, image viewing and sub-agents off.
 - **The CLIs are checked.** The worker checks `claude --help` and `codex exec --help` for every flag it
-  relies on and refuses to run a version without them, and refuses to run Codex where bubblewrap can't
-  start. On Ubuntu 24.04 and later that means adding an AppArmor profile that lets bubblewrap make user
-  namespaces ([the guide](docs/guide.md#the-worker-preview) has it), the kind Ubuntu itself ships for
-  Flatpak and Chrome. Know what it gives up: Ubuntu's restriction keeps unprivileged programs away from the kernel's user-namespace code, and with
+  relies on and refuses to run a version without them, and refuses to run Codex where the sandbox
+  (bubblewrap, or sandbox-exec on macOS) can't start. On Ubuntu 24.04 and later bubblewrap needs an
+  AppArmor profile that lets it make user namespaces ([the guide](docs/guide.md#the-worker-preview) has
+  it), the kind Ubuntu itself ships for Flatpak and Chrome. Know what it gives up: Ubuntu's restriction
+  keeps unprivileged programs away from the kernel's user-namespace code, and with
   the profile any program can reach that code by starting itself through bubblewrap. Turning the
   restriction off (`kernel.apparmor_restrict_unprivileged_userns=0`) gives up the same and a little more.
   The live-test job, which runs only when started by hand, applies the profile on a stock Ubuntu runner
@@ -408,8 +417,10 @@ doesn't run. Findings from the reviews:
   run and the new file is a valid login (for Codex, for the same account; Claude's file doesn't say which
   account it's for, but only Claude itself can write it, since the private home is hidden from its
   commands). A token made from a key or `CLAUDE_CODE_OAUTH_TOKEN` is never copied back. On Linux, Claude
-  Code keeps its login in that file; a refresh against the real service is the one part the attack tests
-  can't exercise.
+  Code keeps its login in that file. On macOS it keeps it in the Keychain, which the sandbox keeps the
+  agent out of, so give the worker `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
+  `ANTHROPIC_API_KEY` there; Codex's file login works as it does on Linux. A refresh against the real
+  service is the one part the attack tests can't exercise.
 - **Folders you share, read-only.** Tools installed in your home folder aren't in the sandbox unless you
   start the worker with `--share FOLDER`, which only you can do. Handoff refuses to share your whole home
   folder, the project itself (the agent has its worktree), and folders that hold credentials (`~/.ssh`,
