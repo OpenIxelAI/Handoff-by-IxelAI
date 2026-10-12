@@ -294,7 +294,8 @@ def test_a_planner_out_of_usage_hands_the_plan_to_the_next_planner(board, repo):
 
 def test_the_api_says_who_takes_over_and_the_rankings(board, repo, monkeypatch):
     from handoff import cli
-    monkeypatch.setattr(cli, "suggested_fallbacks", lambda kind, agent, models, root: [f"claude:{SONNET}", "codex"])
+    monkeypatch.setattr(cli, "suggested_fallbacks",
+                        lambda kind, agent, models, root, leave_out=(): [f"claude:{SONNET}", "codex"])
     def call(op, **args):
         reply, _ = api.handle(json.dumps({"schema": 1, "op": op, "project": str(repo), "args": args}).encode())
         assert reply["ok"], reply

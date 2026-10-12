@@ -14,7 +14,8 @@ Ixel MAT, which holds your API keys and talks to the models:
 Like the panel (ixel.py), the task's text only ever goes on stdin; the command line is fixed apart
 from names Handoff checked (an agent's board name, a provider, a branch, relative file paths), and
 Ixel is started in the project folder. Ixel's output is other models' words: the board keeps it
-sanitized and clipped, and the full answer goes to .handoff/outputs/T-N/answer.md.
+sanitized and clipped, and the full answer goes to .handoff/outputs/T-N/answer.md. What an answer or a
+review used, as Ixel reports it, is recorded with the run (a cost only for API billing: _ixel_usage).
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from handoff import approvals, gitwork
+from handoff import approvals, gitwork, usage
 from handoff.board import HUMAN, Board, BoardError, Event, Task, run_kind, safe_name
 from handoff.fence import numbered
 from handoff.ixel import child_env, find_ixel
@@ -82,7 +83,8 @@ class IxelRoster:
     agents: list[dict]       # `ixel ask --list`: name, label, model, ready, images
     providers: list[dict]    # `ixel image --list`: name, label, model, ready, why
     problem: str | None = None
-    features: tuple[str, ...] = ()  # what this Ixel's `ask` can do: "new-files"
+    features: tuple[str, ...] = ()  # what this Ixel's `ask` can do: "new-files", "head", "effort", "effort-first"
+    unread: bool = False     # True when `ixel ask --list` printed nothing readable
 
 
 def _json_out(runner: Runner, command: list[str], root: Path, timeout: float) -> dict | None:
@@ -108,7 +110,7 @@ def roster_from_lists(ixel: str | None, listed: dict | None, pictures: dict | No
                                   "as edits. Install Ixel MAT to give answers, reviews and pictures to any model.")
     if listed is None or not isinstance(listed.get("agents"), list):
         return IxelRoster([], [], "This Ixel MAT can't take single tasks yet (`ixel ask` is missing). Update it "
-                                  "with: ixel update")
+                                  "with: ixel update", unread=listed is None)
     pictures = pictures or {}
     agents = [a for a in listed["agents"] if isinstance(a, dict) and isinstance(a.get("name"), str)]
     providers = [p for p in pictures.get("providers") or [] if isinstance(p, dict) and isinstance(p.get("name"), str)]
@@ -297,17 +299,54 @@ def target_plan(target: dict, roster: IxelRoster | None) -> tuple[list[str], str
     return ["--base", target["base"], "--head", target["head"]], clean_line(target["label"])
 
 
+def _effort_flags(agent: str, effort: str | None, roster: IxelRoster | None) -> list[str]:
+    """`--effort LEVEL` for `ixel ask`, when the run has one and this Ixel can take it: it lists "effort"
+    among its features and, for several agents (`--agent a,b`, from fallbacks), "effort-first" too (the level
+    is the first agent's only; without it Ixel refuses --effort with several agents). [] otherwise: the run
+    goes on at the model's own setting, and the handback says so (_effort_note)."""
+    if not effort or roster is None or "effort" not in roster.features:
+        return []
+    if "," in agent and "effort-first" not in roster.features:
+        return []
+    return ["--effort", effort]
+
+
+def _effort_note(agent: str, effort: str | None, roster: IxelRoster | None) -> str:
+    """A sentence for the handback when the run has an effort but _effort_flags leaves it out, and why (so the
+    run's own setting isn't a surprise). "" when there's no effort, or it is passed. Only a list that couldn't be
+    read is said so; any other roster problem is given (clipped) as the reason the effort was left out."""
+    if not effort or _effort_flags(agent, effort, roster):
+        return ""
+    level = clean_line(effort)[:20]
+    ran = f"It ran at the model's own effort, not {level}:"
+    if roster is None or roster.unread:  # the list of models couldn't be read, so there are no features
+        return (f"{ran} Handoff couldn't read Ixel MAT's list of models (`ixel ask --list`), so it didn't pass "
+                "--effort.")
+    reason = clean_line(roster.problem) if roster.problem else ""
+    if reason:  # the list was read (or there's no Ixel), and the roster says why there's no effort to pass
+        if len(reason) > 200:
+            reason = f"{reason[:200].rstrip()}…"
+        if not reason.endswith((".", "!", "?", "…")):
+            reason += "."
+        return f"{ran} Handoff didn't pass --effort. {reason}"
+    if "effort" not in roster.features:
+        return f"{ran} this Ixel MAT can't take --effort (update it with: ixel update)."
+    return f"{ran} this Ixel MAT can't take --effort with fallbacks (update it with: ixel update)."
+
+
 def command_for(ixel: str, root: Path, task: Task, kind: str, agent: str, roster: IxelRoster | None,
-                outputs: Path, target: dict | None = None) -> tuple[list[str], str, str]:
+                outputs: Path, target: dict | None = None, effort: str | None = None) -> tuple[list[str], str, str]:
     """The ixel command line, what goes on stdin, and what the run reads (a sentence for the handback).
-    `target`: a review's two commits, sealed in its approval (approvals.check_target)."""
+    `target`: a review's two commits, sealed in its approval (approvals.check_target). `effort`: how hard an
+    answer's or a review's model thinks, sealed in its approval; it's left out when this Ixel can't take it
+    (_effort_flags), and the handback then says so (_effort_note)."""
     # The files the task names: in its title, or its body too unless the body is the whole request it was
     # split from (`handoff dispatch`), which names other agents' files
     own = task.title if DISPATCH_BODY in task.body.split("\n", 1)[0] else f"{task.title}\n{task.body}"
     if kind == "answer":
         files = named_files(own, root)
         stdin = f"{ANSWER_BRIEF}\n\n{_task_text(task)}"
-        argv = [ixel, "ask", "--agent", agent, "--json"]
+        argv = [ixel, "ask", "--agent", agent, "--json", *_effort_flags(agent, effort, roster)]
         for name in files:
             argv += ["-f", name]
         return argv + ["-"], stdin[:MAX_QUESTION_CHARS], (f"It read {', '.join(files)}." if files else "")
@@ -320,8 +359,8 @@ def command_for(ixel: str, root: Path, task: Task, kind: str, agent: str, roster
         else:
             flags, what = review_plan(root, roster)
         stdin = f"{(FILES_REVIEW_BRIEF if files else REVIEW_BRIEF).format(what=what)}\n\n{_task_text(task)}"
-        return ([ixel, "ask", "--agent", agent, "--json", *flags, "-"], stdin[:MAX_QUESTION_CHARS],
-                f"It reviewed {what}.")
+        return ([ixel, "ask", "--agent", agent, "--json", *_effort_flags(agent, effort, roster), *flags, "-"],
+                stdin[:MAX_QUESTION_CHARS], f"It reviewed {what}.")
     if kind == "image":
         provider = image_provider(agent, roster or IxelRoster([], []))
         if provider is None:
@@ -381,17 +420,20 @@ def _started(board: Board, root: Path, task: Task, approval: Event, runner: Runn
         target = approvals.check_target(approval.data["target"])
         if target is None:
             return fail("The commits this review was approved for aren't readable.")
-    from handoff.board import run_fallbacks
+    from handoff.board import run_efforts, run_fallbacks
     fallbacks = run_fallbacks(approval) if kind in ("answer", "review") else []
+    effort = run_efforts(approval).get("") if kind in ("answer", "review") else None
     try:
-        if (kind in ("image", "review") or fallbacks) and roster is None:
+        if (kind in ("image", "review") or fallbacks or effort) and roster is None:
             roster = ixel_roster(root, runner)
         asked = agent
         if fallbacks:  # Ixel asks the next of them when one is out of usage (`ixel ask --agent a,b`)
             ready = {safe_name(a.get("name")) for a in roster.agents if a.get("ready")} if roster else set()
             names = [agent] + [f.partition(":")[0] for f in fallbacks]
             asked = ",".join(dict.fromkeys(n for n in names if n == agent or n in ready))
-        command, stdin, reads = command_for(ixel, root, task, kind, asked, roster, outputs, target)
+        command, stdin, reads = command_for(ixel, root, task, kind, asked, roster, outputs, target, effort)
+        # An effort that couldn't be passed doesn't fail the run: it goes on at the model's own, and says so
+        reads = " ".join(s for s in (reads, _effort_note(asked, effort, roster)) if s)
         output_folder(root, outputs)
     except RunProblem as exc:
         return fail(str(exc))
@@ -418,8 +460,12 @@ def _started(board: Board, root: Path, task: Task, approval: Event, runner: Runn
                                      else _answer(data, root, outputs, reads))
     except RunProblem as exc:
         return fail(str(exc))
+    used = None
+    if kind in ("answer", "review"):  # (a picture run's usage isn't recorded)
+        used, spent = _ixel_usage(data)
+        left = f"{left} {spent}" if left else spent
     try:
-        finished = board.finish_run(agent, task.id, return_to, done, left, verify, files)
+        finished = board.finish_run(agent, task.id, return_to, done, left, verify, files, extra={"usage": used})
     except BoardError as exc:  # (it can't stay in progress: nobody is running it now)
         return fail(f"The board didn't take the result: {exc} The result is in {outputs.as_posix()}.")
     return RunResult(finished, True, f"handed to {return_to}")
@@ -492,6 +538,47 @@ def _answer(data: dict, root: Path, outputs: Path, reads: str) -> tuple[str, str
         swapped, reads, *notes,
         f"The full answer is in {path.as_posix()}." if cut else "") if n)
     return done, left, f"Read it here, or in {path.as_posix()}.", [path.as_posix()]
+
+
+def _ixel_usage(data: dict) -> tuple[dict | None, str]:
+    """What an answer's or a review's run used, from the one call record `ixel ask --json` may return as
+    "usage" (other models' words: all of it is checked). The usage to record (usage.check's shape, None when
+    there's none that's usable) and a sentence for the handback. A cost is kept for API billing only: a
+    subscription's or a local model's run costs nothing."""
+    raw = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    billing = raw.get("billing") if isinstance(raw.get("billing"), str) else ""
+    if billing not in ("plan", "api", "local", "unknown"):
+        billing = "unknown"
+    cost = usage._cost(raw.get("cost_usd")) if billing == "api" else None
+    used = None
+    for name in (raw.get("model"), raw.get("agent")):  # the model's name, else the agent's
+        if not isinstance(name, str) or find_secret(name):  # (a name like a key would be refused with the text)
+            continue
+        used = usage.check({"models": {name: {"in": raw.get("input_tokens"), "out": raw.get("output_tokens"),
+                                              "cache_read": raw.get("cache_read_tokens"),
+                                              "cache_write": raw.get("cache_write_tokens"), "cost": cost}}})
+        if used:
+            break
+    if used:
+        name, info = next(iter(used["models"].items()))  # (what's said comes from here, not from `raw`)
+        if cost is None and not (info["in"] or info["out"] or info["cache_read"] or info["cache_write"]):
+            used = None  # no tokens and no cost: nothing to record
+    if not used:
+        return None, ("Used: on your subscription, no usage reported." if billing == "plan"
+                      else "Used: no usage reported.")
+    cached = info["cache_read"] + info["cache_write"]
+    said = f"Used: {name}: {usage.tokens(info['in'])} in, {usage.tokens(info['out'])} out"
+    said += f", {usage.tokens(cached)} cached" if cached else ""
+    said += " (estimated)" if raw.get("estimated") is True else ""
+    if billing == "plan":
+        said += " · on your subscription"
+    elif billing == "local":
+        said += " · on your computer"
+    elif billing == "api" and cost is not None:
+        said += f" · ${info['cost']:.4f}"
+    else:
+        said += " · cost not reported"
+    return used, said + "."
 
 
 def _pictures(data: dict, root: Path, outputs: Path, reads: str) -> tuple[str, str, str, list[str]]:
