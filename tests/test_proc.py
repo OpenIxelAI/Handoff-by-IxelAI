@@ -81,7 +81,7 @@ def fake_macos(monkeypatch):
     """Pretend processes, seen through proc's ps and sysctl. Returns their pids by name."""
     me = 501
     names = ("root", "child", "deep", "away", "hidden", "plain", "in_argv", "longer", "other_read", "other_refused")
-    pids = dict(zip(names, range(FAR, FAR + len(names))))
+    pids = dict(zip(names, range(FAR, FAR + len(names)), strict=True))
     ghost = FAR + 99
     rows = [(1, 0, 0),
             (pids["root"], 1, me),  # the run's launcher
