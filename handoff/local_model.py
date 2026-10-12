@@ -14,8 +14,8 @@ is told so. Nothing runs commands. The run stops when the model answers without 
 MAX_TURNS turns, or at its time limit.
 
 Small models think out loud (Qwen3's <think> blocks): that's taken out of the reply, and effort "none" asks the
-server not to think at all (Ollama's think = false, and Qwen3's /no_think). A thinking-only model (Qwen3-4B-Thinking-2507,
-say) thinks anyway; its thinking comes back apart from the reply.
+server not to think at all (Ollama's think = false, and Qwen3's /no_think). A thinking-only model
+(Qwen3-4B-Thinking-2507, say) thinks anyway; its thinking comes back apart from the reply.
 """
 from __future__ import annotations
 

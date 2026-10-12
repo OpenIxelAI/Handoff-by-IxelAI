@@ -4,8 +4,8 @@ Skipped where `opencode` isn't installed. The model is a local HTTP server speak
 Ollama does), set up as a provider in a private OpenCode config; it asks OpenCode's tools to read a file
 outside the worktree, write one outside it, and write HELLO.txt inside it. The run must offer no shell, web or
 subagent tool at all, refuse both escapes, and commit only HELLO.txt. OpenCode 2 offers those tools (its free
-models refuse a run without them), so there it also tries each one: every call must be rejected. Its execute tool (JavaScript that can make HTTP
-requests) mustn't be offered at all.
+models refuse a run without them), so there it also tries each one: every call must be rejected. Its execute
+tool (JavaScript that can make HTTP requests) mustn't be offered at all.
 """
 import json
 import os
