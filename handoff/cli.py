@@ -1469,7 +1469,8 @@ def cmd_merge(argv: list[str]) -> int:
     task, events, _, _ = board.task_with_history(task_id)
     ref = task.ref
     if task.branch is None:
-        raise CommandError(f"{ref} has no branch, so there's nothing to merge.")
+        raise CommandError(gitwork.handmade_branch(_root(args), ref)
+                           or f"{ref} has no branch, so there's nothing to merge.")
     blocked = Board.merge_blocker(task, events)
     if blocked:
         raise CommandError(blocked)
