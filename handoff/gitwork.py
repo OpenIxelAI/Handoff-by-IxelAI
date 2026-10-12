@@ -140,17 +140,19 @@ def task_branches(root: Path) -> set[str]:
 
 
 def handmade_branch(root: Path, ref: str) -> str | None:
-    """Why `ref` (T-N), a task with no worker run's branch, can't be merged even though git has a branch
-    handoff/T-N: it was made by hand, and Handoff merges only a worker run's recorded commit. None when git has
-    no such branch, or can't tell. Only looks."""
+    """Why `ref` (T-N), a task whose board record has no branch, isn't merged even though git has a branch
+    handoff/T-N: no worker run recorded it, and Handoff merges only a run's recorded commit. The board may simply
+    not have recorded it (a leftover from an old board, or a run that never recorded its branch), so this doesn't
+    say who made it. None when git has no such branch, or can't tell. Only looks."""
     branch = f"handoff/{ref}"
     try:
         if not _branch_exists(root, branch):
             return None
     except GitError:
         return None
-    return (f"{ref} has no branch from a worker run. git has a branch named {branch}, but it was made by hand "
-            f"rather than by a worker run, so Handoff won't merge it. To merge it yourself, run: git merge {branch}")
+    return (f"{ref} has a git branch {branch}, but no worker run recorded it, so Handoff won't merge it. "
+            f"You can merge it yourself with: git merge {branch} (that skips Handoff's checks: the recorded "
+            "commit, the board folder, .gitattributes, your untracked files)")
 
 
 def work_left(root: Path, gone: Callable[[str], bool]) -> list[tuple[str, bool, bool]]:
