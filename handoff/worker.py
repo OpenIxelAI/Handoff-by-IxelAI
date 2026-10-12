@@ -1073,7 +1073,7 @@ class Worker:
         if commit is None:
             done = "No files were changed.\n\n" + done
         return self._finish(task, return_to, branch, worktree, commit, files, done, left, verify, token, login_note,
-                            used, fail)
+                            used, fail, by=agent, took_over=[s for s in swaps if "took over" in s])
 
     def _chain(self, task: Task, history: list[Event], branch: str, return_to: str, target: dict | None,
                worktree: gitwork.Worktree, models: list[str], efforts: dict[str, str],
@@ -1100,6 +1100,7 @@ class Worker:
 
         benched: set[tuple[str, str]] = set()  # out of usage: not tried again in this chain
         ran: dict[str, tuple[str, str, str | None]] = {}  # each model of the chain → who last ran in its place
+        took: list[str] = []  # who took over from whom, for the run's summary
 
         def launch(prompt: str, model: str, plan: bool = False) -> tuple[str, str | None]:
             """Run one model (or, when it's out of usage, the next of the run's fallbacks); its reply, and what
@@ -1113,6 +1114,7 @@ class Worker:
                 return "", f"{model} was stopped: the chain ran past its {duration(self.timeout)}."
             ran[model] = who
             notes.extend(n for n in (" ".join(swaps), note) if n)
+            took.extend(s for s in swaps if "took over" in s)
             spent.append(used)
             return reply, problem
 
@@ -1175,7 +1177,7 @@ class Worker:
         token = _token_note(sorted(set(tokens))) if commit else None
         verify = _clip("\n\n".join(verify_parts))
         return self._finish(task, return_to, branch, worktree, commit, files, done, left, verify, token,
-                            "\n\n".join(notes) or None, usage.merge(*spent), fail)
+                            "\n\n".join(notes) or None, usage.merge(*spent), fail, took_over=took)
 
     def _launch_or_fallback(self, worktree: gitwork.Worktree, prompt: str, model: str | None, effort: str | None,
                             fallbacks: list[str], benched: set[tuple[str, str]], swaps: list[str],
@@ -1271,14 +1273,18 @@ class Worker:
 
     def _finish(self, task: Task, return_to: str, branch: str, worktree: gitwork.Worktree, commit: str | None,
                 files: list[str], done: str, left: str, verify: str, token: str | None, login_note: str | None,
-                used: dict | None, fail: Callable[..., RunResult]) -> RunResult:
+                used: dict | None, fail: Callable[..., RunResult], by: str | None = None,
+                took_over: list[str] | None = None) -> RunResult:
+        """`by`: the agent that did the work, when a fallback of another agent took over (its note is the one that
+        holds); `took_over`: what the run's summary says about models that were out of usage."""
         agent = self.spec.name
+        doer = self._helpers[by] if by and by != agent and by in self._helpers else self
         fallback = (f"Its sandbox can't run here, so {agent} ran edit-only; `handoff doctor` says what it needs."
-                    if self.fallback_reason else None)
+                    if self.fallback_reason and doer is self else None)
         shared = (f"You shared these folders with it, read-only: {', '.join(_home_relative(p) for p in self.shared)}."
                   if self.shared and self.spec.sandboxed else None)
         spent = ("Used: " + "; ".join(usage.lines(used)) + " (estimated at API prices)") if used else None
-        notes = "\n\n".join(n for n in (token, self.spec.note, shared, fallback, login_note, spent) if n)
+        notes = "\n\n".join(n for n in (token, doer.spec.note, shared, fallback, login_note, spent) if n)
         left = f"{left}\n\n{notes}" if left else notes
         try:
             finished = self.board.finish_run(agent, task.id, return_to, done, left, verify, files, branch,
@@ -1286,8 +1292,9 @@ class Worker:
         except BoardError as exc:  # (it can't stay in progress: nobody is running it now)
             return fail(f"The board didn't take the result: {exc} The work is on {branch}.", used, branch=branch,
                         commit=commit)
-        return RunResult(finished, True, f"handed to {return_to}" + (f". {token}" if token else ""), branch, commit,
-                         used=used)
+        said = ". ".join([f"handed to {return_to}", *(t.rstrip(".") for t in took_over or [])]) + \
+            (f". {token}" if token else "")
+        return RunResult(finished, True, said, branch, commit, used=used)
 
     @staticmethod
     def _exit_problem(proc: "subprocess.CompletedProcess[str]", error: str | None = None) -> str:

@@ -158,8 +158,9 @@ def canonical(agent: str, model: str) -> str:
 def fallbacks(job: str, agent: str, model: str | None, have: set[str] | None = None,
               ranks: dict[str, list[str]] | None = None, agents_only: bool = False) -> list[str]:
     """The run's fallbacks: the entries ranked below agent:model for this job that an agent in `have` runs
-    (every agent if None), best first, up to MAX_FALLBACKS. A model the ranking doesn't name falls back to the
-    free and local ones only; no model (the agent's own default) to what's below the agent's first entry.
+    (every agent if None), best first, up to MAX_FALLBACKS, the last of them free when one is ranked. A model
+    the ranking doesn't name falls back to the free and local ones only; no model (the agent's own default) to
+    what's below the agent's first entry.
     `agents_only`: each agent once, without its model (a run through Ixel MAT, which picks the model)."""
     ranked = (ranks or load()[0]).get(job, [])
     entries = [split(e) for e in ranked]
@@ -182,9 +183,17 @@ def fallbacks(job: str, agent: str, model: str | None, have: set[str] | None = N
         entry = a if agents_only or not m else f"{a}:{m}"
         if entry not in found:
             found.append(entry)
-        if len(found) >= MAX_FALLBACKS:
-            break
-    return found
+    # The last place goes to the best free or local one, when the dearer ones would fill the list: a run that
+    # outlasts every plan still finishes, and at no cost
+    free = next((e for e in found if _free(e)), None)
+    if len(found) > MAX_FALLBACKS and free and free not in found[:MAX_FALLBACKS]:
+        return found[:MAX_FALLBACKS - 1] + [free]
+    return found[:MAX_FALLBACKS]
+
+
+def _free(entry: str) -> bool:
+    agent, model = split(entry)
+    return agent in FREE_AGENTS or model.endswith("-free")
 
 
 FREE_AGENTS = ("ollama", "lmstudio", "local")

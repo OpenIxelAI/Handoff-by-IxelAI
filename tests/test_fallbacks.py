@@ -105,8 +105,13 @@ def test_fallbacks_are_the_next_best_that_you_have():
                         "claude:claude-haiku-5-5", "ollama:qwen3:4b-instruct"]}
     assert rankings.fallbacks("coding", "claude", "opus", {"claude", "codex", "ollama"}, ranks) == [
         "codex:gpt-6-sol", "claude:claude-haiku-5-5", "ollama:qwen3:4b-instruct"]
-    # the best one falls back through everything below it, up to five
-    assert len(rankings.fallbacks("coding", "claude", SONNET, None, ranks)) == 5
+    # the best one falls back through everything below it, up to five, the last of them free
+    assert rankings.fallbacks("coding", "claude", SONNET, None, ranks) == [
+        "claude:claude-opus-5-5", "codex:gpt-6-sol", "kimi:kimi-k3", "claude:claude-haiku-5-5",
+        "ollama:qwen3:4b-instruct"]
+    many = {"coding": [f"codex:gpt-{n}" for n in range(9)] + ["opencode:opencode/big-pickle-free", "ollama:qwen3"]}
+    assert rankings.fallbacks("coding", "codex", "gpt-0", None, many) == [
+        "codex:gpt-1", "codex:gpt-2", "codex:gpt-3", "codex:gpt-4", "opencode:opencode/big-pickle-free"]
     # the last one has nobody below it
     assert rankings.fallbacks("coding", "ollama", "qwen3:4b-instruct", None, ranks) == []
     # a model the ranking doesn't know falls back to the free and local ones only
@@ -189,6 +194,7 @@ def test_a_model_out_of_usage_is_benched_and_the_next_one_finishes_the_run(board
     assert f"{OPUS} hit its usage limit, so {SONNET} took over." in handback.data["left"]
     assert git(repo, "log", "-1", "--format=%B", "handoff/T-1").stdout.count(SONNET) >= 1
     assert board.get(t.id).status == "handed_off"
+    assert ran.message == f"handed to human. {OPUS} hit its usage limit, so {SONNET} took over"
 
 
 def test_each_model_out_of_usage_is_named(board, repo):
