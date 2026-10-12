@@ -416,7 +416,7 @@ can't.
 | `handoff claim T-12 [PATH …]` | Take a task yourself (one that's open or handed to you); PATHs also claim the files or folders you'll change, and you're warned if another active task claims any of them |
 | `handoff note T-12 "text"` | Add a note to any task |
 | `handoff done T-12 [--reason R]` | Close a task, no review needed |
-| `handoff reopen T-12` | Open a done, cancelled or blocked task again |
+| `handoff reopen T-12` | Open a done, cancelled or blocked task again, or one a stopped `handoff run` left in progress (its worktree and branch are kept) |
 | `handoff block T-12 "why" [--waiting-on NAME]` | Mark a task blocked, and say why |
 | `handoff review T-12 [approve\|changes ["notes"]] [--check N=RESULT]… [--panel]` | Review a task that's waiting for you. With no verdict, it shows what came back and its checks, then asks. `--check "2=not_met:fails when empty"` marks check 2 |
 | `handoff merge T-12 [--yes]` | Merge a finished task's branch into the branch your checkout has out, as one merge commit. Only you can do it, nothing is pushed, and the task's worktree is removed (the branch stays) |

@@ -121,6 +121,46 @@ def kill_tree(proc: subprocess.Popen, mark: str | None = None) -> None:
                     pass
 
 
+def pid_alive(pid: object) -> bool | None:
+    """Is there a process with this id? True: there is. False: it's gone. None: this can't tell (not a process
+    id, which a board someone else wrote may hold, or the system won't say)."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or not 1 <= pid <= 2**31 - 1:
+        return None  # (0 and -1 would mean whole groups of processes to os.kill)
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)  # signal 0 sends nothing; it only checks that the process is there
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # it's there, and not yours
+        except OSError:
+            return None
+        return True
+    # Windows: os.kill would terminate the process, so ask for its exit code, which is STILL_ACTIVE while it runs
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p  # a HANDLE is pointer-sized
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: no process has this id
+            return False
+        return True if error == 5 else None  # ERROR_ACCESS_DENIED: it's there, and not yours
+    try:
+        code = ctypes.c_uint32()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return None
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def run_tree(command: list[str], stdin: str, env: dict, timeout: float,
              cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
     """Run a program with text on stdin. On timeout, stop its whole process tree and raise TimeoutExpired.

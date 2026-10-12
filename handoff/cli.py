@@ -52,7 +52,7 @@ COMMANDS = [
     ("handoff claim T-12 [PATH ...]", "Take a task yourself, and the files or folders you'll change"),
     ('handoff note T-12 "text"', "Add a note to a task"),
     ("handoff done T-12 [--reason R]", "Mark a task done (no review needed)"),
-    ("handoff reopen T-12", "Open a done, cancelled or blocked task again"),
+    ("handoff reopen T-12", "Open a done, cancelled or blocked task again (or one whose run was stopped)"),
     ("handoff merge T-12 [--yes]", "Merge a finished task's branch into your branch (you only; never pushed)"),
     ('handoff block T-12 "why" [--waiting-on NAME]', "Mark a task blocked, and say why"),
     ("handoff cancel T-12 [--reason R]", "Cancel a task"),
@@ -781,6 +781,7 @@ def _indented(text: str, style: str = "") -> Text:
 def _next_steps(board, task) -> list[str]:
     """What you can do with a task now, as commands that would work as they are. Each line ends with its
     command, so it copies whole."""
+    from handoff import proc
     from handoff.board import HUMAN, STATE_EVENTS, TERMINAL
     from handoff.worker import AGENTS
 
@@ -796,6 +797,9 @@ def _next_steps(board, task) -> list[str]:
         return [f"Next: {_who(who)} reviews it in its app when you say \"check your handoffs\"."]
     last = board.last_event_of(task.id, STATE_EVENTS)
     if last is not None and last.kind == "worker" and last.data.get("state") == "started":
+        if task.status == "in_progress" and proc.pid_alive(last.data.get("pid")) is False:  # (killed, say)
+            return [f"Next: the {_who(last.actor)} worker's run stopped before it finished. To work on it again: "
+                    f"handoff reopen {ref}"]
         # approving it again now would throw away what the run brings back
         return [f"Next: the {_who(last.actor)} worker is running it now; the result shows here when it finishes."]
     if any(t.id == task.id for t, _ in board.pending_runs(None, [task.id])):
@@ -1146,8 +1150,9 @@ def cmd_done(argv: list[str]) -> int:
 def cmd_reopen(argv: list[str]) -> int:
     from handoff.board import HUMAN
 
-    parser = _parser("reopen", "Open a done, cancelled or blocked task again. It keeps its assignee and history.",
-                     task_statuses=["done", "cancelled", "blocked"])
+    parser = _parser("reopen", "Open a done, cancelled or blocked task again, or one a stopped run left in "
+                               "progress (its worktree and branch are kept). It keeps its assignee and history.",
+                     task_statuses=["done", "cancelled", "blocked", "in_progress"])
     parser.add_argument("task", metavar="T-12")
     args = parser.parse_args(argv)
     board = _board(args)
@@ -1158,12 +1163,30 @@ def cmd_reopen(argv: list[str]) -> int:
     if task.status == "in_review":
         raise CommandError(f"{task.ref} is waiting for a review, so there's nothing to reopen.\nReview it with: "
                            f"handoff review {task.ref}")
-    if task.status not in ("done", "cancelled", "blocked"):
+    stopped = False  # in progress under a worker run whose process is gone
+    if task.status == "in_progress":
+        started, alive = board.run_process(task.id)
+        if started is not None and alive:
+            raise CommandError(f"{task.ref} is being run by the {_who(started.actor)} worker now, so there's nothing "
+                               f"to reopen. Its result shows here when the run finishes.\nIf you're sure that run "
+                               f"has stopped: handoff status {task.ref} open")
+        stopped = started is not None and alive is False  # (a hand claim, or a run it can't tell about: as before)
+    if not stopped and task.status not in ("done", "cancelled", "blocked"):
         raise CommandError(f"{task.ref} is {task.status}, not done, cancelled or blocked, so there's nothing to "
                            f"reopen.\nTo set it back to open anyway: handoff status {task.ref} open")
-    task = board.set_status(HUMAN, task.id, "open")
+    task = board.reopen_stopped_run(HUMAN, task.id) if stopped else board.set_status(HUMAN, task.id, "open")
     who = f"assigned to {_who(task.assignee)}." if task.assignee else "anyone can claim it."
-    _ok(f"{task.ref} is open again, {who}")
+    message = f"{task.ref} is open again, {who}"
+    if stopped:  # the run's work is still there, for the next run or the person to take up
+        from handoff import gitwork
+        worktree = gitwork.WORKTREES / task.ref
+        try:
+            kept = (_root(args) / worktree).is_dir()
+        except OSError:
+            kept = False
+        if kept:
+            message += f" Its worktree {worktree.as_posix()} and branch handoff/{task.ref} are kept."
+    _ok(message)
     return 0
 
 
