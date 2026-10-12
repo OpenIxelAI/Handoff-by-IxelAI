@@ -195,12 +195,16 @@ def _install_hint(package: str) -> str:
             f"Arch: sudo pacman -S {package}")
 
 
-def check(needs: tuple[str, ...] = ()) -> str:
+def check(needs: tuple[str, ...] = (), command: str | None = None) -> str:
     """The sandbox program (bwrap, or sandbox-exec on macOS), once it has shown it can start a sandbox here.
     `needs`: other programs the agent's own sandbox uses inside this one (Claude Code's: socat). Only its Linux
-    sandbox needs them, so macOS ignores them."""
+    sandbox needs them, so macOS ignores them. `command`: the agent's program, which on macOS must be a program
+    of its own (agent_binary), since the profile gives that program, and only it, the network."""
     if sys.platform == "darwin":
-        return _check_mac()
+        program = _check_mac()
+        if command is not None:
+            agent_binary(command)
+        return program
     if not sys.platform.startswith("linux"):
         raise SandboxUnavailable("The worker's sandbox runs on Linux (bubblewrap) and macOS (sandbox-exec), "
                                  "not here yet.")
@@ -387,20 +391,113 @@ def _project_of(worktree: Path) -> Path | None:
     return None
 
 
+# Programs that run whatever code they're given: a profile that gave one of them the network would give it to every
+# command run with it too
+INTERPRETERS = frozenset({"node", "nodejs", "bun", "deno", "python", "pypy", "ruby", "perl", "php", "lua", "java",
+                          "osascript", "sh", "bash", "zsh", "dash", "ksh", "fish", "tcsh", "csh", "env"})
+_MACHO = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf",
+          b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"}
+# What a command could use to leave the sandbox through another program that runs outside it: Apple events
+# (osascript telling Terminal to run something), Launch Services (open), the clipboard, and preferences (defaults
+# write, which other programs then read)
+MAC_SERVICES = ("com.apple.coreservices.appleevents", "com.apple.coreservices.launchservicesd",
+                "com.apple.coreservices.quarantine-resolver", "com.apple.lsd.mapdb", "com.apple.lsd.modifydb",
+                "com.apple.pasteboard.1", "com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon",
+                "com.apple.SecurityServer", "com.apple.securityd.xpc", "com.apple.security.agent")
+
+
+def agent_binary(command: str) -> Path:
+    """The real path of the agent's own program, which macOS's profile names as the only one with the network, its
+    private home and its login. Raises SandboxUnavailable for an interpreter (node, python, a shell…) or a script,
+    since then every command run with the same program would get them too."""
+    real = _real(command)
+    name = real.name.lower()
+    stem = name.rstrip("0123456789.")
+    try:
+        with open(real, "rb") as f:
+            magic = f.read(4)
+    except OSError as exc:
+        raise SandboxUnavailable(f"Can't read the agent's program {real}: {exc}") from exc
+    if stem in INTERPRETERS or name.startswith("python") or magic not in _MACHO:
+        raise SandboxUnavailable(
+            f"On macOS the sandbox gives the network to the agent's own program only, and {command} is "
+            f"{'an interpreter' if magic in _MACHO else 'a script'} ({real}), which every command could use too. "
+            "Install the agent as a program of its own (Claude Code's or Codex's native install) to run it in the "
+            "sandbox.")
+    return real
+
+
+# Run outside the sandbox, before it: reads the API key file named in argv[1], hands it to the agent through a pipe
+# (CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR) and starts the rest of argv. Claude Code reads the pipe when it starts, before
+# it runs any command; after that the pipe is empty, and a pipe can't be read again from the start, so a command
+# that inherits it gets nothing
+KEY_PIPE = """
+import os, sys
+with open(sys.argv[1], "rb") as f:
+    key = f.read()
+read, write = os.pipe()
+os.write(write, key)
+os.close(write)
+os.set_inheritable(read, True)
+os.environ["CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR"] = str(read)
+os.execv(sys.argv[2], sys.argv[2:])
+"""
+
+
+def _key_file(argv: list[str]) -> Path | None:
+    """The API key file Claude Code's settings would read with apiKeyHelper (`cat <file>`), if they do."""
+    for i, word in enumerate(argv):
+        if i and argv[i - 1] == "--settings":
+            import json
+            helper = json.loads(word).get("apiKeyHelper")
+            if helper:
+                words = shlex.split(helper)
+                if len(words) == 2 and words[0] == "cat":
+                    return Path(words[1])
+    return None
+
+
+def _agent_argv(argv: list[str]) -> list[str]:
+    """`argv` with the agent's own sandbox switched off. macOS doesn't let a sandboxed program start a sandbox of its
+    own (sandbox_apply fails, so every command would fail), so on macOS the one profile confines the agent and its
+    commands both. Claude Code's --settings sandbox and Codex's permission profile are the ones the worker sets."""
+    out: list[str] = []
+    codex = False
+    for word in argv:
+        if out and out[-1] == "--settings":
+            import json
+            settings = json.loads(word)
+            settings["sandbox"] = {"enabled": False}
+            settings.pop("apiKeyHelper", None)  # a command it runs (cat) can't read the private home: see KEY_PIPE
+            word = json.dumps(settings)
+        elif out and out[-1] == "-c" and (word.startswith("permissions.handoff.")
+                                          or word == 'default_permissions="handoff"'):
+            out.pop()  # Codex's permission profile can only build on its own sandbox; there is none here
+            codex = True
+            continue
+        out.append(word)
+    if codex:
+        at = out.index("exec") + 1 if "exec" in out else 1
+        out[at:at] = ["--sandbox", "danger-full-access"]
+    return out
+
+
 def _wrap_mac(program: str, argv: list[str], *, worktree: Path, home: Path, private: dict[Path, Path],
               read_only: list[Path], env: dict[str, str], hidden: list[Path]) -> list[str]:
-    """`argv` run by sandbox-exec under a profile that gives the agent bubblewrap's view (see the module docstring).
-    A later rule of a profile wins over an earlier one, so what is denied again comes after what is allowed.
-    Sets HOME and TMPDIR in `env`, which the caller starts the agent with."""
+    """`argv` run by sandbox-exec under one profile for the agent and every command it runs (see the module
+    docstring). Only the agent's own program (agent_binary) has the network and its private home; a command can
+    neither reach the network nor start that program again. A later rule wins over an earlier one, so what is
+    denied again comes after what is allowed. Sets HOME and TMPDIR in `env`, which the caller starts the agent with."""
     if not private:
         raise ValueError("The macOS sandbox needs a private folder for the agent to log in from.")
+    agent = agent_binary(argv[0])
     tmp = private_temp(next(iter(private)))
     tmp.mkdir(mode=0o700, exist_ok=True)
     tmp = _real(tmp)
     hosts = [_real(host) for host in private]
     worktree, real_home = _real(worktree), _real(home)
     project = _project_of(worktree)
-    reads = list(dict.fromkeys([worktree, *hosts, tmp, *(_real(path) for path in read_only if os.path.exists(path))]))
+    reads = list(dict.fromkeys([worktree, tmp, *(_real(path) for path in read_only if os.path.exists(path))]))
     network = _extra_read_only(env)
     hidden_paths = [path for path in dict.fromkeys(_real(path) for path in hidden)
                     if not any(_inside(path, needed) for needed in network)]  # as bubblewrap's masks
@@ -408,21 +505,39 @@ def _wrap_mac(program: str, argv: list[str], *, worktree: Path, home: Path, priv
     # is denied already, so denying it too would only hide the install
     sensitive = [path for path in (_real(real_home / name) for name in SENSITIVE)
                  if not any(_inside(allowed, path) for allowed in reads)]
+    me = f"(process-path {_sbpl_string(str(agent))})"
     lines = ["(version 1)", "(allow default)"]
     lines += _rule("deny", "file-read*", _subpaths([*MAC_HIDDEN, real_home, *([project] if project else [])]))
     lines += _rule("allow", "file-read*", _subpaths(reads))
-    lines += _rule("allow", "file-read-metadata", _above(reads))
+    lines += [f"(allow file-read* (require-all {me} (require-any {' '.join(_subpaths(hosts))})))"]
+    lines += _rule("allow", "file-read-metadata", _above([*reads, *hosts]))
     lines += _rule("deny", "file-read*", _subpaths([*hidden_paths, *sensitive]))
+    # Seen to be there, but not read: as bubblewrap shows them empty. (An agent refuses a command naming a path it
+    # can't even look up.)
+    lines += _rule("allow", "file-read-metadata", _subpaths(hidden_paths))
     lines += _rule("allow", "file-read*", _subpaths(network))  # after the denies, as bubblewrap shows it after
     lines += _rule("allow", "file-read-metadata", _above(network))
-    writes = list(dict.fromkeys([worktree, *hosts, tmp]))
     lines += ["(deny file-write*)",
-              "(allow file-write* " + " ".join([*_subpaths(writes), '(literal "/dev/null")', '(regex #"^/dev/tty")',
-                                                '(regex #"^/dev/fd/")']) + ")",
+              "(allow file-write* " + " ".join([*_subpaths([worktree, tmp]), '(literal "/dev/null")',
+                                                '(regex #"^/dev/tty")', '(regex #"^/dev/fd/")']) + ")",
+              f"(allow file-write* (require-all {me} (require-any {' '.join(_subpaths(hosts))})))",
+              f"(deny file-write* {_subpaths([agent.parent])[0]})",  # its program can't be swapped
+              f"(deny network* (require-not {me}))",
+              # Started by sandbox-exec, or by itself; never by a command, which would get the network that way
+              f"(deny process-exec (require-all (literal {_sbpl_string(str(agent))}) "
+              f"(require-not (require-any (process-path {_sbpl_string(SANDBOX_EXEC)}) {me}))))",
               "(deny process-info* (target others))",
               "(deny signal)",
-              "(allow signal (target same-sandbox))"]
-    lines.append('(deny mach-lookup (global-name "com.apple.SecurityServer"))')  # keeps the agent out of your keychain
+              "(allow signal (target same-sandbox))",
+              f"(deny mach-lookup (require-all (require-not {me}) "
+              f"(global-name {' '.join(_sbpl_string(name) for name in MAC_SERVICES)})))",
+              '(deny mach-lookup (global-name "com.apple.SecurityServer"))']  # your keychain, the agent's too
     env["HOME"] = str(home)
     env["TMPDIR"] = str(tmp)
-    return [program, "-p", "\n".join(lines), *argv]
+    # Claude Code keeps its own temp folder at /tmp/claude-<uid> unless told otherwise, and /private/tmp is hidden
+    env["CLAUDE_CODE_TMPDIR"] = str(tmp)
+    wrapped = [program, "-p", "\n".join(lines), *_agent_argv(argv)]
+    key = _key_file(argv)
+    if key is not None:
+        return [sys.executable, "-I", "-c", KEY_PIPE, str(key), *wrapped]
+    return wrapped

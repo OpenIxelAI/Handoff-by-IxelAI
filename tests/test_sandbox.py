@@ -416,14 +416,22 @@ def test_check_explains_a_sandbox_exec_that_cannot_start(monkeypatch, tmp_path):
         sandbox.check()
 
 
+def _fake_agent(path):
+    """A file that looks like a program of its own (a Mach-O header), as Claude Code's and Codex's installs are."""
+    path.write_bytes(b"\xcf\xfa\xed\xfe" + bytes(60))
+    path.chmod(0o755)
+    return path
+
+
 def _mac_layout(tmp_path):
     """A home with a shared toolbox, a project with a task's worktree, a private login and an agent install."""
     home, tools, project = _home_with_tools(tmp_path)
     private, install = tmp_path / "handoff-codex-abc", tmp_path / "install"
     private.mkdir()
     install.mkdir()
+    agent = _fake_agent(install / "codex")
     folders, hidden = sandbox.shared_folders([tools], project=project, home=home)
-    return SimpleNamespace(home=home, tools=tools, project=project, private=private, install=install,
+    return SimpleNamespace(home=home, tools=tools, project=project, private=private, install=install, agent=agent,
                            worktree=project / ".handoff" / "worktrees" / "T-1", folders=folders, hidden=hidden)
 
 
@@ -433,7 +441,7 @@ def _mac_wrap(layout, env=None, **changes):
     given = dict(worktree=layout.worktree, home=layout.home, private={layout.private: layout.private},
                  read_only=[layout.install, *layout.folders], env=env, hidden=layout.hidden)
     given.update(changes)
-    return sandbox.wrap(MAC, ["codex", "exec", "-"], **given), env
+    return sandbox.wrap(MAC, [str(layout.agent), "exec", "-"], **given), env
 
 
 def _sub(path):
@@ -450,7 +458,7 @@ def _rules(profile, verb, operation):
 def test_wrap_on_a_mac_gives_sandbox_exec_a_profile_then_the_agents_command(tmp_path):
     layout = _mac_layout(tmp_path)
     argv, env = _mac_wrap(layout)
-    assert argv[:2] == [MAC, "-p"] and argv[3:] == ["codex", "exec", "-"] and "--" not in argv
+    assert argv[:2] == [MAC, "-p"] and argv[3:] == [str(layout.agent), "exec", "-"] and "--" not in argv
     assert argv[2].splitlines()[:2] == ["(version 1)", "(allow default)"]
     temp = Path(env["TMPDIR"])
     assert str(temp) == os.path.realpath(sandbox.private_temp(layout.private))
@@ -472,9 +480,9 @@ def test_the_profile_denies_what_bubblewrap_leaves_out_and_allows_back_what_the_
     for fixed in ("/Users", "/Volumes", "/private/tmp", "/private/var/folders", "/private/var/root"):
         assert f'(subpath "{fixed}")' in first
     assert _sub(layout.home) in first and _sub(layout.project) in first
-    for shown in (layout.worktree, layout.private, sandbox.private_temp(layout.private), layout.install,
-                  layout.tools):
+    for shown in (layout.worktree, sandbox.private_temp(layout.private), layout.install, layout.tools):
         assert _sub(shown) in allow
+    assert _sub(layout.private) not in allow  # only the agent's own program reads its login (the test below)
     # The folders on the way to what's shown can be seen to be there (not what is in them), and "/" needs no rule
     assert f'(literal "{os.path.realpath(layout.worktree.parent)}")' in meta
     assert "(subpath" not in meta and '(literal "/")' not in meta
@@ -488,11 +496,12 @@ def test_the_profile_denies_what_bubblewrap_leaves_out_and_allows_back_what_the_
 def test_the_profile_allows_writes_only_to_the_worktree_and_the_private_folders(tmp_path):
     layout = _mac_layout(tmp_path)
     profile = _mac_wrap(layout)[0][2]
-    [(allow_at, allow)] = _rules(profile, "allow", "file-write*")
+    (allow_at, allow), (_, agent_only) = _rules(profile, "allow", "file-write*")
     lines = profile.splitlines()
     assert lines.count("(deny file-write*)") == 1 and lines.index("(deny file-write*)") < allow_at
-    for written in (layout.worktree, layout.private, sandbox.private_temp(layout.private)):
+    for written in (layout.worktree, sandbox.private_temp(layout.private)):
         assert _sub(written) in allow
+    assert _sub(layout.private) not in allow and _sub(layout.private) in agent_only and "process-path" in agent_only
     for not_written in (layout.install, layout.tools, layout.home, layout.project):
         assert _sub(not_written) not in allow
     for device in ('(literal "/dev/null")', '(regex #"^/dev/tty")', '(regex #"^/dev/fd/")'):
@@ -536,7 +545,8 @@ def test_each_folder_is_shown_once_and_one_that_is_missing_is_left_out(tmp_path)
     layout = _mac_layout(tmp_path)
     missing = layout.tools / "nowhere"
     profile = _mac_wrap(layout, read_only=[layout.install, layout.install, missing])[0][2]
-    assert profile.count(_sub(layout.install)) == 1 and _sub(missing) not in profile
+    shown = [line for _, line in _rules(profile, "allow", "file-read*")]
+    assert shown[0].count(_sub(layout.install)) == 1 and _sub(missing) not in profile
 
 
 @POSIX_ONLY
@@ -1013,7 +1023,7 @@ def test_codex_on_a_mac_finds_its_private_login_where_it_is(tmp_path, monkeypatc
         (Path(cwd) / "answer.txt").write_text("42\n", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "DONE: wrote answer.txt\nLEFT: nothing\nVERIFY: cat it", "")
 
-    worker = Worker(board, repo, "codex", runner=fake_sandbox_exec, command=str(tmp_path / "codex"))
+    worker = Worker(board, repo, "codex", runner=fake_sandbox_exec, command=str(_fake_agent(tmp_path / "codex")))
     worker.check = lambda: None  # the sandbox itself is faked here
     worker.bwrap = MAC
     [result] = worker.run_pending()
@@ -1027,7 +1037,9 @@ def test_codex_on_a_mac_finds_its_private_login_where_it_is(tmp_path, monkeypatc
     assert host != str(Path.home() / ".codex") and seen["private"] == ["auth.json"]
     assert env["HOME"] == str(Path.home()) and env["TMPDIR"] == host + "-tmp" and seen["temp"]
     assert f'(subpath "{host}")' in argv[2]
-    assert f"permissions.handoff.filesystem={{{json.dumps(host)}=\"none\"}}" in inner
+    # Codex's own sandbox can't start inside this one: its permission profile is replaced by no sandbox of its own
+    assert inner[1:4] == ["exec", "--sandbox", "danger-full-access"]
+    assert not any(word.startswith("permissions.handoff.") for word in inner)
     assert not Path(host).exists() and not Path(env["TMPDIR"]).exists()  # both are removed after the run
     assert git(repo, "show", "handoff/T-1:answer.txt").stdout == "42\n"
 
@@ -1111,3 +1123,75 @@ def test_claude_runs_inside_the_sandbox_with_its_private_login(tmp_path, monkeyp
     assert "Git commands don't work here" in seen["stdin"]  # (it can't see the repository)
     assert git(repo, "show", "handoff/T-1:answer.txt").stdout == "42\n"
     assert CLAUDE.note in board.events(task.id)[-1].data["left"]
+
+
+# ── macOS: one profile for the agent and its commands ───────────────────────
+
+@POSIX_ONLY
+def test_only_the_agents_own_program_has_the_network_and_its_private_home(tmp_path):
+    layout = _mac_layout(tmp_path)
+    profile = _mac_wrap(layout)[0][2]
+    me = f'(process-path "{os.path.realpath(layout.agent)}")'
+    assert f"(deny network* (require-not {me}))" in profile
+    private = _sub(layout.private)
+    reads = [line for _, line in _rules(profile, "allow", "file-read*") if private in line]
+    writes = [line for _, line in _rules(profile, "allow", "file-write*") if private in line]
+    assert reads and all(me in line for line in reads)  # never for a command it runs
+    assert writes and all(me in line for line in writes)
+    # Started by sandbox-exec or by itself, never by a command; and never changed
+    assert f'(literal "{os.path.realpath(layout.agent)}")' in profile
+    assert '(process-path "/usr/bin/sandbox-exec")' in profile
+    assert f"(deny file-write* {_sub(layout.install)})" in profile
+
+
+@POSIX_ONLY
+def test_commands_cant_use_other_programs_to_leave(tmp_path):
+    profile = _mac_wrap(_mac_layout(tmp_path))[0][2]
+    services = [line for _, line in _rules(profile, "deny", "mach-lookup") if "require-not" in line]
+    assert services
+    for name in ("com.apple.coreservices.appleevents", "com.apple.coreservices.launchservicesd",
+                 "com.apple.pasteboard.1", "com.apple.cfprefsd.agent"):
+        assert f'"{name}"' in services[0]
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("program, header", [("node", b"\xcf\xfa\xed\xfe"), ("python3.12", b"\xcf\xfa\xed\xfe"),
+                                             ("bash", b"\xcf\xfa\xed\xfe"), ("claude", b"#!/usr/bin/env node\n")])
+def test_an_interpreter_or_a_script_cant_be_the_agent(tmp_path, program, header):
+    path = tmp_path / program
+    path.write_bytes(header + bytes(60))
+    with pytest.raises(sandbox.SandboxUnavailable, match="every command could use too"):
+        sandbox.agent_binary(str(path))
+
+
+def test_the_agents_own_sandbox_is_switched_off_inside_macos_one():
+    settings = json.dumps({"sandbox": {"enabled": True}, "apiKeyHelper": "cat '/x/key'", "disableAllHooks": True})
+    claude = sandbox._agent_argv(["claude", "-p", "--settings", settings, "--x"])
+    changed = json.loads(claude[3])
+    assert changed == {"sandbox": {"enabled": False}, "disableAllHooks": True} and claude[4] == "--x"
+    codex = sandbox._agent_argv(["codex", "exec", "--skip", "-c", 'default_permissions="handoff"',
+                                 "-c", 'permissions.handoff.extends=":workspace"',
+                                 "-c", 'permissions.handoff.filesystem={AGENT_HOME="none"}', "-c", 'x="y"', "-"])
+    assert codex == ["codex", "exec", "--sandbox", "danger-full-access", "--skip", "-c", 'x="y"', "-"]
+
+
+@POSIX_ONLY
+def test_an_api_key_reaches_claude_through_a_pipe_not_a_file_its_commands_can_read(tmp_path):
+    layout = _mac_layout(tmp_path)
+    key = layout.private / ".handoff-api-key"
+    settings = json.dumps({"sandbox": {"enabled": True}, "apiKeyHelper": f"cat {shlex.quote(str(key))}"})
+    argv = sandbox.wrap(MAC, [str(layout.agent), "-p", "--settings", settings], worktree=layout.worktree,
+                        home=layout.home, private={layout.private: layout.private}, read_only=[], env={}, hidden=[])
+    assert argv[:4] == [sys.executable, "-I", "-c", sandbox.KEY_PIPE] and argv[4] == str(key) and argv[5] == MAC
+    assert "apiKeyHelper" not in argv[-1]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.pipe and execv as on macOS and Linux")
+def test_the_key_pipe_gives_the_key_once(tmp_path):
+    key = tmp_path / "key"
+    key.write_bytes(b"sk-test-key")
+    reader = ("import os; fd = int(os.environ['CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR']); "
+              "print(os.read(fd, 100)); print(os.read(fd, 100))")
+    done = subprocess.run([sys.executable, "-I", "-c", sandbox.KEY_PIPE, str(key), sys.executable, "-c", reader],
+                          capture_output=True, text=True, timeout=30)
+    assert done.stdout.splitlines() == ["b'sk-test-key'", "b''"]

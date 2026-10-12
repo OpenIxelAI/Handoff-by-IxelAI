@@ -259,12 +259,13 @@ jobs:
           HANDOFF_REQUIRE_CLIS: "1"
         run: python -m pytest -q -rs "tests/test_plugin.py::test_codex_uses_the_board_through_the_plugin"
 
-  macos-sandbox-probe:
-    # Temporary: measures what macOS's sandboxes allow, to design the worker's macOS sandbox.
-    # Always passes; read its log. Removed once the macOS sandbox has its attack tests.
-    name: macOS sandbox probe (temporary)
+  worker-macos-live:
+    # The attack tests for both workers on macOS: the latest Claude Code and Codex under
+    # sandbox-exec, which needs no bubblewrap or socat. A release that changes what its
+    # sandbox or permission flags mean, or a macOS service that lets a command out, turns
+    # this red. One job for both: macOS runner minutes count 10x.
+    name: Claude and Codex workers stay in macOS sandbox (live)
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -273,9 +274,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install Codex and Claude Code
-        run: npm install -g @openai/codex @anthropic-ai/claude-code
+      - name: Install Claude Code and Codex
+        run: npm install -g @anthropic-ai/claude-code @openai/codex
       - name: Install
         run: python -m pip install -e ".[dev]"
-      - name: Probe
-        run: python scripts/probe_macos_sandbox.py
+      - name: The sandbox can start
+        run: python -c 'from handoff import sandbox; sandbox.check()'
+      - name: The loopback address the Claude test binds
+        # macOS only has 127.0.0.1 by default; the test wants a second address for its egress host
+        run: sudo ifconfig lo0 alias 127.0.0.2 up
+      - name: Versions
+        run: |
+          claude --version
+          codex --version
+          sw_vers
+      - name: Attack the workers
+        env:
+          HANDOFF_REQUIRE_CLIS: "1"
+        run: python -m pytest -q -rsx tests/test_worker_claude_live.py tests/test_worker_codex_live.py tests/test_worker_live.py

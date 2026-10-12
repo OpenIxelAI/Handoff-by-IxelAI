@@ -331,10 +331,20 @@ We pointed each CLI at a fake model API that answers with attacks, from inside a
 | `claude -p --restricted` with Bash and its own sandbox, inside Handoff's bubblewrap sandbox | blocked | blocked | blocked | blocked | yes |
 
 No CLI's own sandbox, left to its defaults, confines what commands can *read*. So both agents run inside
-an OS sandbox that Handoff controls (bubblewrap on Linux, sandbox-exec on macOS), with their own sandbox
-inside it. Where Handoff's sandbox can't run, Claude runs edit-only, with no way to run anything, and
-Codex doesn't run. The measurements above and the attack tests below are from Linux, against bubblewrap:
-macOS has no live attack test yet. Findings from the reviews:
+an OS sandbox that Handoff controls (bubblewrap on Linux, sandbox-exec on macOS). On Linux their own
+sandbox runs inside it. macOS won't let a sandboxed program start a sandbox of its own, so there Handoff's
+one profile confines the agent and every command it runs (below). Where Handoff's sandbox can't run, Claude
+runs edit-only, with no way to run anything, and Codex doesn't run. The measurements above are from Linux;
+the attack tests below run on Linux against bubblewrap and on macOS against sandbox-exec. Findings from the
+reviews:
+
+- **macOS: a command can read your other programs' environments.** macOS lets any program read the
+  environment of the other programs you run (`ps -E`, `sysctl` with `KERN_PROCARGS2`), and its sandbox has
+  no rule that stops it; Linux hides them in a process namespace. So on a Mac, a token you exported in a
+  terminal that is still open (`export GITHUB_TOKEN=…`) can be read by a command the agent runs and land in
+  what the model sees. It can't be sent anywhere else, because commands have no network. The attack tests
+  mark this one check as an expected failure, and `handoff doctor` says it on a Mac. Keep tokens out of your
+  shell's environment (a credential helper or a file) while a worker runs, or run workers on Linux.
 
 - **Commands can read every process's environment.** Codex passes `OPENAI_API_KEY` to the commands it
   runs, and inside the sandbox `/proc/*/environ` shows every process's variables. So a sandboxed agent
@@ -391,15 +401,25 @@ macOS has no live attack test yet. Findings from the reviews:
   denies reads of `/Users`, `/Volumes`, your home folder, the project, `/tmp`, `/var/folders` and
   `/var/root`, except the worktree, a private home and temp folder, the agent's install, the folders you
   share and what the network needs (the rest of the system stays readable, and credential folders in your
-  home stay denied). Writes are allowed only in the worktree and the private folders, and the agent can't
-  look at or signal other processes, or reach the security server that opens your keychain.
+  home stay denied). The same profile covers every command the agent runs, since macOS can't nest a
+  sandbox. It names the agent's own program by its real path: that program, and nothing it starts, has the
+  network and can read and write its private home, and no command can start that program again or change
+  it. So the agent reaches its model API while its commands have no network and can't read its login. An
+  agent that is an interpreter (node, python, a shell) or a script can't be named that way, since every
+  command run with it would get the same, so it runs edit-only. Writes are allowed only in the worktree and
+  the private temp folder. Commands can't signal other processes, reach the security server that opens your
+  keychain, or use Apple events (`osascript` telling another app to run something), Launch Services
+  (`open`), the clipboard or the preferences daemon (`defaults write`). They can still read your other
+  programs' environments (above).
 - **Claude: commands, in two sandboxes.** Claude Code runs as `claude -p --restricted --tools
   Read,Edit,Write,Glob,Grep,Bash --allowedTools Bash --permission-mode acceptEdits --strict-mcp-config`,
   with settings that turn its own sandbox on for every command (`failIfUnavailable`, no
   `allowUnsandboxedCommands`), allow no network, hide its private home from commands, and turn hooks off.
   `--restricted` ignores your Claude settings and the repository's (which could allow anything, switch the
   sandbox off or run commands), keeps the file tools inside the worktree, and leaves out web and MCP
-  servers. Claude's own sandbox needs `socat`.
+  servers. Claude's own sandbox needs `socat`. On macOS its own sandbox is switched off, and so is Codex's
+  (`--sandbox danger-full-access`), because Handoff's profile can't have another inside it and already
+  confines every command (Handoff's sandbox, above).
 - **Claude edit-only, where the sandbox can't run** (Windows for now, or Linux without bubblewrap or
   `socat`, or a Mac where `sandbox-exec` can't start): the same, but with only Read, Edit, Write, Glob and
   Grep, so no shell at all, and the handback says it ran that way. `--restricted` carries most of this:
@@ -429,7 +449,10 @@ macOS has no live attack test yet. Findings from the reviews:
   commands). A token made from a key or `CLAUDE_CODE_OAUTH_TOKEN` is never copied back. On Linux, Claude
   Code keeps its login in that file. On macOS it keeps it in the Keychain, which the sandbox keeps the
   agent out of, so give the worker `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
-  `ANTHROPIC_API_KEY` there; Codex's file login works as it does on Linux. A refresh against the real
+  `ANTHROPIC_API_KEY` there; Codex's file login works as it does on Linux. On macOS an API key reaches
+  Claude Code through a pipe (`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`) that Handoff fills before the sandbox
+  starts; Claude Code reads it as it starts, before it runs any command, and a pipe can't be read again, so
+  the commands it runs find nothing there (the attack test looks through every `/dev/fd`). A refresh against the real
   service is the one part the attack tests can't exercise.
 - **Folders you share, read-only.** Tools installed in your home folder aren't in the sandbox unless you
   start the worker with `--share FOLDER`, which only you can do. Handoff refuses to share your whole home

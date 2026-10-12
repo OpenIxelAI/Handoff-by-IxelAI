@@ -28,7 +28,10 @@ in your project, and Handoff never listens on the network.
 - It isn't a model or a hosted service, and it calls no model itself. It runs the agents, subscriptions, API
   keys and local models you already have.
 - The sandbox that lets an agent run your tests and builds is bubblewrap on Linux and the built-in
-  sandbox-exec on macOS. On Windows, Claude Code, OpenCode and local models only edit files for now. Kimi,
+  sandbox-exec on macOS. On a Mac, commands the agent runs can still read the environment of your other
+  programs (macOS allows it and its sandbox can't stop it), so keep tokens out of your shell's environment
+  while a worker runs; SECURITY.md has the details. On Windows, Claude Code, OpenCode and local models only
+  edit files for now. Kimi,
   Cline and OpenClaw run only once you enable them, and then with their own permissions: commands as you,
   with the network.
 
