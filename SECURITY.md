@@ -166,9 +166,11 @@ as passwords, aren't detected, so never write them on the board.
 - On Windows, Handoff sets an ACL on `.handoff` with `icacls` (from System32, started without a shell): no
   inheritance from the parent folder, and full control for your account only, which `board.db` and the rest
   of the folder inherit. Like mode 0700, that leaves out SYSTEM and Administrators, though an administrator
-  can still take ownership of the folder and give themselves access. If `icacls` fails, Handoff says so on
-  stderr and goes on; the board still works. `handoff doctor` checks this on every OS (the mode on macOS and
-  Linux, the ACL on Windows) and prints the one command that fixes a folder that isn't owner-only.
+  can still take ownership of the folder and give themselves access. Your account is granted first, in one
+  `icacls` command, and only then are inheritance and the other entries removed in a second, so a failure in
+  between can't leave you without access. If `icacls` fails, Handoff says so on stderr and goes on; the board
+  still works. `handoff doctor` checks this on every OS (the mode on macOS and Linux, the ACL on Windows) and
+  prints the one line that fixes a folder that isn't owner-only.
 - `.handoff` contains a `.gitignore` that ignores everything in it, so the board is never committed by
   accident.
 - A `.handoff` that is a symbolic link is refused, so a cloned repository can't point the board somewhere

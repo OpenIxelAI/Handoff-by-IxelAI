@@ -420,6 +420,7 @@ def test_doctor_says_when_others_can_open_the_board_folder_on_windows(project, c
     code, out, _ = run(capsys, "doctor")
     assert code == 1, out
     assert ".handoff isn't owner-only" in out and "icacls" in out and "/remove:g" in out
+    assert out.index("/grant:r") < out.index("/inheritance:r")  # (the account is granted before anything's removed)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")

@@ -787,29 +787,39 @@ FAILED_ICACLS = [pytest.param(_icacls_times_out, "timed out", id="times out"),
                  pytest.param(_icacls_is_missing, "cannot find", id="missing")]
 
 
-def test_the_acl_command_is_icacls_with_inheritance_off_and_only_the_account(tmp_path, monkeypatch):
+def test_the_acl_commands_grant_the_account_first_and_then_take_inheritance_and_the_rest_away(tmp_path, monkeypatch):
     monkeypatch.setenv("SystemRoot", "D:\\Windows")
     folder = tmp_path / ".handoff"
-    command = board_module._acl_command(folder, MY_GRANTEE)
-    assert command[0].replace("\\", "/") == "D:/Windows/System32/icacls.exe"
-    assert command[1:] == [str(folder), "/inheritance:r", "/remove:g", "*S-1-5-18", "/remove:g", "*S-1-5-32-544",
-        "/remove:g", "*S-1-3-4", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+    grant, restrict = board_module._acl_commands(folder, MY_GRANTEE)
+    for command in (grant, restrict):
+        assert command[0].replace("\\", "/") == "D:/Windows/System32/icacls.exe"
+    assert grant[1:] == [str(folder), "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+    assert restrict[1:] == [str(folder), "/inheritance:r", "/remove:g", "*S-1-5-18", "/remove:g", "*S-1-5-32-544",
+        "/remove:g", "*S-1-3-4"]
 
 
-def test_a_folder_gets_one_quiet_icacls_command_and_a_file_in_it_none(tmp_path, windows, capsys):
+def test_the_account_is_never_among_the_entries_taken_away(tmp_path):
+    # (a service running as SYSTEM: granted first and then removed, it would have no entry at all)
+    folder = tmp_path / ".handoff"
+    _, restrict = board_module._acl_commands(folder, "*S-1-5-18")
+    assert restrict[1:] == [str(folder), "/inheritance:r", "/remove:g", "*S-1-5-32-544", "/remove:g", "*S-1-3-4"]
+
+
+def test_a_folder_gets_two_quiet_icacls_commands_and_a_file_in_it_none(tmp_path, windows, capsys):
     folder = tmp_path / ".handoff"
     folder.mkdir()
     (folder / "board.db").write_bytes(b"")
     board_module._secure(folder, 0o700)
     board_module._secure(folder, 0o700)
     board_module._secure(folder / "board.db", 0o600)
-    assert [program_of(argv) for argv, _ in windows.calls] == ["whoami.exe", "icacls.exe"]
-    (whoami, _), (argv, _) = windows.calls
+    assert [program_of(argv) for argv, _ in windows.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
+    (whoami, _), (grant, _), (restrict, _) = windows.calls
     assert whoami[1:] == ["/user", "/fo", "csv", "/nh"]
-    for command in (whoami, argv):  # by full path, so a program in the project folder isn't what runs
+    for command in (whoami, grant, restrict):  # by full path, so a program in the project folder isn't what runs
         assert isinstance(command, list) and "/System32/" in command[0].replace("\\", "/")
-    assert argv[1:] == [str(folder), "/inheritance:r", "/remove:g", "*S-1-5-18", "/remove:g", "*S-1-5-32-544",
-        "/remove:g", "*S-1-3-4", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+    assert grant[1:] == [str(folder), "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+    assert restrict[1:] == [str(folder), "/inheritance:r", "/remove:g", "*S-1-5-18", "/remove:g", "*S-1-5-32-544",
+        "/remove:g", "*S-1-3-4"]
     for _, options in windows.calls:
         assert not options.get("shell")
         assert options["creationflags"] == 0x08000000  # CREATE_NO_WINDOW
@@ -823,8 +833,8 @@ def test_each_folder_is_asked_about_once_and_whoami_once_for_all(tmp_path, windo
         folder.mkdir()
         board_module._secure(folder, 0o700)
         board_module._secure(folder, 0o700)
-    assert [program_of(argv) for argv, _ in windows.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
-    assert [argv[1] for argv, _ in icacls_calls(windows)] == [str(folder) for folder in folders]
+    assert [program_of(argv) for argv, _ in windows.calls] == ["whoami.exe"] + ["icacls.exe"] * 4
+    assert [argv[1] for argv, _ in icacls_calls(windows)] == [str(folder) for folder in folders for _ in range(2)]
 
 
 @pytest.mark.parametrize("icacls, said", FAILED_ICACLS)
@@ -837,6 +847,25 @@ def test_an_acl_that_cant_be_set_is_said_on_stderr_and_never_raised(tmp_path, wi
     assert out == ""  # stdout is the MCP server's
     assert "owner-only" in err and "handoff doctor" in err and said in err
     assert len(err.splitlines()) == 1
+    (argv, _), = icacls_calls(windows)  # the grant failed, so nothing was taken away
+    assert "/grant:r" in argv and "/inheritance:r" not in argv
+
+
+@pytest.mark.parametrize("icacls, said", FAILED_ICACLS)
+def test_a_failed_restriction_is_said_the_same_way_and_the_grant_stays(tmp_path, windows, capsys, icacls, said):
+    def fails_to_restrict(argv):
+        return icacls(argv) if "/inheritance:r" in argv else completed(argv)
+
+    windows.icacls = fails_to_restrict
+    folder = tmp_path / ".handoff"
+    folder.mkdir()
+    board_module._secure(folder, 0o700)
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "owner-only" in err and "handoff doctor" in err and said in err
+    assert len(err.splitlines()) == 1
+    (grant, _), (restrict, _) = icacls_calls(windows)
+    assert "/grant:r" in grant and "/inheritance:r" in restrict  # (the grant had worked, and came first)
 
 
 def test_without_whoami_the_account_comes_from_the_environment(tmp_path, windows, monkeypatch):
@@ -846,7 +875,8 @@ def test_without_whoami_the_account_comes_from_the_environment(tmp_path, windows
     folder = tmp_path / ".handoff"
     folder.mkdir()
     board_module._secure(folder, 0o700)
-    assert [argv[-1] for argv, _ in icacls_calls(windows)] == ["DESKTOP-1\\me:(OI)(CI)F"]
+    (grant, _), _ = icacls_calls(windows)
+    assert grant[1:] == [str(folder), "/grant:r", "DESKTOP-1\\me:(OI)(CI)F"]
 
 
 def test_with_no_account_at_all_nothing_is_set_and_it_is_said(tmp_path, windows, monkeypatch, capsys):
@@ -893,7 +923,8 @@ def test_a_folder_others_can_open_says_why_with_a_one_line_fix(entries, words):
     assert problem and "\n" not in problem
     for word in words:
         assert word in problem
-    assert f'run: icacls "{ACL_FOLDER}" /inheritance:r /grant:r "{MY_GRANTEE}:(OI)(CI)F"' in problem
+    grant = f'icacls "{ACL_FOLDER}" /grant:r "{MY_GRANTEE}:(OI)(CI)F"'  # (first, so a failure after it leaves access)
+    assert f'run: {grant} && icacls "{ACL_FOLDER}" /inheritance:r' in problem
 
 
 def test_inheritance_off_is_left_to_remove_what_was_inherited():
