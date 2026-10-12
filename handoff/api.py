@@ -160,6 +160,26 @@ def _name(value: object, what: str) -> str | None:
     return check_name(value, what)
 
 
+def _leave_out(args: dict) -> list[str]:
+    """args.no_fallback_to: the agents to leave out of a run's fallbacks (lowercase, each once), or [] when the
+    request names none. A list of agent names, like ["codex"]; one Handoff has never heard of is refused."""
+    value = args.get("no_fallback_to")
+    if value is None:
+        return []
+    if not (isinstance(value, list) and value and all(isinstance(item, str) for item in value)):
+        raise ApiError("usage", 'args.no_fallback_to must be a list of agent names, like ["codex"].')
+    asked = list(dict.fromkeys(item.strip().lower() for item in value if item.strip()))
+    if not asked:
+        raise ApiError("usage", 'args.no_fallback_to must be a list of agent names, like ["codex"].')
+    from handoff.cli import unknown_agents
+    unknown = unknown_agents(asked)
+    if unknown:
+        said = ", ".join(clean_line(name)[:40] for name in unknown)
+        raise ApiError("usage", f"args.no_fallback_to names {said}, which Handoff doesn't know as an agent "
+                                "(the rankings op lists who can take over).")
+    return asked
+
+
 # ── What the window shows ─────────────────────────────────────────────────────
 
 def _who(name: str) -> str:
@@ -400,9 +420,10 @@ def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
 # task's branch into their current branch (op merge: args.task, and optional args.shown as approve's).
 # any-worker: the worker runs more agents than claude and codex (a board's `workers`, each with its `label`,
 # `access`, `local` and `needs_ok`/`enabled`: adapters.py), op models lists the models one can run, and op
-# agents.enable lets one run, or stops it (args.agent, args.on).
+# agents.enable lets one run, or stops it (args.agent, args.on). ask-effort: an answer or a review can carry
+# approve's args.efforts {"": level}, which goes to Ixel MAT when it can take it.
 FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge", "any-worker",
-            "run-fallback")
+            "run-fallback", "ask-effort")
 
 
 def _workers() -> dict:
@@ -594,6 +615,10 @@ def _work_left(root: Path, ref: str) -> list[str]:
 
 
 def op_approve(request: dict) -> dict:
+    """Approve a task for an agent to run, once. `fallbacks` (the ones the `fallbacks` op suggested and the window
+    showed) are sealed with it; `no_fallback_to` (["codex"]: agent names) leaves those agents out of them: when
+    the request has no `fallbacks`, Handoff works out the suggested ones without them, and from a `fallbacks`
+    list it drops their entries. A picture has no fallbacks, so it takes no `no_fallback_to`."""
     from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem, names, step_agent
     board = _board(_project(request))
     args = request.get("args", {})
@@ -621,11 +646,25 @@ def op_approve(request: dict) -> dict:
     if efforts is not None and not isinstance(efforts, dict):
         raise ApiError("usage", 'args.efforts must be an object: a level for each model, like {"claude-opus-5-5": '
                                 '"high"}, or {"": "high"} for the agent\'s own model.')
-    if efforts and effort_problem(agent, efforts):
+    # (an answer or a review takes {"": level} for its Ixel MAT model, whose levels Ixel MAT checks; Board.approve
+    # refuses one for a model it names, and any for a picture)
+    if kind == "edit" and efforts and effort_problem(agent, efforts):
         raise BoardError(effort_problem(agent, efforts))
     fallbacks = args.get("fallbacks")  # (the ones `fallbacks` suggested and the window showed you)
     if fallbacks is not None and not isinstance(fallbacks, list):
         raise ApiError("usage", 'args.fallbacks must be a list, like ["claude:claude-sonnet-5-5", "codex:gpt-6-sol"].')
+    leave_out = _leave_out(args)
+    if leave_out and kind == "image":
+        raise ApiError("usage", "args.no_fallback_to is for an edit, an answer or a review; pictures don't fall "
+                                "back.")
+    if leave_out and fallbacks is None:
+        # (a bad list of models is left to Board.approve to refuse; the suggestions need a good one)
+        if models is None or approvals.check_models(models):
+            from handoff.cli import suggested_fallbacks
+            fallbacks = suggested_fallbacks(kind, agent, models, _project(request), leave_out=leave_out) or None
+    elif leave_out:
+        from handoff.rankings import split
+        fallbacks = [e for e in fallbacks if not (isinstance(e, str) and split(e)[0] in leave_out)] or None
     shown = _arg(args, "shown", str, required=False, default=None)  # the `content` of the task you showed
     # An empty list of models is refused (Board.approve), not taken as no choice: the run would go to the agent's
     # own model, which may cost more than the ones the window meant to name
@@ -636,7 +675,8 @@ def op_approve(request: dict) -> dict:
 def op_fallbacks(request: dict) -> dict:
     """Who would take over a run, in turn, when a model is out of usage (rankings.py), for the window to show
     before you approve it: `fallbacks` ("agent:model", best first; pass them back to approve) and `words`.
-    Nothing is approved and no model is asked; for an answer or a review, Ixel MAT is asked who it has."""
+    Nothing is approved and no model is asked; for an answer or a review, Ixel MAT is asked who it has.
+    `no_fallback_to` (["codex"]: agent names, as approve takes it) leaves those agents out of them."""
     from handoff.cli import suggested_fallbacks
     from handoff.rankings import shown
     args = request.get("args", {})
@@ -647,7 +687,7 @@ def op_fallbacks(request: dict) -> dict:
     models = args.get("models")
     if models is not None and not (isinstance(models, list) and approvals.check_models(models)):
         raise ApiError("usage", "args.models must be a list of model names, biggest first.")
-    found = suggested_fallbacks(kind, agent, models, _project(request))
+    found = suggested_fallbacks(kind, agent, models, _project(request), leave_out=_leave_out(args))
     return {"fallbacks": found, "words": shown(found)}
 
 
@@ -670,8 +710,9 @@ def op_revoke(request: dict) -> dict:
 def op_merge(request: dict) -> dict:
     """Merge the task's branch into the branch the project has out, as one merge commit (never pushed), then
     mark the task done and remove its worktree (the branch stays). Refused, changing nothing, when the branch
-    isn't the commit the worker's run recorded, or the checkout isn't ready (gitwork.merge_branch). `left`: what
-    of the worktree is still there, in words (as a rule, nothing)."""
+    isn't the commit the worker's run recorded, or the checkout isn't ready (gitwork.merge_branch). A task with no
+    worker run is refused too; if git has a handoff/T-N branch no worker run recorded, the refusal says how to
+    merge that with git. `left`: what of the worktree is still there, in words (as a rule, nothing)."""
     from handoff import gitwork
     root = _project(request)
     board = _board(root)
@@ -683,7 +724,11 @@ def op_merge(request: dict) -> dict:
         raise Changed(f"{task.ref} changed while you were reading it. Look at it again, then merge what's there "
                       "now.")
     if task.branch is None:
-        raise BoardError(f"{task.ref} has no branch: nothing to merge.")
+        unrecorded = gitwork.handmade_branch(root, task.ref)
+        if unrecorded is None:
+            raise BoardError(f"{task.ref} has no branch: nothing to merge.")
+        blocked = Board.merge_blocker(task, events)  # (a run under way or approved is the reason to give first)
+        raise BoardError(blocked or unrecorded)
     blocked = Board.merge_blocker(task, events)
     if blocked:
         raise BoardError(blocked)

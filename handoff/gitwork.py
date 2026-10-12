@@ -12,6 +12,7 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import string
 import subprocess
 import tempfile
 import threading
@@ -137,6 +138,22 @@ def task_branches(root: Path) -> set[str]:
     prefix = "refs/heads/handoff/"
     out = _git(root, ["for-each-ref", "--format=%(refname)", prefix], check=False).stdout
     return {line[len(prefix):] for line in out.splitlines() if line.startswith(prefix)}
+
+
+def handmade_branch(root: Path, ref: str) -> str | None:
+    """Why `ref` (T-N), a task whose board record has no branch, isn't merged even though git has a branch
+    handoff/T-N: no worker run recorded it, and Handoff merges only a run's recorded commit. The board may simply
+    not have recorded it (a leftover from an old board, or a run that never recorded its branch), so this doesn't
+    say who made it. None when git has no such branch, or can't tell. Only looks."""
+    branch = f"handoff/{ref}"
+    try:
+        if not _branch_exists(root, branch):
+            return None
+    except GitError:
+        return None
+    return (f"{ref} has a git branch {branch}, but no worker run recorded it, so Handoff won't merge it. "
+            f"You can merge it yourself with: git merge {branch} (that skips Handoff's checks: the recorded "
+            "commit, the board folder, .gitattributes, your untracked files)")
 
 
 def work_left(root: Path, gone: Callable[[str], bool]) -> list[tuple[str, bool, bool]]:
@@ -283,41 +300,79 @@ def _chunks(file) -> Iterator[bytes]:
         yield chunk
 
 
-# A private key is found by its header line, which an old key in the file can share with a new one: a key's lines,
-# from its header to its end, are checked together whenever any of them is new
+# A private key is found by its header line, which an old key in the file can share with a new one. A key's block
+# opens only when its banner stands alone on a line and key data follows it, and ends at its end line or after a
+# fixed number of lines or bytes; the block is checked together whenever any of its lines is new
 _KEY_ENDS = ("-----END", "Private-MAC:")
 MAX_KEY_BLOCK_BYTES = 1024 * 1024
+MAX_KEY_BLOCK_LINES = 100
+_KEY_FIELDS = ("Proc-Type:", "DEK-Info:", "Encryption:", "Comment:", "Public-Lines:", "Private-Lines:",
+               "Key-Derivation:", "Argon2-", "Private-Hash:")
+_KEY_DATA_CHARS = frozenset(string.ascii_letters + string.digits + "+/=")
+_KEY_DATA_MIN = 16
 
 
 def _is_key_header(text: str) -> bool:
     return ("PRIVATE KEY" in text or "PuTTY-User-Key-File-" in text) and find_secret(text, tokens=False) is not None
 
 
+def _is_key_banner(text: str) -> bool:
+    """Whether a line is a key's banner alone on its line (not one mentioned in other text, nor an END banner)."""
+    line = text.strip()
+    if not _is_key_header(line):
+        return False
+    if line.startswith("-----BEGIN "):
+        return line.endswith("-----") and line.count("-----") == 2
+    return line.startswith("PuTTY-User-Key-File-")
+
+
+def _is_key_data(text: str) -> bool:
+    """Whether a line is a key's header field (such as Proc-Type:) or base64 key data."""
+    line = text.strip()
+    if line.startswith(_KEY_FIELDS):
+        return True
+    return len(line) >= _KEY_DATA_MIN and all(char in _KEY_DATA_CHARS for char in line)
+
+
 def _added(file, known: set[str]) -> Iterator[bytes]:
     """The lines of a file that its last commit didn't have anywhere, in chunks of about MAX_SCAN_BYTES. Lines
     are compared as text, as git gives the old ones; a line too long to read at once is always checked, whole, and
-    so is a private key with any line that's new."""
+    so is a private key whenever any of its lines is new: from its header to its end (or its first
+    MAX_KEY_BLOCK_LINES lines), when the header stands alone and key data follows it."""
     piece, block = bytearray(), bytearray()
+    held = None  # a banner line and whether it's new, waiting to see if key data follows
     long = block_new = False
+    block_lines = 0
     while line := file.readline(MAX_SCAN_BYTES):
         whole = line.endswith(b"\n") or len(line) < MAX_SCAN_BYTES  # (else the rest of it comes next)
         text = line.decode("utf-8", "replace")
         new = long or not whole or any(part not in known for part in text.splitlines())
         long = not whole
-        if not block and _is_key_header(text):
-            block, block_new = bytearray(line), new
-        elif block:
+        if held is not None:
+            held_line, held_new = held
+            held = None
+            if _is_key_data(text):
+                block, block_new, block_lines = bytearray(held_line), held_new, 1
+            elif held_new:
+                piece += held_line
+        if block:
             block += line
             block_new = block_new or new
+            block_lines += 1
+        elif _is_key_banner(text):
+            held = (line, new)
         elif new:
             piece += line
-        if block and (any(end in text for end in _KEY_ENDS) or len(block) >= MAX_KEY_BLOCK_BYTES):
+        if block and (any(end in text for end in _KEY_ENDS) or len(block) >= MAX_KEY_BLOCK_BYTES
+                      or block_lines >= MAX_KEY_BLOCK_LINES):
             if block_new:
                 piece += block
-            block, block_new = bytearray(), False
+            block, block_new, block_lines = bytearray(), False, 0
         if len(piece) >= MAX_SCAN_BYTES:
             yield bytes(piece)
             piece.clear()
+    if held is not None and held[1]:
+        piece += held[0]
     if block_new:
         piece += block
     if piece:

@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Mapping
 
-from handoff import approvals, usage
+from handoff import approvals, proc, usage
 from handoff.globs import PathError, normalize_path, overlaps
 from handoff.proc import system32
 from handoff.project import BOARD_DIR, BOARD_FILE, OUTPUTS_DIR
@@ -1505,7 +1505,8 @@ class Board:
         refused with Changed, so what's sealed is what they saw. An edit can name its `models`
         (approvals.check_models): one model runs it, or a chain, biggest first, where the first plans and the
         others do the steps. Its `efforts` say how hard they think (approvals.check_efforts): a level for each
-        model it names, or for the agent's own model when it names none. Its `fallbacks` take over, in turn, when
+        model it names, or for the agent's own model when it names none. An answer or a review names no models,
+        so it can carry one level for its own: efforts {"": level}. Its `fallbacks` take over, in turn, when
         a model is out of usage (approvals.check_fallbacks; rankings.fallbacks works them out)."""
         actor = check_name(actor, "actor")
         self._require_human(actor, "approve tasks for the worker")
@@ -1531,8 +1532,8 @@ class Board:
                 raise BoardError(f"Models are 1 to {approvals.MAX_MODELS} model names, like claude-opus-5-5 or "
                                  "haiku, each named once.")
         if efforts is not None:
-            if kind not in approvals.MODEL_KINDS:
-                raise BoardError("Only a change can say how hard its models think.")
+            if kind not in approvals.EFFORT_KINDS:
+                raise BoardError("Only a change, an answer or a review can say how hard its model thinks.")
             efforts = approvals.check_efforts(efforts, models)
             if efforts is None:
                 raise BoardError("Each effort is one word, like high, for one of the models the run names (or for the "
@@ -1674,7 +1675,8 @@ class Board:
 
     def start_run(self, worker: str, task_id: int, approval_id: int, run: dict) -> tuple[Task, list[Event]]:
         """Take an approved task for one run. Two workers can't both start the same approval. The task and
-        its history as it was approved: what the agent is given, read where the approval was checked."""
+        its history as it was approved: what the agent is given, read where the approval was checked. The start
+        records the process the run is in (`pid`), so a run that was killed can be told from one still going."""
         worker = check_name(worker, "worker")
         with self._write() as conn:
             task = self._get(conn, task_id)
@@ -1688,8 +1690,40 @@ class Board:
                 raise BoardError(f"Couldn't record that {task.ref}'s approval was used ({exc}), so it didn't "
                                  "run.") from exc
             task = self._update(conn, task, status="in_progress", waiting_on=None)
-            self._event(conn, task.id, worker, "worker", data={"state": "started", "approval": approval_id, **run})
+            data = {"state": "started", "approval": approval_id, "pid": os.getpid(), **run}
+            self._event(conn, task.id, worker, "worker", data=data)
             return task, history
+
+    def run_process(self, task_id: int) -> tuple[Event | None, bool | None]:
+        """The worker run that has the task now, if its latest state event is a run's start: that event, and
+        whether the process the run was in is still there (False: it's gone; None: the event doesn't say, or
+        that can't be told). (None, None) when no run has the task."""
+        with self._read() as conn:
+            event = self._last_state_event(conn, self._get(conn, task_id))
+        if event is None or event.kind != "worker" or event.data.get("state") != "started":
+            return None, None
+        return event, proc.pid_alive(event.data.get("pid"))
+
+    def reopen_stopped_run(self, actor: str, task_id: int) -> Task:
+        """Open a task again that a worker run left in progress when its process was stopped. Only the person
+        can, and only when the board has the run's process and it's gone: a run that's still going, one that
+        can't be told, and a task that someone took by hand are refused. The assignee stays, and so do the
+        task's worktree and branch (nothing here touches them)."""
+        actor = check_name(actor, "actor")
+        self._require_human(actor, "reopen a task a stopped run left in progress")
+        with self._write() as conn:
+            task = self._get(conn, task_id)
+            event = self._last_state_event(conn, task)
+            pid = None
+            if event is not None and event.kind == "worker" and event.data.get("state") == "started":
+                pid = event.data.get("pid")
+            if task.status != "in_progress" or proc.pid_alive(pid) is not False:
+                raise BoardError(f"{task.ref} isn't in progress under a worker run that has stopped, so it wasn't "
+                                 f"reopened. To set it back to open anyway: handoff status {task.ref} open")
+            task = self._update(conn, task, status="open", waiting_on=None)
+            self._event(conn, task.id, actor, "status", f"Its worker run had stopped: process {pid} is gone.",
+                        data={"from": "in_progress", "to": "open", "waiting_on": None})
+            return task
 
     def _require_running(self, conn: sqlite3.Connection, task: Task, worker: str) -> None:
         event = self._last_state_event(conn, task)

@@ -14,7 +14,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Collection
 
 from rich import box
 from rich.console import Console, Group
@@ -49,9 +49,10 @@ COMMANDS = [
     ("handoff show T-12 [--json]", "One task with its full history (or just: handoff T-12)"),
     ('handoff add "title" [--to NAME] [--body TEXT] [--accept CHECK]...', "Add a task (and assign it)"),
     ("handoff assign T-12 NAME", "Give a task to claude, codex, me… (or nobody)"),
+    ("handoff claim T-12 [PATH ...]", "Take a task yourself, and the files or folders you'll change"),
     ('handoff note T-12 "text"', "Add a note to a task"),
     ("handoff done T-12 [--reason R]", "Mark a task done (no review needed)"),
-    ("handoff reopen T-12", "Open a done, cancelled or blocked task again"),
+    ("handoff reopen T-12", "Open a done, cancelled or blocked task again (or one whose run was stopped)"),
     ("handoff merge T-12 [--yes]", "Merge a finished task's branch into your branch (you only; never pushed)"),
     ('handoff block T-12 "why" [--waiting-on NAME]', "Mark a task blocked, and say why"),
     ("handoff cancel T-12 [--reason R]", "Cancel a task"),
@@ -64,7 +65,8 @@ COMMANDS = [
      "Split one request across your agents and run the parts side by side"),
     ("handoff agents [enable|disable AGENT]", "Who can take tasks here: changing files, answering, reviewing, "
                                               "pictures"),
-    ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL] [--effort E]",
+    ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL] "
+     "[--effort E] [--no-fallback | --no-fallback-to A,...]",
      "Let an agent run a task, once (on a model, or a chain of models)"),
     ("handoff rankings [update] [--job JOB] [--json]",
      "Which models are best at what (who takes over when one hits its usage limit)"),
@@ -84,8 +86,8 @@ COMMANDS = [
 
 GROUPS = [
     ("See what's happening", ("board", "show")),
-    ("Make and change tasks", ("add", "assign", "note", "done", "reopen", "block", "cancel", "delete", "clean",
-                               "status")),
+    ("Make and change tasks", ("add", "assign", "claim", "note", "done", "reopen", "block", "cancel", "delete",
+                               "clean", "status")),
     ("Review work", ("review", "merge")),
     ("Hand work to agents", ("dispatch", "agents", "approve", "rankings", "run", "worker")),
     ("Set up", ("setup", "doctor", "done-rule", "keep", "update", "version", "help")),
@@ -111,6 +113,7 @@ EXAMPLES = {
     "add": ['handoff add "Fix the login page" --to codex',
             'handoff add "Write the release notes" --accept "Mentions the new API"'],
     "assign": ["handoff assign T-3 codex", "handoff assign T-3 me", "handoff assign T-3 nobody"],
+    "claim": ["handoff claim T-3", "handoff claim T-3 src/api.py docs"],
     "note": ['handoff note T-3 "The bug only happens on Safari"'],
     "done": ["handoff done T-3", 'handoff done T-3 --reason "Fixed in the last release"'],
     "reopen": ["handoff reopen T-3"],
@@ -496,6 +499,10 @@ def _for_you(message: str) -> str:
     message = re.sub(r"^worker (.*) such as claude, codex or human\.$", r"The agent \1 such as claude or codex.",
                      message)
     message = message.replace("such as claude, codex or human.", "such as claude, codex or me.")
+    # What claiming a task says to an agent: the command you'd type, and the review you do with handoff review
+    message = re.sub(r"handoff assign (T-\d+) human\b", r"handoff assign \1 me", message)
+    message = re.sub(r"(T-\d+) is waiting for your review; use handoff_review\.",
+                     r"\1 is waiting for your review: handoff review \1", message)
     return message.replace("The person can ", "You can ")
 
 
@@ -775,6 +782,7 @@ def _indented(text: str, style: str = "") -> Text:
 def _next_steps(board, task) -> list[str]:
     """What you can do with a task now, as commands that would work as they are. Each line ends with its
     command, so it copies whole."""
+    from handoff import proc
     from handoff.board import HUMAN, STATE_EVENTS, TERMINAL
     from handoff.worker import AGENTS
 
@@ -790,6 +798,9 @@ def _next_steps(board, task) -> list[str]:
         return [f"Next: {_who(who)} reviews it in its app when you say \"check your handoffs\"."]
     last = board.last_event_of(task.id, STATE_EVENTS)
     if last is not None and last.kind == "worker" and last.data.get("state") == "started":
+        if task.status == "in_progress" and proc.pid_alive(last.data.get("pid")) is False:  # (killed, say)
+            return [f"Next: the {_who(last.actor)} worker's run stopped before it finished. To work on it again: "
+                    f"handoff reopen {ref}"]
         # approving it again now would throw away what the run brings back
         return [f"Next: the {_who(last.actor)} worker is running it now; the result shows here when it finishes."]
     if any(t.id == task.id for t, _ in board.pending_runs(None, [task.id])):
@@ -940,6 +951,29 @@ def cmd_assign(argv: list[str]) -> int:
     _ok(f"{task.ref} is assigned to {_who(task.assignee) or 'nobody'} ({task.status}).")
     if task.assignee and task.assignee != HUMAN:
         _hint(f"Tell {task.assignee} to check its handoffs.")
+    return 0
+
+
+def cmd_claim(argv: list[str]) -> int:
+    from handoff.board import HUMAN
+
+    parser = _parser("claim", "Take a task yourself: one that's open, or one handed to you. PATHs also claim the "
+                              "files or folders you'll change.",
+                     needs={"task": "Say which task, like: handoff claim T-3 src/api.py"})
+    parser.add_argument("task", metavar="T-12")
+    parser.add_argument("paths", nargs="*", metavar="PATH", help="a file or folder you'll change")
+    args = parser.parse_args(argv)
+    board = _board(args)
+    task, found = board.claim(HUMAN, _task_id(args.task), args.paths)
+    _ok(f"{task.ref} is yours ({task.status}).")
+    if task.status == "blocked":  # taken while blocked: say why it is, and that it's yours to unblock
+        reason = board.last_event_of(task.id, ["status"])
+        if reason and reason.text:
+            _hint(f"Why it's blocked, from {_who(reason.actor)}: {reason.text}")
+        _hint(f"Unblock it with: handoff reopen {task.ref}")
+    if found:
+        _hint("Another active task claims overlapping paths. Coordinate before editing them:")
+        _warn_overlaps(found)
     return 0
 
 
@@ -1117,8 +1151,9 @@ def cmd_done(argv: list[str]) -> int:
 def cmd_reopen(argv: list[str]) -> int:
     from handoff.board import HUMAN
 
-    parser = _parser("reopen", "Open a done, cancelled or blocked task again. It keeps its assignee and history.",
-                     task_statuses=["done", "cancelled", "blocked"])
+    parser = _parser("reopen", "Open a done, cancelled or blocked task again, or one a stopped run left in "
+                               "progress (its worktree and branch are kept). It keeps its assignee and history.",
+                     task_statuses=["done", "cancelled", "blocked", "in_progress"])
     parser.add_argument("task", metavar="T-12")
     args = parser.parse_args(argv)
     board = _board(args)
@@ -1129,12 +1164,30 @@ def cmd_reopen(argv: list[str]) -> int:
     if task.status == "in_review":
         raise CommandError(f"{task.ref} is waiting for a review, so there's nothing to reopen.\nReview it with: "
                            f"handoff review {task.ref}")
-    if task.status not in ("done", "cancelled", "blocked"):
+    stopped = False  # in progress under a worker run whose process is gone
+    if task.status == "in_progress":
+        started, alive = board.run_process(task.id)
+        if started is not None and alive:
+            raise CommandError(f"{task.ref} is being run by the {_who(started.actor)} worker now, so there's nothing "
+                               f"to reopen. Its result shows here when the run finishes.\nIf you're sure that run "
+                               f"has stopped: handoff status {task.ref} open")
+        stopped = started is not None and alive is False  # (a hand claim, or a run it can't tell about: as before)
+    if not stopped and task.status not in ("done", "cancelled", "blocked"):
         raise CommandError(f"{task.ref} is {task.status}, not done, cancelled or blocked, so there's nothing to "
                            f"reopen.\nTo set it back to open anyway: handoff status {task.ref} open")
-    task = board.set_status(HUMAN, task.id, "open")
+    task = board.reopen_stopped_run(HUMAN, task.id) if stopped else board.set_status(HUMAN, task.id, "open")
     who = f"assigned to {_who(task.assignee)}." if task.assignee else "anyone can claim it."
-    _ok(f"{task.ref} is open again, {who}")
+    message = f"{task.ref} is open again, {who}"
+    if stopped:  # the run's work is still there, for the next run or the person to take up
+        from handoff import gitwork
+        worktree = gitwork.WORKTREES / task.ref
+        try:
+            kept = (_root(args) / worktree).is_dir()
+        except OSError:
+            kept = False
+        if kept:
+            message += f" Its worktree {worktree.as_posix()} and branch handoff/{task.ref} are kept."
+    _ok(message)
     return 0
 
 
@@ -1440,7 +1493,11 @@ def cmd_merge(argv: list[str]) -> int:
     task, events, _, _ = board.task_with_history(task_id)
     ref = task.ref
     if task.branch is None:
-        raise CommandError(f"{ref} has no branch, so there's nothing to merge.")
+        unrecorded = gitwork.handmade_branch(_root(args), ref)
+        if unrecorded is None:
+            raise CommandError(f"{ref} has no branch, so there's nothing to merge.")
+        blocked = Board.merge_blocker(task, events)  # (a run under way or approved is the reason to give first)
+        raise CommandError(blocked or unrecorded)
     blocked = Board.merge_blocker(task, events)
     if blocked:
         raise CommandError(blocked)
@@ -1526,10 +1583,14 @@ def cmd_approve(argv: list[str]) -> int:
                         help="for an edit, how hard the model thinks, in the agent's own levels: claude takes low, "
                              "medium, high, xhigh or max; codex minimal, low, medium, high, xhigh, max or ultra; the "
                              "others, as handoff agents --json lists them (default: the model's own). With --chain, "
-                             "for each model that has no effort of its own")
+                             "for each model that has no effort of its own. For an answer or a review, one level, "
+                             "passed to Ixel MAT, which applies it when it can")
     parser.add_argument("--no-fallback", action="store_true",
                         help="stop the run when a model is out of usage, instead of going on with the next best "
                              "model you have (handoff rankings shows the order)")
+    parser.add_argument("--no-fallback-to", metavar="AGENT,...",
+                        help="leave these agents out of the fallbacks, like codex or codex,gemini; the others "
+                             "still take over (not with --no-fallback)")
     parser.add_argument("--revoke", action="store_true", help="withdraw an approval the worker hasn't used yet")
     parser.add_argument("--yes", action="store_true", help="don't ask; approve the task as shown")
     args = parser.parse_args(argv)
@@ -1572,15 +1633,37 @@ def cmd_approve(argv: list[str]) -> int:
         raise CommandError(f"Only {names(AGENTS)} can change files through the worker. To have "
                            f"{agent} answer, review your changes or make pictures, add --kind answer, "
                            "review or image.")
-    if (models or efforts) and args.kind != "edit":
-        parser.fail("--model, --chain and --effort are for an edit; the models in Ixel MAT have their own (ixel "
-                    "model).")
+    if models and args.kind != "edit":
+        parser.fail("--model and --chain are for an edit; the models in Ixel MAT have their own (ixel model).")
+    if efforts and args.kind == "image":
+        parser.fail("--effort is for an edit, an answer or a review.")
+    leave_out: list[str] = []
+    if args.no_fallback_to is not None:
+        leave_out = list(dict.fromkeys(part.strip().lower() for part in args.no_fallback_to.split(",")
+                                       if part.strip()))
+        if not leave_out:
+            parser.fail("--no-fallback-to takes the agents to leave out, like: "
+                        f"handoff approve {ref} {agent} --no-fallback-to codex")
+        if args.no_fallback:
+            parser.fail("Use --no-fallback (no fallbacks at all) or --no-fallback-to (all but these agents), "
+                        "not both.")
+        if args.kind == "image":
+            parser.fail("--no-fallback-to is for an edit, an answer or a review; pictures don't fall back.")
+        unknown = unknown_agents(leave_out)
+        if unknown:
+            said = ", ".join(clean_line(name)[:40] for name in unknown)
+            what = "isn't an agent Handoff knows, so it" if len(unknown) == 1 else \
+                "aren't agents Handoff knows, so they"
+            parser.fail(f"{said} {what} can't be left out of the fallbacks.\n"
+                        "To see who can take over: handoff rankings")
     if models and len(models) > 1 and agent not in CHAIN_AGENTS:
         parser.fail(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}. For {agent}, name one with --model.")
     if models and len(models) > 1 and step_agent(models[0], agent)[0] != agent:
         parser.fail(f"A chain's first model plans, on {agent}; the models after it can run on other agents, like "
                     "ollama:qwen3:4b-instruct.")
-    if effort_problem(agent, efforts):
+    # (an answer's or a review's model is one of Ixel MAT's, whose levels Ixel MAT checks; the board only checks
+    # that the level is one word)
+    if args.kind == "edit" and effort_problem(agent, efforts):
         parser.fail(effort_problem(agent, efforts))
     if args.kind != "edit" and board_name(agent):  # (asks Ixel MAT who it has; no model is asked anything)
         from handoff import asks
@@ -1591,7 +1674,8 @@ def cmd_approve(argv: list[str]) -> int:
     # What's sealed is what was shown: if an agent changes the task while you read it, you see it again.
     from handoff.board import Changed, content_of
     whose = f" ({ref}'s assignee)" if asked else ""
-    fallbacks = None if args.no_fallback else (suggested_fallbacks(args.kind, agent, models, _root(args)) or None)
+    fallbacks = None if args.no_fallback else (
+        suggested_fallbacks(args.kind, agent, models, _root(args), leave_out=leave_out) or None)
     for attempt in range(1, 6):
         task, events, _, _ = board.task_with_history(task_id)
         console.print(f"\n  [{C['dim']}]The {escape(agent)} worker{whose} gets {ref} as it is now, with its "
@@ -1623,9 +1707,17 @@ def cmd_approve(argv: list[str]) -> int:
             console.print(f"\n  [{C['gold']}]⚠[/] The task changed while you were reading it; here it is again.",
                           soft_wrap=True)
     if args.kind != "edit":
-        _ok(f"Approved {task.ref} for {agent} to {KIND_VERBS[args.kind]}, once, through Ixel MAT.")
+        level = (efforts or {}).get("")
+        how_hard = f", at {level} effort" if level else ""
+        _ok(f"Approved {task.ref} for {agent} to {KIND_VERBS[args.kind]}{how_hard}, once, through Ixel MAT.")
+        if level:
+            _hint("Ixel MAT applies the effort only if it can; when it can't, the run goes on at the model's own "
+                  "setting." + (" With fallbacks, it applies to the first model only." if fallbacks else ""))
         if fallbacks:
             _hint(f"If {agent} hits its usage limit, {', then '.join(fallbacks)} take over, in turn.")
+        elif leave_out:
+            _hint(f"With {names(leave_out)} left out, no other model you have can take over; the run stops at its "
+                  "usage limit.")
         _hint(f"Nothing in the project changes; the result goes to .handoff/outputs/{task.ref} and the task to "
               f"{_who(return_to)}.")
         console.print(f"  [{C['dim']}]Run it with:[/] handoff run {task.ref}", soft_wrap=True)
@@ -1641,6 +1733,9 @@ def cmd_approve(argv: list[str]) -> int:
     if fallbacks:
         from handoff.rankings import shown as in_words
         _hint(f"If a model hits its usage limit, the run goes on with {in_words(fallbacks)}, and says so.")
+    elif leave_out:
+        _hint(f"With {names(leave_out)} left out, no other model you have can take over; the run stops at its "
+              "usage limit.")
     how = _sandbox_word(agent)
     if how is None:
         console.print(f"  [{C['gold']}]⚠[/] {escape(agent)} only runs inside its sandbox, which can't run here "
@@ -1653,10 +1748,24 @@ def cmd_approve(argv: list[str]) -> int:
     return 0
 
 
-def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: Path) -> list[str]:
+def unknown_agents(asked: Collection[str]) -> list[str]:
+    """The names that are neither an agent the worker runs nor one a ranking names (rankings.py): nobody
+    that could take over, so nobody to leave out of the fallbacks (`handoff approve --no-fallback-to`)."""
+    from handoff import rankings
+    from handoff.worker import AGENTS
+    known = set(AGENTS)
+    for entries in rankings.load()[0].values():
+        known.update(rankings.split(entry)[0] for entry in entries)
+    return [name for name in asked if name not in known]
+
+
+def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: Path, *,
+                        leave_out: Collection[str] = ()) -> list[str]:
     """Who takes over a run when a model is out of usage, best first: the models ranked below its own for its
     kind of work (rankings.py) that this computer has an agent for. A chain's planner falls back to the next
-    best planner, its steps to the next best coders. [] for a run that can't fall back (pictures)."""
+    best planner, its steps to the next best coders. [] for a run that can't fall back (pictures).
+    `leave_out`: agents (lowercase names) that never take over; the list fills up with the others. Leaving out
+    the run's own agent drops its other models."""
     from handoff import rankings
     from handoff.approvals import FALLBACK_KINDS, MAX_FALLBACKS
     if kind not in FALLBACK_KINDS:
@@ -1666,7 +1775,7 @@ def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: P
         from handoff.worker import AGENTS
         have = {name for name, spec in AGENTS.items()
                 if (spec.kind == "local" or (spec.command and adapters.find_on_path(spec.command)))
-                and (not spec.needs_ok or adapters.enabled(name))}
+                and (not spec.needs_ok or adapters.enabled(name))} - set(leave_out)
         served: dict[str, set[str]] = {}
 
         def usable(name: str, model: str) -> bool:  # a model on your computer only if its server has it
@@ -1685,7 +1794,7 @@ def suggested_fallbacks(kind: str, agent: str, models: list[str] | None, root: P
     from handoff import asks
     from handoff.board import safe_name
     roster = asks.ixel_roster(root)
-    have = {safe_name(a.get("name")) or "" for a in roster.agents if a.get("ready")}
+    have = {safe_name(a.get("name")) or "" for a in roster.agents if a.get("ready")} - set(leave_out)
     return rankings.fallbacks(rankings.KIND_JOB[kind], agent, None, have, agents_only=True)
 
 
@@ -2585,6 +2694,7 @@ HANDLERS = {
     "show": cmd_show,
     "add": cmd_add,
     "assign": cmd_assign,
+    "claim": cmd_claim,
     "note": cmd_note,
     "done": cmd_done,
     "reopen": cmd_reopen,
@@ -2617,8 +2727,8 @@ HANDLERS = {
 # What only the person does. Anything Handoff started is refused these (setup and update decide on their
 # parsed options: _not_started_by_handoff). A guard against an agent doing it by accident, not a wall: a
 # shell can unset the variable, which is why SECURITY.md says to deny these in the agent's permissions too.
-PERSON_WRITES = {"add", "assign", "note", "done", "reopen", "block", "review", "status", "cancel", "delete",
-                 "clean", "done-rule", "keep", "approve", "merge"}
+PERSON_WRITES = {"add", "assign", "claim", "note", "done", "reopen", "block", "review", "status", "cancel",
+                 "delete", "clean", "done-rule", "keep", "approve", "merge"}
 
 
 def _not_started_by_handoff() -> None:

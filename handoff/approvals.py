@@ -135,6 +135,7 @@ def check_models(models: object) -> list[str] | None:
 
 
 _EFFORT = re.compile(r"^[a-z]{1,16}$")
+EFFORT_KINDS = ("edit", "answer", "review")  # the runs that can say how hard their model thinks
 FALLBACK_KINDS = ("edit", "answer", "review")  # the runs that can go on with another model when one is out of usage
 MAX_FALLBACKS = 5
 _FALLBACK_AGENT = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -231,7 +232,7 @@ def is_sealed(key: bytes | None, board_path: Path, task_id: int, data: Mapping, 
     efforts = None
     if "efforts" in data:
         efforts = check_efforts(data["efforts"], models)
-        if efforts is None or kind not in MODEL_KINDS:
+        if efforts is None or kind not in EFFORT_KINDS:
             return False
     fallbacks = None
     if "fallbacks" in data:

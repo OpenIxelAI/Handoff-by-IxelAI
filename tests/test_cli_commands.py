@@ -1267,7 +1267,8 @@ def test_json_keeps_stdout_for_the_json_alone(project, no_inner_gitignore, capsy
 
 
 def test_approve_shows_who_takes_over_at_a_usage_limit_and_seals_it(project, capsys, monkeypatch):
-    monkeypatch.setattr(cli, "suggested_fallbacks", lambda kind, agent, models, root: ["claude:claude-sonnet-5-5"])
+    monkeypatch.setattr(cli, "suggested_fallbacks",
+                        lambda kind, agent, models, root, leave_out=(): ["claude:claude-sonnet-5-5"])
     run(capsys, "add", "Task")
     code, out, err = run(capsys, "approve", "T-1", "claude", "--model", "claude-opus-5-5", "--yes")
     assert code == 0, err
