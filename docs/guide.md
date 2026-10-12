@@ -233,6 +233,7 @@ An edit runs on the agent's own default model unless you name one when you appro
 handoff approve T-7 claude --model claude-haiku-5-5        # one model (an alias like haiku works too)
 handoff approve T-7 claude --chain claude-fable-5-1,claude-opus-5-5,claude-haiku-5-5
 handoff approve T-7 claude --chain claude-fable-5-1:max,claude-opus-5-5:high,claude-haiku-5-5
+handoff approve T-7 claude --chain claude-opus-5-5,claude-sonnet-5-5,ollama:qwen3:4b-instruct
 handoff approve T-7 codex --model gpt-5.5 --effort xhigh
 ```
 
@@ -240,8 +241,23 @@ A **chain** lists models biggest first, for claude. The first one reads the task
 them) and plans up to 6 steps, giving each step to the smallest of the others that can do it well: design and
 tricky logic to the bigger ones, tests, docs and small edits to the smaller ones. Then each step runs in turn in
 the same worktree, and each is committed on its own on `handoff/T-7`, so `git log` shows which model made what.
-If a step fails, the chain stops there and keeps what the steps before it committed. The whole chain gets the
-run's time limit. `handoff dispatch "claude finish the next step" --chain ...` (or `--model`) does the same for
+The whole chain gets the run's time limit.
+
+**Steps on other agents.** After the planner, a model can run on another agent you have: write it as
+`agent:model`, like `ollama:qwen3:4b-instruct` or `opencode:opencode/step-5-preview-free`. The planner is told
+which ones are small or on your computer and gives them only short, exact directions (one change in one named
+file, spelled out), not design or a lot of new code.
+
+**Back up the chain.** Work that goes down the chain comes back up to be checked:
+
+- If a smaller model fails its step, the biggest step model (the second in the chain) does that step instead.
+- When the steps are done, if any of them was done by a smaller model, the biggest step model checks the work
+  against the task and the plan, with the diff in front of it, and fixes what's wrong in place.
+- If it finds something too big for it (a wrong design, a large part missing), it says so, and the planner
+  fixes it, this time with tools to change files.
+
+Each check and fix is its own commit, and the handback says what each one did and cost. If the biggest step
+model itself fails, the chain stops there and keeps what the steps before it committed. `handoff dispatch "claude finish the next step" --chain ...` (or `--model`) does the same for
 claude's edits in a dispatch.
 
 **How hard each model thinks.** `--effort` sets it, in the agent's own words: claude (Claude Code's
@@ -253,7 +269,24 @@ needs it. Claude Code's "ultracode" isn't an effort level (it's how a session ru
 the worker doesn't take it.
 
 The model, or the chain, and each model's effort are sealed into the approval with the rest, so a board can't
-move a run to a bigger, dearer model or turn one up. Codex takes `--model` too; a chain runs on claude only.
+move a run to a bigger, dearer model or turn one up. Codex takes `--model` too; a chain plans on claude.
+
+### Recommended setups
+
+`handoff rankings` shows where each model fits in a chain, from the benchmarks it's ranked by, open models
+included, with what it takes to run them:
+
+| Tier | Its job in a chain | Closed models | Open models |
+|---|---|---|---|
+| Top | plans, reviews, fixes what a check sends up | claude-fable-5-1 (hard tasks), claude-opus-5-5, gpt-6-astra | Kimi K3, DeepSeek V4, GLM-5.3, MiniMax M3 (a hosted open-model server or a very large GPU machine) |
+| Middle | builds, checks the smaller models' work | claude-sonnet-5-5, gpt-6-sol | qwen3.6:27b, qwen3.6:35b, qwen3-coder:30b (32 GB or more), gpt-oss:120b (80 GB or more) |
+| Small | short, exact directions | claude-haiku-5-5, OpenCode's free models | qwen3.5:9b, qwen2.5-coder:14b, granite4.2:8b, qwen3:4b-instruct (a 16 GB Mac) |
+
+A good everyday chain is one model from each tier, biggest first:
+`--chain claude-opus-5-5,claude-sonnet-5-5,ollama:qwen3:4b-instruct`. A small local model saves money and time
+on the steps it can do; it isn't reliable at more, which is why its work is checked by the middle tier. With a
+bigger open model on your own hardware or server, it can take the middle or top place too. The open models'
+scores are mostly their makers' own, so their order is a best guess; `handoff rankings update` gets the newest.
 
 **What it used.** Every claude run reports, per model, its tokens and an estimated cost at API prices (on a
 subscription, that's what it would have cost; it counts toward your plan's limits instead). It's the proof of

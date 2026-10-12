@@ -95,11 +95,36 @@ PLAN_BRIEF = ("You're {planner}, planning task {ref} for Handoff's worker. The p
               "the smaller ones for clear, mechanical work such as tests, renames, docs and small edits. Fewer "
               "steps are better: don't split what one model can do in one go. Write each step's instructions so "
               "its model can do it without asking: which files, what to change, and how to check it. Those "
-              "models can {powers_short}.\n"
+              "models can {powers_short}.{local}\n"
               "\n"
               "End your reply with the plan as JSON in a ```json block, in exactly this shape:\n"
               '{{"steps": [{{"model": "one of the models above", "title": "a few words", '
               '"instructions": "what to do"}}]}}')
+
+# A model on this computer (or another small open one) takes directions well, but isn't reliable at design or at
+# writing much code: what the planner is told about the ones in its chain
+LOCAL_BRIEF = (" {names} {verb} small, on this computer: give {them} only short, exact directions for work you're "
+               "sure {they} can do, such as one change in one named file, spelled out (the function, the lines, "
+               "what they become). Nothing that needs judgment or a lot of new code.")
+
+# After the steps, the biggest of the step models checks what the smaller ones did, and fixes what's wrong; what's
+# too big for it goes up to the planner
+CHECK_BRIEF = ("\n\n## Check the work\n\n"
+               "{planner} planned this task as {count} steps, and smaller models did {which}. Their work is in "
+               "this folder now; what they changed is below. Check it against the task and the plan: read the "
+               "files it touches, and fix any mistake you find (a bug, a missed part of the task, a broken "
+               "test or file), in place. Don't redo work that's right, and don't add what the task doesn't ask "
+               "for.\n\n"
+               "Write DONE, LEFT and VERIFY about your check (DONE: \"nothing to fix\" when it was all right). "
+               "Then, on its own line, write ESCALATE: no, or, if something is wrong that's too big or too hard "
+               "for you to fix well (a wrong design, a large part missing), ESCALATE: and what it is, in a "
+               "sentence.")
+
+FIX_BRIEF = ("\n\n## Fix what the check found\n\n"
+             "You planned this task; the models doing its steps and the one checking them have finished, and the "
+             "check found a problem too big for it: {problem}\n"
+             "What the chain changed is below. Fix that problem in place (you can change files now), then write "
+             "DONE, LEFT and VERIFY about your fix.")
 
 STEP_BRIEF = ("\n\n## Your step\n\n"
               "{planner} planned this task as {count} steps, each done by a model in this folder in turn. Do only "
@@ -243,8 +268,12 @@ def plan_prompt(spec: AgentSpec, task: Task, history: list[Event], models: list[
     powers = "run commands and tests here" if spec.sandboxed else "only read and edit files (no commands or tests)"
     efforts = efforts or {}
     tiers = ", ".join(f"{m} ({efforts[m]} effort)" if m in efforts else m for m in models[1:])
+    small = [m for m in models[1:] if is_small(m)]
+    local = LOCAL_BRIEF.format(names=_and(small), verb="is" if len(small) == 1 else "are",
+                               them="it" if len(small) == 1 else "them",
+                               they="it" if len(small) == 1 else "they") if small else ""
     brief = PLAN_BRIEF.format(planner=models[0], ref=task.ref, max_steps=MAX_STEPS, tiers=tiers,
-                              powers_short=powers)
+                              powers_short=powers, local=local)
     return brief + "\n\n" + task_text(task, history, target)
 
 
@@ -278,6 +307,45 @@ def task_text(task: Task, history: list[Event], target: dict | None = None) -> s
             reply.add(f"{n}. {stamp(event.at)} · {event.actor} {describe(event)}")
             quote_event(reply, event)
     return reply.render()
+
+
+def step_agent(model: str, agent: str) -> tuple[str, str]:
+    """Which agent runs a chain's model, and the model as that agent takes it: "ollama:qwen3:4b-instruct" runs on
+    ollama, "opencode:opencode/step-5-preview-free" on opencode; a plain name (or one whose part before the colon
+    isn't another agent, like Ollama's own qwen3:4b) on the chain's agent."""
+    head, colon, rest = model.partition(":")
+    if colon and rest and head != agent and head in AGENTS:
+        return head, rest
+    return agent, model
+
+
+def is_small(model: str) -> bool:
+    """A model on this computer, or a free one: given short, exact directions only (LOCAL_BRIEF)."""
+    head, _, rest = model.partition(":")
+    spec = AGENTS.get(head)
+    return bool(spec and spec.kind == "local" and rest) or model.endswith("-free")
+
+
+def _diff_text(root: Path, worktree: gitwork.Worktree, limit: int = 60_000) -> str:
+    """What the chain changed since it started, as a diff, cut to `limit` bytes (fenced by the caller)."""
+    try:
+        text = gitwork.diff_since(root, worktree)
+    except (gitwork.GitError, AttributeError):
+        return ""
+    data = text.encode("utf-8", "replace")
+    return text if len(data) <= limit else data[:limit].decode("utf-8", "ignore") + "\n[… cut]"
+
+
+_ESCALATE = re.compile(r"^\s*ESCALATE:\s*(.+?)\s*$", re.M | re.I)
+
+
+def escalation(reply: str) -> str | None:
+    """The problem a check sent up to the planner, or None ("ESCALATE: no", or no such line)."""
+    found = _ESCALATE.findall(reply or "")
+    if not found:
+        return None
+    said = clean_line(found[-1])[:500].strip().rstrip(".")
+    return None if said.lower() in ("no", "none", "nothing", "n/a", "no.") else said
 
 
 @dataclass(frozen=True)
@@ -644,13 +712,14 @@ load_agents()
 
 def effort_problem(agent: str, efforts: Mapping[str, str] | None) -> str | None:
     """Why the agent's worker can't be told these efforts (None: it can, or there are none)."""
-    spec = AGENTS.get(agent)
-    levels = spec.effort_levels if spec else ()
-    for level in (efforts or {}).values():
+    for model, level in (efforts or {}).items():
+        who = step_agent(model, agent)[0] if model else agent
+        spec = AGENTS.get(who)
+        levels = spec.effort_levels if spec else ()
         if level not in levels:
             if not levels:
-                return f"The {agent} worker can't be told how hard to think."
-            return f"{agent} takes effort {', '.join(levels[:-1])} or {levels[-1]}, not {level}."
+                return f"The {who} worker can't be told how hard to think."
+            return f"{who} takes effort {', '.join(levels[:-1])} or {levels[-1]}, not {level}."
     return None
 
 
@@ -1106,10 +1175,12 @@ class Worker:
             """Run one model (or, when it's out of usage, the next of the run's fallbacks); its reply, and what
             went wrong (None if nothing did)."""
             swaps: list[str] = []
+            on, name = step_agent(model, agent)
+            level = efforts.get(model)
             try:
                 reply, used, problem, who, note = self._launch_or_fallback(
-                    worktree, prompt, model, self._effort(efforts.get(model)), fallbacks, benched, swaps, left_time,
-                    plan=plan)
+                    worktree, prompt, name, self._effort(level) if on == agent else level, fallbacks, benched, swaps,
+                    left_time, plan=plan, agent=on)
             except subprocess.TimeoutExpired:
                 return "", f"{model} was stopped: the chain ran past its {duration(self.timeout)}."
             ran[model] = who
@@ -1136,10 +1207,21 @@ class Worker:
             steps = [Step(models[1], "the whole task", "Do the whole task.")]
             notes.append(f"{planner} didn't write a plan the worker could read, so {models[1]} did the whole task.")
         verify_parts, left = [], ""
+        mid = models[1]  # the biggest of the step models: it takes back a smaller one's step that failed, and checks
+        lower: list[int] = []  # the steps a smaller model did, for the check
         for number, step in enumerate(steps, 1):
             before = len(spent)
-            reply, problem = launch(step_prompt(self.spec, task, history, branch, target, planner, steps, number),
-                                    step.model)
+            reply, problem = launch(step_prompt(self._spec_of(step.model), task, history, branch, target, planner,
+                                                steps, number), step.model)
+            if problem and step.model != mid and "was stopped" not in problem:
+                # passed back up: the bigger model does the step the smaller one couldn't
+                notes.append(f"{step.model} couldn't do step {number} ({_clip(problem)[:300]}), so {mid} did it.")
+                step = Step(mid, step.title, step.instructions)
+                steps[number - 1] = step
+                reply, problem = launch(step_prompt(self._spec_of(mid), task, history, branch, target, planner,
+                                                    steps, number), mid)
+            if step.model != mid:
+                lower.append(number)
             cost = usage.total_cost(usage.merge(*spent[before:]))
             by_agent, by_model, effort = ran.get(step.model, (agent, step.model, efforts.get(step.model)))
             try:
@@ -1165,6 +1247,48 @@ class Worker:
             if step_verify and step_verify not in verify_parts:
                 verify_parts.append(step_verify)
             left = step_left  # (the last step knows what's still left)
+        # Back up the chain: the biggest step model checks what the smaller ones did and fixes it; what's too big
+        # for it goes to the planner
+        if lower:
+            which = f"step{'s' if len(lower) > 1 else ''} {_and([str(n) for n in lower])}"
+            plan_text = Reply()
+            for n, st in enumerate(steps, 1):
+                plan_text.quote(f"step {n} of {len(steps)}, for {st.model}: {st.title}", st.instructions)
+            changes = Reply()
+            changes.quote("what the chain changed (a diff)", _diff_text(self.root, worktree) or "(nothing)")
+            before = len(spent)
+            reply, problem = launch(build_prompt(self._spec_of(mid), task, history, branch, target)
+                                    + CHECK_BRIEF.format(planner=planner, count=len(steps), which=which) + "\n\n"
+                                    + plan_text.render() + "\n\n" + changes.render(), mid)
+            made, problem2 = self._chain_commit(worktree, f"{task.ref} check: {mid} checked {which}", tokens)
+            if problem2:
+                return stop(f"The check by {mid}: {problem2}")
+            commit = made or commit
+            if problem or problem2:
+                notes.append(f"{mid} couldn't check the smaller models' work: {_clip(problem or problem2)[:300]}")
+            else:
+                cost = usage.total_cost(usage.merge(*spent[before:]))
+                check_done = parse_reply(reply)[0]
+                done_parts.append(f"Check, by {mid} (about ${cost:.4f}): {which}"
+                                  f"{'' if made else ' (changed no files)'}\n{check_done}")
+                big = escalation(reply)
+                if big:
+                    changes = Reply()
+                    changes.quote("what the chain changed (a diff)", _diff_text(self.root, worktree) or "(nothing)")
+                    before = len(spent)
+                    reply, problem = launch(build_prompt(self.spec, task, history, branch, target)
+                                            + FIX_BRIEF.format(problem=big) + "\n\n" + changes.render(), planner)
+                    made, problem2 = self._chain_commit(worktree, f"{task.ref} fix: {planner} fixed what the check "
+                                                        "sent up", tokens)
+                    if problem2:
+                        return stop(f"The fix by {planner}: {problem2}")
+                    commit = made or commit
+                    cost = usage.total_cost(usage.merge(*spent[before:]))
+                    if problem or problem2:
+                        notes.append(f"The check sent up a problem ({big}), and {planner} couldn't fix it: "
+                                     f"{_clip(problem or problem2)[:300]}")
+                    else:
+                        done_parts.append(f"Fix, by {planner} (about ${cost:.4f}): {big}\n{parse_reply(reply)[0]}")
         try:
             files = gitwork.changed_files(self.root, worktree)
         except gitwork.GitError as exc:
@@ -1179,18 +1303,34 @@ class Worker:
         return self._finish(task, return_to, branch, worktree, commit, files, done, left, verify, token,
                             "\n\n".join(notes) or None, usage.merge(*spent), fail, took_over=took)
 
+    def _spec_of(self, model: str) -> AgentSpec:
+        """The agent spec a chain's model runs on (its brief says what that agent can do)."""
+        on = step_agent(model, self.spec.name)[0]
+        return self.spec if on == self.spec.name else AGENTS[on]
+
+    def _chain_commit(self, worktree: gitwork.Worktree, title: str, tokens: list[str]) -> tuple[str | None, str | None]:
+        """Commit a check's or a fix's changes: the commit (None if nothing changed) and what went wrong."""
+        try:
+            made, found = self._commit(worktree, f"{title}\n\nMade by the Handoff worker, from the task as the "
+                                       "person approved it.\n")
+        except (_Withheld, gitwork.GitError) as exc:
+            return None, str(exc)
+        tokens.extend(found)
+        return made, None
+
     def _launch_or_fallback(self, worktree: gitwork.Worktree, prompt: str, model: str | None, effort: str | None,
                             fallbacks: list[str], benched: set[tuple[str, str]], swaps: list[str],
-                            time_left: Callable[[], float], plan: bool = False,
+                            time_left: Callable[[], float], plan: bool = False, agent: str | None = None,
                             ) -> tuple[str, dict | None, str | None, tuple[str, str, str | None], str | None]:
         """Run `model` on this agent; when it's out of usage (limits.py), bench it and run the next of the run's
         `fallbacks` ("agent:model", sealed in its approval) that isn't benched, and so on: a model that hits its
         plan's limit doesn't stop the work. Returns the reply, the usage of every try, what went wrong (None if
         nothing did), who ran it (agent, model, effort) and a login note; `swaps` gets a sentence for each
-        model that was out of usage. Any other failure stops there: it needs fixing, and the next model
-        working would hide it. TimeoutExpired is raised as it comes."""
+        model that was out of usage. Any other failure of the run's own model stops there: it needs fixing, and
+        the next model working would hide it (a fallback that fails is passed by, and said). TimeoutExpired is
+        raised as it comes."""
         from handoff.rankings import split
-        tries = [(self.spec.name, model or "", effort)] + [(*split(entry), None) for entry in fallbacks]
+        tries = [(agent or self.spec.name, model or "", effort)] + [(*split(entry), None) for entry in fallbacks]
         spent: list[dict | None] = []
         out: list[str] = []  # the models found out of usage, in words
         first = True
@@ -1220,6 +1360,9 @@ class Worker:
             if fallbacks and limits.out_of_usage(said[-2000:]):
                 benched.add((agent, name))
                 out.append(label)
+                continue
+            if out and (agent, name) != tries[0][:2]:  # a fallback that failed another way: the next one may not
+                swaps.append(f"{label} couldn't take over ({clean_line(self._exit_problem(proc, error))[:200]}).")
                 continue
             return reply, usage.merge(*spent), self._exit_problem(proc, error), (agent, name, level), note
         why = " ".join(swaps[-5:])  # (who couldn't take over, and why)

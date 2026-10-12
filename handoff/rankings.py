@@ -20,15 +20,23 @@ import json
 import re
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 UPDATED = "2026-10-12"
 SOURCES = (
     ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Oct 10 2026", "https://benchlm.ai/coding"),
+    ("BenchLM SWE-bench Verified, open models included, Oct 10 2026",
+     "https://benchlm.ai/benchmarks/swe-bench-verified"),
+    ("Morph: best open-source LLMs (Terminal-Bench 2.1, GPQA, HLE), Oct 3 2026",
+     "https://www.morphllm.com/best-open-source-llm"),
+    ("Morph: best Ollama models, Sep 29 2026", "https://www.morphllm.com/best-ollama-models"),
+    ("Vellum open LLM leaderboard, Jul 24 2026", "https://www.vellum.ai/open-llm-leaderboard"),
     ("Arena (LMArena) text and webdev leaderboards", "https://arena.ai/leaderboard"),
     ("Artificial Analysis text-to-image arena", "https://artificialanalysis.ai/image/leaderboard/text-to-image"),
     ("Artificial Analysis text-to-video arena", "https://artificialanalysis.ai/video/leaderboard/text-to-video"),
-    ("Handoff's own runs: Fable plans best, Haiku does small steps well (2026-10-11)", ""),
+    ("Handoff's own runs: Fable plans best, Haiku and qwen3:4b-instruct do small steps well (2026-10-11)", ""),
 )
+# Open models' scores are mostly their makers' own, gathered by the sites above: their order is a best guess
 
 JOBS = {
     "coding": "changing code (an edit, or a chain's steps)",
@@ -42,24 +50,31 @@ JOBS = {
 # Best first. An edit's fallbacks come from "coding" (a chain's planner from "planning"); an answer's from
 # "writing" and a review's from "review" (those run through Ixel MAT, which picks the agent's model itself, so
 # only the agent counts there). "images" and "video" say who's best, for choosing; a run doesn't fall back there.
+# Open models you run yourself are here by their Ollama names (ollama:qwen3.6:27b); through LM Studio or another
+# server they're the same models.
 RANKS: dict[str, list[str]] = {
     "coding": [
         "claude:claude-sonnet-5-5", "claude:claude-opus-5-5", "claude:claude-fable-5-1", "codex:gpt-6-astra",
         "codex:gpt-6.1-sol", "codex:gpt-6-sol", "codex:gpt-5.5", "kimi:kimi-k3", "cline:claude-sonnet-5-5",
-        "opencode:opencode/step-5-preview-free", "claude:claude-haiku-5-5", "codex:gpt-6-luna",
+        "ollama:qwen3.6:27b", "ollama:qwen3.6:35b", "opencode:opencode/step-5-preview-free",
+        "claude:claude-haiku-5-5", "ollama:gpt-oss:120b", "ollama:qwen3-coder:30b", "codex:gpt-6-luna",
+        "ollama:gpt-oss:20b", "ollama:granite4.2:8b", "ollama:qwen3.5:9b", "ollama:qwen2.5-coder:14b",
         "ollama:qwen3:4b-instruct", "lmstudio:qwen3-4b-instruct-2507",
     ],
     "planning": [
-        "claude:claude-fable-5-1", "claude:claude-opus-5-5", "codex:gpt-6-astra", "claude:claude-sonnet-5-5",
-        "codex:gpt-6.1-sol", "claude:claude-haiku-5-5",
+        "claude:claude-fable-5-1", "claude:claude-opus-5-5", "codex:gpt-6-astra", "kimi:kimi-k3",
+        "claude:claude-sonnet-5-5", "codex:gpt-6.1-sol", "ollama:gpt-oss:120b", "ollama:qwen3.6:27b",
+        "claude:claude-haiku-5-5", "ollama:deepseek-r1:14b",
     ],
     "review": [
         "claude:claude-opus-5-5", "codex:gpt-6-astra", "claude:claude-fable-5-1", "gemini:gemini-3.1-pro-preview",
-        "grok:grok-4.7", "claude:claude-sonnet-5-5", "antigravity:gemini-3.1-pro-preview", "local:",
+        "kimi:kimi-k3", "grok:grok-4.7", "claude:claude-sonnet-5-5", "antigravity:gemini-3.1-pro-preview",
+        "ollama:gpt-oss:120b", "ollama:qwen3.6:27b", "local:",
     ],
     "writing": [
         "claude:claude-opus-5-5", "claude:claude-fable-5-1", "codex:gpt-6-astra", "gemini:gemini-3.1-pro-preview",
-        "grok:grok-4.7", "claude:claude-sonnet-5-5", "antigravity:gemini-3.1-pro-preview", "local:",
+        "kimi:kimi-k3", "grok:grok-4.7", "claude:claude-sonnet-5-5", "antigravity:gemini-3.1-pro-preview",
+        "ollama:qwen3.6:27b", "ollama:gemma4:12b", "local:",
     ],
     "images": [
         "codex:gpt-image-2.5", "gemini:nano-banana-2.1", "grok:grok-imagine-image-2.0", "flux:flux-3",
@@ -68,6 +83,44 @@ RANKS: dict[str, list[str]] = {
         "wan:wan-3.0", "seedance:seedance-2.5", "minimax:minimax-h3", "flux:flux-3", "gemini:gemini-omni-flash-1.1",
     ],
 }
+
+# Where each model fits in a chain: "top" plans and reviews (and fixes what a check sends up), "mid" builds and
+# checks the smaller models' work, "low" takes short, exact directions. Open models are listed with what it takes
+# to run them.
+TIERS: dict[str, list[dict[str, str]]] = {
+    "top": [
+        {"model": "claude:claude-fable-5-1", "note": "the best planner; the dearest, so for hard tasks"},
+        {"model": "claude:claude-opus-5-5", "note": "plans and reviews well at about 40% of Fable's price"},
+        {"model": "codex:gpt-6-astra", "note": "on a ChatGPT plan"},
+        {"model": "kimi:kimi-k3", "note": "open (about 2.8T, 104B active): the best open planner; Kimi's own "
+                                          "service, or a very large GPU server"},
+        {"model": "DeepSeek V4 Pro / V4.1 Flash", "note": "open (1.6T and 552B): on a hosted open-model server"},
+        {"model": "GLM-5.3", "note": "open (753B): on a hosted open-model server"},
+        {"model": "MiniMax M3", "note": "open (428B, 23B active): on a hosted open-model server"},
+    ],
+    "mid": [
+        {"model": "claude:claude-sonnet-5-5", "note": "the best builder for its price"},
+        {"model": "codex:gpt-6-sol", "note": "on a ChatGPT plan"},
+        {"model": "ollama:qwen3.6:27b", "note": "open, 27B: needs a 32 GB Mac or a 24 GB GPU"},
+        {"model": "ollama:qwen3.6:35b", "note": "open, 35B (3B active): fast for its size; 32 GB or more"},
+        {"model": "ollama:qwen3-coder:30b", "note": "open, 30B (3.3B active): 32 GB or more"},
+        {"model": "ollama:gpt-oss:120b", "note": "open, 117B (5.1B active): 80 GB or more"},
+    ],
+    "low": [
+        {"model": "claude:claude-haiku-5-5", "note": "small steps, very cheap"},
+        {"model": "opencode:opencode/step-5-preview-free", "note": "free through OpenCode"},
+        {"model": "ollama:qwen3.5:9b", "note": "open, 9B: runs on a 16 GB Mac"},
+        {"model": "ollama:qwen2.5-coder:14b", "note": "open, 14B: the most a 16 GB Mac runs well"},
+        {"model": "ollama:granite4.2:8b", "note": "open, 8B: runs on a 16 GB Mac"},
+        {"model": "ollama:qwen3:4b-instruct", "note": "open, 4B: fast on any Mac; one exact change at a time"},
+    ],
+}
+TIER_WORDS = {"top": "Top: plans, reviews, and fixes what a check sends up",
+              "mid": "Middle: builds, and checks what the smaller models did",
+              "low": "Small: short, exact directions only"}
+HARDWARE = ("A 16 GB Mac runs open models up to about 14B (9 to 10 GB at Q4) at 12 to 22 tokens a second: they're for "
+            "the small tier. 27B to 35B models need 32 GB or more; the top open models need a hosted open-model "
+            "server or a very large GPU machine.")
 
 # The short names an agent takes for a model, as the ranking names it
 ALIASES = {"claude": {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
@@ -163,7 +216,8 @@ def canonical(agent: str, model: str) -> str:
 
 
 def fallbacks(job: str, agent: str, model: str | None, have: set[str] | None = None,
-              ranks: dict[str, list[str]] | None = None, agents_only: bool = False) -> list[str]:
+              ranks: dict[str, list[str]] | None = None, agents_only: bool = False,
+              usable: Callable[[str, str], bool] | None = None) -> list[str]:
     """The run's fallbacks: the entries ranked below agent:model for this job that an agent in `have` runs
     (every agent if None), best first, up to MAX_FALLBACKS, the last of them free when one is ranked. A model
     the ranking doesn't name falls back to the free and local ones only; no model, to what's below the agent's
@@ -185,6 +239,8 @@ def fallbacks(job: str, agent: str, model: str | None, have: set[str] | None = N
     found: list[str] = []
     for a, m in below:
         if have is not None and a not in have:
+            continue
+        if usable is not None and not usable(a, m):  # (a model your server doesn't have, say)
             continue
         if (a, m) == (agent, wanted) or (agents_only and a == agent):
             continue
