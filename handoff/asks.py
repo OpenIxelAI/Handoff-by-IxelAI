@@ -84,6 +84,7 @@ class IxelRoster:
     providers: list[dict]    # `ixel image --list`: name, label, model, ready, why
     problem: str | None = None
     features: tuple[str, ...] = ()  # what this Ixel's `ask` can do: "new-files", "head", "effort", "effort-first"
+    unread: bool = False     # True when `ixel ask --list` printed nothing readable
 
 
 def _json_out(runner: Runner, command: list[str], root: Path, timeout: float) -> dict | None:
@@ -109,7 +110,7 @@ def roster_from_lists(ixel: str | None, listed: dict | None, pictures: dict | No
                                   "as edits. Install Ixel MAT to give answers, reviews and pictures to any model.")
     if listed is None or not isinstance(listed.get("agents"), list):
         return IxelRoster([], [], "This Ixel MAT can't take single tasks yet (`ixel ask` is missing). Update it "
-                                  "with: ixel update")
+                                  "with: ixel update", unread=listed is None)
     pictures = pictures or {}
     agents = [a for a in listed["agents"] if isinstance(a, dict) and isinstance(a.get("name"), str)]
     providers = [p for p in pictures.get("providers") or [] if isinstance(p, dict) and isinstance(p.get("name"), str)]
@@ -312,14 +313,22 @@ def _effort_flags(agent: str, effort: str | None, roster: IxelRoster | None) -> 
 
 def _effort_note(agent: str, effort: str | None, roster: IxelRoster | None) -> str:
     """A sentence for the handback when the run has an effort but _effort_flags leaves it out, and why (so the
-    run's own setting isn't a surprise). "" when there's no effort, or it is passed."""
+    run's own setting isn't a surprise). "" when there's no effort, or it is passed. Only a list that couldn't be
+    read is said so; any other roster problem is given (clipped) as the reason the effort was left out."""
     if not effort or _effort_flags(agent, effort, roster):
         return ""
     level = clean_line(effort)[:20]
     ran = f"It ran at the model's own effort, not {level}:"
-    if roster is None or roster.problem:  # the list of models couldn't be read, so there are no features
+    if roster is None or roster.unread:  # the list of models couldn't be read, so there are no features
         return (f"{ran} Handoff couldn't read Ixel MAT's list of models (`ixel ask --list`), so it didn't pass "
                 "--effort.")
+    reason = clean_line(roster.problem) if roster.problem else ""
+    if reason:  # the list was read (or there's no Ixel), and the roster says why there's no effort to pass
+        if len(reason) > 200:
+            reason = f"{reason[:200].rstrip()}…"
+        if not reason.endswith((".", "!", "?", "…")):
+            reason += "."
+        return f"{ran} Handoff didn't pass --effort. {reason}"
     if "effort" not in roster.features:
         return f"{ran} this Ixel MAT can't take --effort (update it with: ixel update)."
     return f"{ran} this Ixel MAT can't take --effort with fallbacks (update it with: ixel update)."
