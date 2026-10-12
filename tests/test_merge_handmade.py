@@ -1,7 +1,4 @@
-"""Merging a task whose branch was made by hand with git, not by a worker run: refused the same way from the window (op merge) and the command line, with how to merge it by hand.
-
-These use a real temporary git repository, the way tests/test_merge.py does.
-"""
+"""Merging a task whose branch was made by hand with git (no worker run): refused, with how to merge it by hand."""
 import json
 import subprocess
 
