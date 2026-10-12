@@ -670,8 +670,9 @@ def op_revoke(request: dict) -> dict:
 def op_merge(request: dict) -> dict:
     """Merge the task's branch into the branch the project has out, as one merge commit (never pushed), then
     mark the task done and remove its worktree (the branch stays). Refused, changing nothing, when the branch
-    isn't the commit the worker's run recorded, or the checkout isn't ready (gitwork.merge_branch). `left`: what
-    of the worktree is still there, in words (as a rule, nothing)."""
+    isn't the commit the worker's run recorded, or the checkout isn't ready (gitwork.merge_branch). A task with no
+    worker run is refused too; if git has a hand-made handoff/T-N branch for it, the refusal says how to merge
+    that with git. `left`: what of the worktree is still there, in words (as a rule, nothing)."""
     from handoff import gitwork
     root = _project(request)
     board = _board(root)
@@ -683,7 +684,8 @@ def op_merge(request: dict) -> dict:
         raise Changed(f"{task.ref} changed while you were reading it. Look at it again, then merge what's there "
                       "now.")
     if task.branch is None:
-        raise BoardError(f"{task.ref} has no branch: nothing to merge.")
+        raise BoardError(gitwork.handmade_branch(root, task.ref)
+                         or f"{task.ref} has no branch: nothing to merge.")
     blocked = Board.merge_blocker(task, events)
     if blocked:
         raise BoardError(blocked)

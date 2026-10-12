@@ -139,6 +139,20 @@ def task_branches(root: Path) -> set[str]:
     return {line[len(prefix):] for line in out.splitlines() if line.startswith(prefix)}
 
 
+def handmade_branch(root: Path, ref: str) -> str | None:
+    """Why `ref` (T-N), a task with no worker run's branch, can't be merged even though git has a branch
+    handoff/T-N: it was made by hand, and Handoff merges only a worker run's recorded commit. None when git has
+    no such branch, or can't tell. Only looks."""
+    branch = f"handoff/{ref}"
+    try:
+        if not _branch_exists(root, branch):
+            return None
+    except GitError:
+        return None
+    return (f"{ref} has no branch from a worker run. git has a branch named {branch}, but it was made by hand "
+            f"rather than by a worker run, so Handoff won't merge it. To merge it yourself, run: git merge {branch}")
+
+
 def work_left(root: Path, gone: Callable[[str], bool]) -> list[tuple[str, bool, bool]]:
     """What the worker made for tasks that are gone (`gone` is given each T-N), oldest task first: the task's T-N,
     whether its worktree (.handoff/worktrees/T-N) is still there, and whether its branch (handoff/T-N) is.
