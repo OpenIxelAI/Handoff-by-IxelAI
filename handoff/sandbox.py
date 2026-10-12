@@ -425,4 +425,6 @@ def _wrap_mac(program: str, argv: list[str], *, worktree: Path, home: Path, priv
     lines.append('(deny mach-lookup (global-name "com.apple.SecurityServer"))')  # keeps the agent out of your keychain
     env["HOME"] = str(home)
     env["TMPDIR"] = str(tmp)
+    # Claude Code keeps its own temp folder at /tmp/claude-<uid> unless told otherwise, and /private/tmp is hidden
+    env["CLAUDE_CODE_TMPDIR"] = str(tmp)
     return [program, "-p", "\n".join(lines), *argv]
