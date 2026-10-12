@@ -255,6 +255,30 @@ def test_opencode_2_runs_with_its_own_flags_and_rejects_what_isnt_a_file_tool(tm
     assert git(repo, "show", f"handoff/{task.ref}:src/hello.py").stdout == "print('hi')\n"
 
 
+def test_an_effort_approved_for_opencode_doesnt_stop_opencode_2(tmp_path, board, repo):
+    # The Board offers OpenCode's --variant levels, which OpenCode 2 can't be told: it runs at its default
+    agent = FakeAgent(write_hello, stdout=opencode_events(cost=0))
+    approve(board, "opencode", models=["opencode/step-5-preview-free"],
+            efforts={"opencode/step-5-preview-free": "high"})
+    AGENTS["opencode"] = adapters.presets()["opencode"]
+    ran = Worker(board, repo, "opencode", runner=agent, command=fake_program(tmp_path, "opencode", OPENCODE2_HELP))
+    ran.check()
+    [result] = ran.run_pending()
+    assert result.ok, result.message
+    assert "--variant" not in agent.calls[0]["argv"]
+
+
+def test_opencode_2_lists_its_models_its_own_way(tmp_path):
+    # `opencode models` on OpenCode 2 needs --standalone too, or the Board's first list comes back empty
+    path = Path(fake_program(tmp_path, "opencode", OPENCODE2_HELP))
+    path.write_text(f"#!{sys.executable}\nimport sys\n"
+                    "print('opencode/step-5-preview-free' if sys.argv[1:] == ['models', '--standalone'] else "
+                    f"{OPENCODE2_HELP!r})\n", encoding="utf-8")
+    AGENTS["opencode"] = adapters.presets()["opencode"]
+    lister = Worker(None, tmp_path, "opencode", command=str(path))  # type: ignore[arg-type]
+    assert lister.list_models() == ["opencode/step-5-preview-free"]
+
+
 def test_an_opencode_without_either_set_of_flags_still_cant_run(tmp_path, board, repo):
     AGENTS["opencode"] = adapters.presets()["opencode"]
     old = Worker(board, repo, "opencode", command=fake_program(tmp_path, "opencode", "opencode run --model"))

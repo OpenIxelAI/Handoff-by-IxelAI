@@ -703,6 +703,7 @@ class Worker:
         self.command = command or (find_on_path(self.spec.command) if self.spec.command else None)
         self.bwrap: str | None = None
         self.help = ""  # what `<command> --help` said, once check() has run
+        self.no_effort = False  # its version can't be told an effort (OpenCode 2): runs think at its default
         self.models: list[str] = []  # a local model server's models, once check() has run
         # Tasks that couldn't start (task id: its approval, and the login problem then): run_pending passes
         # them by until the approval or the login changes, so a worker doesn't retry one every few seconds
@@ -748,6 +749,7 @@ class Worker:
         newer = self.spec.newer
         if missing and newer and newer.help_args == self.spec.help_args \
                 and all(flag in self.help for flag in newer.required_flags):
+            self.no_effort = bool(self.spec.effort_levels) and not newer.effort_levels
             self.spec, missing = newer, []
         if missing:
             raise WorkerUnavailable(f"This version of {self.spec.command} doesn't have {', '.join(missing)}, which "
@@ -785,6 +787,11 @@ class Worker:
                 return []
         if not self.spec.models_args or not self.command:
             return []
+        if self.spec.newer and not self.help:
+            try:
+                self.check()  # (which command line this version takes: OpenCode 2 lists them its own way)
+            except WorkerUnavailable:
+                pass
         try:
             proc = run_tree([self.command, *self.spec.models_args], "", self._env(), 30.0)
         except (Stopped, OSError, subprocess.SubprocessError):
@@ -835,6 +842,11 @@ class Worker:
             at = len(args) - 1 if args and args[-1] == "-" else len(args)
             args[at:at] = self._effort_args(effort)
         return [command, *args]
+
+    def _effort(self, effort: str | None) -> str | None:
+        """The effort a run is told: none where this version of the agent can't be told one (its default), so an
+        effort approved for the agent's older command line doesn't stop the run."""
+        return None if self.no_effort else effort
 
     def _effort_args(self, effort: str) -> list[str]:
         levels, name = self.spec.effort_levels, self.spec.name
@@ -1022,7 +1034,7 @@ class Worker:
         if len(models) > 1:
             return self._chain(task, history, branch, return_to, target, worktree, models, efforts, fail)
         model = models[0] if models else None
-        effort = efforts.get(model or "")
+        effort = self._effort(efforts.get(model or ""))
         prompt = build_prompt(self.spec, task, history, branch, target)
         login_note, used, reply = None, None, ""
         try:
@@ -1079,7 +1091,7 @@ class Worker:
             """Run one model; its reply, and what went wrong (None if nothing did)."""
             try:
                 proc, note = self._launch(worktree, prompt, model, plan=plan, timeout=left_time(),
-                                          effort=efforts.get(model))
+                                          effort=self._effort(efforts.get(model)))
             except subprocess.TimeoutExpired:
                 return "", f"{model} was stopped: the chain ran past its {duration(self.timeout)}."
             except (OSError, WorkerUnavailable) as exc:
