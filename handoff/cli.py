@@ -62,11 +62,12 @@ COMMANDS = [
      "Review a task that's waiting for you (with no verdict, it walks you through it)"),
     ('handoff dispatch "codex review my changes, gemini list …" [--yes]',
      "Split one request across your agents and run the parts side by side"),
-    ("handoff agents", "Who can take tasks here: changing files, answering, reviewing, pictures"),
+    ("handoff agents [enable|disable AGENT]", "Who can take tasks here: changing files, answering, reviewing, "
+                                              "pictures"),
     ("handoff approve T-12 AGENT [--kind edit|answer|review|image] [--model M | --chain BIG,...,SMALL] [--effort E]",
      "Let an agent run a task, once (on a model, or a chain of models)"),
     ("handoff run [T-12 ...]", "Run approved tasks now, side by side"),
-    ("handoff worker --agent claude|codex [--once] [--share FOLDER]",
+    ("handoff worker --agent AGENT [--once] [--share FOLDER]",
      "Run approved tasks headlessly, each in its own worktree"),
     ("handoff setup [--write|--remove] [--host HOST]", "Connect Claude Code, Codex and Claude Desktop (or take "
                                                         "Handoff out of them)"),
@@ -122,7 +123,7 @@ EXAMPLES = {
                'handoff review T-3 changes "Handle an empty cart" --check 2=not_met'],
     "dispatch": ['handoff dispatch "codex review my changes, claude fix the footer"',
                  'handoff dispatch --plan "gemini list five ideas for the shop"'],
-    "agents": ["handoff agents"],
+    "agents": ["handoff agents", "handoff agents enable kimi", "handoff agents --json"],
     "approve": ["handoff approve T-3 claude", "handoff approve T-3 gemini --kind answer",
                 "handoff approve T-3 --revoke"],
     "run": ["handoff run", "handoff run T-3 T-4"],
@@ -1408,6 +1409,10 @@ def _sandbox_word(agent: str) -> str | None:
     from handoff import sandbox
     from handoff.worker import AGENTS
     spec = AGENTS[agent]
+    if not spec.sandboxed:  # (OpenCode, a local model, an agent you added: they don't use Handoff's sandbox)
+        from handoff import adapters
+        return {"edit-only": "edit-only (no commands)", "files": "with its file tools only",
+                "full": "with its own permissions"}.get(spec.access, adapters.ACCESS.get(spec.access, spec.access))
     try:
         sandbox.check(spec.needs)
         return "in its sandbox"
@@ -1487,18 +1492,18 @@ def cmd_approve(argv: list[str]) -> int:
     from handoff.board import HUMAN, RUN_KINDS, TERMINAL
     from handoff.crew import board_name
     from handoff.sanitize import clean_line
-    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem
+    from handoff.worker import AGENTS, CHAIN_AGENTS, effort_problem, names
 
     parser = _parser("approve", "Approve a task for an agent to run, once: claude or codex change files in their "
-                                "own git worktree, in a sandbox (where it can't run, Claude only edits files); "
-                                "other models answer, review or make pictures through Ixel MAT. Then handoff run "
-                                "starts it (a running handoff worker --agent claude or codex also picks up what "
-                                "you approve for it).",
+                                "own git worktree, in a sandbox (where it can't run, Claude only edits files), and so "
+                                "do the other agents handoff agents lists (OpenCode, Ollama and the like); other "
+                                "models answer, review or make pictures through Ixel MAT. Then handoff run starts it "
+                                "(a running handoff worker --agent NAME also picks up what you approve for it).",
                      needs={"task": "Say which task, like: handoff approve T-3 claude"})
     parser.add_argument("task", metavar="T-12")
     parser.add_argument("agent", nargs="?", metavar="AGENT",
-                        help="the agent to run: claude or codex for an edit; any model in Ixel MAT for the other "
-                             "kinds (handoff agents)")
+                        help="the agent to run: claude, codex or another worker handoff agents lists for an "
+                             "edit; any model in Ixel MAT for the other kinds")
     parser.add_argument("--worker", metavar="AGENT", help="the same as AGENT")
     parser.add_argument("--kind", choices=RUN_KINDS, default="edit", metavar="KIND",
                         help="edit: change files in its own worktree (claude, codex); answer, review (your changes) "
@@ -1506,8 +1511,9 @@ def cmd_approve(argv: list[str]) -> int:
     parser.add_argument("--return-to", default=HUMAN, metavar="NAME",
                         help="who gets the task back when the run ends (default: you)")
     parser.add_argument("--model", metavar="MODEL",
-                        help="for an edit, the model the agent runs on, like claude-opus-5-5 or haiku (default: the "
-                             "agent's own)")
+                        help="for an edit, the model the agent runs on, like claude-opus-5-5 or haiku, "
+                             "opencode/step-5-preview-free for opencode, or qwen3:4b-instruct for ollama "
+                             "(default: the agent's own)")
     parser.add_argument("--chain", metavar="BIG,...,SMALL",
                         help="for a claude edit, a chain of models, biggest first, like "
                              "claude-fable-5-1,claude-opus-5-5,claude-haiku-5-5: the first plans the steps and gives "
@@ -1515,8 +1521,9 @@ def cmd_approve(argv: list[str]) -> int:
                              "with a colon: claude-fable-5-1:max")
     parser.add_argument("--effort", metavar="LEVEL",
                         help="for an edit, how hard the model thinks, in the agent's own levels: claude takes low, "
-                             "medium, high, xhigh or max; codex minimal, low, medium, high, xhigh, max or ultra "
-                             "(default: the model's own). With --chain, for each model that has no effort of its own")
+                             "medium, high, xhigh or max; codex minimal, low, medium, high, xhigh, max or ultra; the "
+                             "others, as handoff agents --json lists them (default: the model's own). With --chain, "
+                             "for each model that has no effort of its own")
     parser.add_argument("--revoke", action="store_true", help="withdraw an approval the worker hasn't used yet")
     parser.add_argument("--yes", action="store_true", help="don't ask; approve the task as shown")
     args = parser.parse_args(argv)
@@ -1556,7 +1563,7 @@ def cmd_approve(argv: list[str]) -> int:
             parser.fail(f"Say which agent runs {ref}, like: handoff approve {ref} claude (or codex)\n"
                         "To see who can take tasks here: handoff agents")
     if args.kind == "edit" and agent not in AGENTS:
-        raise CommandError(f"Only {' and '.join(AGENTS)} can change files through the worker. To have "
+        raise CommandError(f"Only {names(AGENTS)} can change files through the worker. To have "
                            f"{agent} answer, review your changes or make pictures, add --kind answer, "
                            "review or image.")
     if (models or efforts) and args.kind != "edit":
@@ -1639,10 +1646,22 @@ def _models(parser, args) -> tuple[list[str] | None, dict[str, str] | None]:
     items = [args.model.strip()] if args.model else [m.strip() for m in args.chain.split(",") if m.strip()]
     if args.chain and len(items) < 2:
         parser.fail("A chain is two or more models, biggest first, like: --chain claude-opus-5-5,claude-haiku-5-5")
+    from handoff import adapters
+    from handoff.worker import BUILT_IN, CLAUDE_EFFORTS, CODEX_EFFORTS
+    # (a colon is also part of some models' names, like Ollama's qwen3:4b: what follows the last one is an effort
+    # only when it's a level some agent takes)
+    levels = {*CLAUDE_EFFORTS, *CODEX_EFFORTS, *adapters.OPENCODE_EFFORTS, *adapters.CLINE_EFFORTS,
+              *adapters.OPENCLAW_EFFORTS, *adapters.LOCAL_EFFORTS}
+    # (claude's and codex's names are lowercase, so Haiku is haiku; another agent's are as its server lists them,
+    # like Qwen/Qwen3-Coder-30B: only the effort after them is lowercased)
+    agent = (getattr(args, "agent", None) or getattr(args, "worker", None) or "claude").lower()
     names, efforts = [], {}
     for item in items:
-        name, _, level = (part.strip() for part in item.lower().partition(":"))
-        names.append(name)
+        name, _, level = (part.strip() for part in item.rpartition(":"))
+        level = level.lower()
+        if not name or level not in levels:
+            name, level = item.strip(), ""
+        names.append(name.lower() if agent in BUILT_IN else name)
         if level or effort:
             efforts[name] = level or effort
     models = check_models(names)
@@ -1669,7 +1688,9 @@ def cmd_worker(argv: list[str]) -> int:
                                "/usr and /etc are, read-only). Nothing is pushed. Answers, reviews and pictures you "
                                "approved for it go through Ixel MAT.",
                      needs={"agent": "Say which agent runs the tasks, like: handoff worker --agent claude"})
-    parser.add_argument("--agent", required=True, metavar="AGENT", help="the agent to run: claude or codex")
+    parser.add_argument("--agent", required=True, metavar="AGENT",
+                        help="the agent to run: claude, codex, or another one handoff agents lists, like opencode "
+                             "or ollama")
     parser.add_argument("--once", action="store_true", help="run what's approved now, then stop")
     parser.add_argument("--share", action="append", default=[], metavar="FOLDER",
                         help="show the agent a folder read-only, such as tools installed in your home (~/.cargo, "
@@ -1711,6 +1732,11 @@ def cmd_worker(argv: list[str]) -> int:
     if worker.fallback_reason:
         console.print(f"  [{C['gold']}]⚠[/] {escape(args.agent)} runs edit-only here (no commands): "
                       f"[{C['dim']}]{escape(worker.fallback_reason)}[/]", soft_wrap=True)
+    elif worker.spec.access != "sandbox":
+        from handoff import adapters
+        mark = f"[{C['gold']}]⚠[/]" if worker.spec.access in ("files", "full") else f"[{C['dim']}]·[/]"
+        console.print(f"  {mark} [{C['dim']}]{escape(args.agent)} {escape(adapters.ACCESS[worker.spec.access])}.[/]",
+                      soft_wrap=True)
     elif worker.shared:
         hidden = f"; {len(worker.hidden)} credential files and folders in them are shown empty" if worker.hidden else ""
         console.print(f"  [{C['dim']}]Shared with the agent, read-only: "
@@ -1959,11 +1985,19 @@ def cmd_agents(argv: list[str]) -> int:
 
     from handoff import crew
 
-    parser = _parser("agents", "Who can take tasks here, and what kind: claude and codex change files (the worker); "
-                               "any model you set up in Ixel MAT answers and reviews; Grok (xAI) and GPT (OpenAI) "
-                               "make pictures.")
+    parser = _parser("agents", "Who can take tasks here, and what kind: claude, codex and the other coding agents "
+                               "and models Handoff finds (OpenCode, Hermes Agent, Kimi Code, Cline, OpenClaw, Ollama, "
+                               "LM Studio, and any you add in agents.toml) change files (the worker); any model you "
+                               "set up in Ixel MAT answers and reviews; Grok (xAI) and GPT (OpenAI) make pictures. "
+                               "An agent that runs with its own permissions, or whose file tools can read outside its "
+                               "worktree, changes files only once you enable it.")
+    parser.add_argument("action", nargs="?", choices=("enable", "disable"), metavar="enable|disable",
+                        help="let an agent change files through the worker, or stop letting it")
+    parser.add_argument("name", nargs="?", metavar="AGENT", help="the agent to enable or disable, like kimi")
     parser.add_argument("--json", action="store_true", help="print it as JSON")
     args = parser.parse_args(argv)
+    if args.action:
+        return _enable_agent(parser, args.action == "enable", args.name)
     root = _root(args)
     roster = crew.build_roster(None, root)  # (only looks: no board needed)
     if args.json:
@@ -1991,6 +2025,36 @@ def cmd_agents(argv: list[str]) -> int:
     else:
         console.print(f"\n  [{C['dim']}]Nobody can take tasks here yet; handoff doctor says what each one "
                       "needs.[/]\n", soft_wrap=True)
+    return 0
+
+
+def _enable_agent(parser, on: bool, name: str | None) -> int:
+    from handoff import adapters
+    from handoff.ixel import DEPTH_VAR, depth
+    from handoff.worker import AGENTS, BUILT_IN, access, label
+    if not name:
+        parser.fail(f"Say which agent, like: handoff agents {'enable' if on else 'disable'} kimi")
+    name = name.lower()
+    if depth() > 0:
+        raise CommandError(f"This was started by Handoff ({DEPTH_VAR} is set): only you can enable an agent.")
+    if name in BUILT_IN:
+        raise CommandError(f"{name} doesn't need enabling: it runs in the worker's own sandbox, or edit-only.")
+    spec = AGENTS.get(name) or adapters.presets().get(name)
+    try:
+        path = adapters.set_enabled(name, on)
+    except adapters.ConfigError as exc:
+        raise CommandError(str(exc)) from None
+    from handoff.worker import load_agents
+    load_agents()
+    shown = label(spec) if spec else name
+    if on:
+        what = adapters.ACCESS[access(spec)] if spec else "runs as agents.toml says"
+        _ok(f"{shown} can change files through the worker now ({_shown_path(path)}). It {what}.")
+        if spec is None:
+            _hint(f"Handoff doesn't know {name} yet: add its command in {_shown_path(path)} (see handoff help "
+                  "agents).")
+    else:
+        _ok(f"{shown} can't change files through the worker any more ({_shown_path(path)}).")
     return 0
 
 
@@ -2284,8 +2348,12 @@ def cmd_doctor(argv: list[str]) -> int:
             worker.check()
             if worker.fallback_reason:
                 line("⚠", f"Worker ({agent})", f"ready, edit-only (no commands): {worker.fallback_reason}")
-            else:
+            elif worker.spec.access == "sandbox":
                 line("✓", f"Worker ({agent})", f"ready, in its sandbox: handoff approve T-12 {agent}")
+            else:
+                from handoff import adapters
+                line("✓", f"Worker ({agent})", f"ready; it {adapters.ACCESS[worker.spec.access]}: handoff approve "
+                                               f"T-12 {agent}")
         except WorkerUnavailable as exc:
             line("–", f"Worker ({agent})", str(exc))
     gap()

@@ -290,6 +290,8 @@ shell or network access of its own.
 | `tests/test_worker_live.py` | **The attack test for Claude's edit-only mode**, where the sandbox can't run (below) |
 | `tests/test_sandbox.py` | The sandbox's command line (what's hidden, what's shown, in what order); which folders can be shared and what's hidden inside them; Claude's sandbox settings; each agent's private login and when a refreshed one is copied back; which environment variables count as credentials |
 | `tests/test_worker.py` | Approvals (the person only; one run; lapse when the task moves; sealed to this computer and board, so a cloned or edited board carries none); the worktree, branch and commit; a rewritten `.git` file and the repository's own hooks can't make the worker's git run anything; links out of the worktree are refused; the agent's environment and command line; a secret added to a new or committed file is never committed, while one the branch already had doesn't block the change; deleting or cleaning a task leaves its worktree and branch, and says so |
+| `tests/test_adapters.py` | The other agents (OpenCode, Hermes Agent, Kimi Code, Cline, OpenClaw, agents you add) and models on your computer: which are offered, and what's wrong in `agents.toml` is said, never fatal; only you enable an agent that runs with its own permissions or reads outside its worktree (an approval for one waits until you do, and nothing Handoff started can enable it); OpenCode's run permissions allow only its file tools; each agent gets only the environment it names; the task reaches it on stdin, as one flag's value, or in a private file, never through `cmd.exe`; the local model's tools refuse paths that leave the worktree, `.git` and links, and offer no command; usage and cost are read from each agent's own report |
+| `tests/test_worker_opencode_live.py` | **OpenCode's attack test**, with the real OpenCode CLI (below) |
 | `tests/test_merge.py` | Merging a task's branch: the person only (an agent's tools and anything Handoff started are refused); only the commit the run recorded, so a branch that changed since is refused; not while a run is under way or approved; refused, changing nothing, with uncommitted changes, a detached HEAD, a task's branch out or your own merge in progress; a branch that touches the board folder, replaces an ignored or untracked file of yours, or changes `.gitattributes`/`.lfsconfig` is refused; a conflict is aborted; the worker never commits a `.handoff` folder; a worktree with uncommitted files is kept; never pushes |
 | `tests/test_models_usage.py` | The model or chain of models an edit runs on, and how hard each one thinks, are sealed into its approval, so a board can't move a run to a dearer model or turn one up; a level the agent doesn't take never reaches it; a chain's planner gets read-only tools; a chain that stops keeps what its steps did in the reason; usage read back from a board is checked before it's shown |
 | `tests/test_board_usage.py` | What the board list says each task's worker runs used, and every run's on the board in all, read in one query and checked again when read: a damaged or malformed usage row is skipped, and a task with no runs shows none |
@@ -438,13 +440,46 @@ doesn't run. Findings from the reviews:
   `GITHUB_TOKEN`, cloud keys and other providers' API keys, stay out, and a sandboxed agent gets no
   credential variables at all (see above). Handoff has no secrets of its own.
 - **Text in, text out.** The prompt goes in on stdin, framed and fenced like every MCP response. The
-  command line is fixed. The agent's reply is sanitized and checked for secrets before it goes on the board.
+  command line is fixed (for the other agents, see below). The agent's reply is sanitized and checked for secrets before it goes on the board.
 - **Loop guard.** Everything the worker starts gets `HANDOFF_DEPTH` one higher, and a worker won't start
   with it set.
 - **Timeouts** (30 minutes by default) stop the agent and what it started. In the sandbox, that's everything
   in it. Elsewhere it's the agent's process group, and on Linux also anything that left the group (with
   `setsid`, say) but still has the run's `HANDOFF_RUN` variable. A run that fails or times out
   keeps what it changed, committed on its branch, and blocks the task with the reason.
+
+### The other agents
+
+The worker also runs agents that Handoff ships no sandbox for, and models on your own computer
+(`handoff/adapters.py`, `handoff/local_model.py`). Each one runs in its own worktree and branch, from the task
+as you approved it, with only the environment it names (no tokens of other services), the loop guard, the
+time limit, and nothing committed that looks like a secret; and none of them pushes. What else holds
+depends on the agent, and `handoff agents` and the Board say which, for each:
+
+| Agent | What it can reach | Runs |
+|---|---|---|
+| OpenCode | its file tools only (read, edit, write, search), in the worktree: `OPENCODE_CONFIG_CONTENT` denies its shell, web, subagents, skills and other folders, and wins over your config and the project's (which isn't read at all). OpenCode 2, whose free models refuse a run with tools taken away, runs with a private server (`--standalone`) and no `--auto`: its shell, web, subagent and skill tools and other folders are set to "ask", which a run with no one to ask rejects, and its `execute` tool (JavaScript that can make HTTP requests, which "ask" doesn't stop) is denied | once found |
+| A model on your computer (Ollama, LM Studio, any OpenAI-style server) | four tools that Handoff runs itself, on files in the worktree only (no `..`, absolute paths, links or `.git`); no commands | once found |
+| Hermes Agent | its file toolset only (`-t file`), with no terminal, browser, web or code execution; its file tools can read outside the worktree | once you enable it |
+| Kimi Code, Cline, OpenClaw, agents you add | their own permissions: they can run commands as you, with the network | once you enable it |
+
+You enable one with `handoff agents enable NAME` or in the Ixel app's Board, which writes `enabled = true` in
+`agents.toml` in Handoff's own folder, next to the approval key: a project can't add an agent or enable one,
+and nothing Handoff started can (the API refuses it inside `HANDOFF_DEPTH`). An approval for an agent that
+isn't enabled waits, unused, until you enable it. The task goes in on stdin where the agent reads it there;
+Hermes and Kimi take it as one flag's value and Cline as its last argument, and since Handoff's brief starts
+it, it never reads as a flag; OpenClaw reads it from a file in a private (0700) folder that's removed after
+the run. On Windows, an agent that takes the task on its command line is refused when its command is a
+`.cmd` or `.bat`, which runs through `cmd.exe`.
+
+`tests/test_worker_opencode_live.py` runs the real `opencode` against a fake model API set up as a provider in
+a private OpenCode config. Your config and the project's both try to allow its shell and subagents. The fake
+model asks it to read a file outside the worktree and to write one there, then to write a file in the
+worktree. It fails if a shell, web, subagent or skill tool is offered at all, if the outside file's contents
+reach the model or the outside write lands, or if anything but the legitimate file is committed. With
+OpenCode 2, which offers those tools, the fake model also calls its shell, web fetch and subagent tools, and the
+test fails unless each call is rejected, nothing reaches the fake server but the model's own API, and `execute`
+isn't offered.
 
 ### The attack tests
 

@@ -125,6 +125,20 @@ class AgentSpec:
     reports_usage: bool = False      # its output is Claude Code's JSON result, with what it used
     effort_args: tuple[str, ...] = ()    # how it's told how hard to think, with {effort} for the level
     effort_levels: tuple[str, ...] = ()  # the levels it takes, least first (none: it can't be told)
+    # The agents Handoff doesn't ship a sandbox for (adapters.py): OpenCode, Hermes Agent, Kimi Code, Cline,
+    # OpenClaw, a model on your own computer, and any agent you add yourself
+    label: str = ""                      # its name for people ("" : the name, capitalized)
+    kind: str = "cli"                    # cli: a program; local: a model server, driven by Handoff (local_model.py)
+    output: str = "text"                 # how its reply and usage are read: text, claude, opencode, hermes, local
+    access: str = "sandbox"              # what it can reach (ACCESS): sandbox, edit-only, files or full
+    needs_ok: bool = False               # it runs only once you've said so (handoff agents enable NAME)
+    env: tuple[tuple[str, str], ...] = ()  # set for the run, with {worktree} for its folder
+    url: str = ""                        # a local model server's OpenAI-style API, like http://127.0.0.1:11434/v1
+    key_env: str = ""                    # the variable holding that server's key, if it wants one
+    default_model: str = ""              # the model it runs when the approval names none ("" : its own choice)
+    models_args: tuple[str, ...] = ()    # `<command> <models_args>` lists the models it can run, one per line
+    custom: bool = False                 # you added it yourself (agents.toml), rather than Handoff knowing it
+    newer: "AgentSpec | None" = None     # the same agent's newer command line, run where its --help has those flags
 
 
 _CLAUDE_FLAGS = ("--restricted", "--tools", "--strict-mcp-config", "--permission-mode", "--no-session-persistence",
@@ -585,8 +599,42 @@ CODEX = AgentSpec(
     effort_args=("-c", 'model_reasoning_effort="{effort}"'), effort_levels=CODEX_EFFORTS,
 )
 
-AGENTS = {"claude": CLAUDE, "codex": CODEX}
+BUILT_IN = {"claude": CLAUDE, "codex": CODEX}
+# Every agent the worker can run here: claude and codex, then the others Handoff finds, and yours (adapters.py).
+# load_agents() reads them again (agents.toml may have changed); AGENTS stays the same dict
+AGENTS: dict[str, AgentSpec] = dict(BUILT_IN)
+AGENT_PROBLEMS: list[str] = []  # what's wrong in agents.toml, if anything
 CHAIN_AGENTS = ("claude",)  # the agents a chain of models can run on (its planner needs read-only tools)
+
+
+def load_agents() -> dict[str, AgentSpec]:
+    from handoff import adapters
+    found, problems = adapters.build()
+    AGENTS.clear()
+    AGENTS.update(BUILT_IN)
+    AGENTS.update({name: spec for name, spec in found.items() if name not in BUILT_IN})
+    AGENT_PROBLEMS[:] = problems
+    return AGENTS
+
+
+def names(items, word: str = "and") -> str:
+    """["claude", "codex", "opencode"] -> "claude, codex and opencode"."""
+    items = list(items)
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} {word} {items[-1]}"
+
+
+def label(spec: AgentSpec) -> str:
+    return spec.label or spec.name.capitalize()
+
+
+def access(spec: AgentSpec, fallback: bool = False) -> str:
+    """What the agent can reach when it runs here, for people: "sandbox", "edit-only", "files" or "full"."""
+    if spec.access == "sandbox" and (fallback or not spec.sandboxed):
+        return "edit-only"
+    return spec.access
+
+
+load_agents()
 
 
 def effort_problem(agent: str, efforts: Mapping[str, str] | None) -> str | None:
@@ -644,7 +692,7 @@ class Worker:
         self.shared: list[Path] = []   # checked, once check() has run
         self.hidden: list[Path] = []   # credential folders and files inside them, shown empty
         if agent not in AGENTS:
-            raise WorkerUnavailable(f"The worker changes files with {' or '.join(AGENTS)}. For answers, reviews and "
+            raise WorkerUnavailable(f"The worker changes files with {names(AGENTS, 'or')}. For answers, reviews and "
                                     f"pictures by {agent} (through Ixel MAT), approve with --kind and use: handoff run")
         self.spec = AGENTS[agent]
         if not sandboxed:
@@ -652,9 +700,11 @@ class Worker:
                 raise WorkerUnavailable(f"The {agent} worker only runs inside its sandbox.")
             self.spec = self.spec.fallback
         self.fallback_reason: str | None = None  # why it's running edit-only, when its sandbox can't run here
-        self.command = command or find_on_path(self.spec.command)
+        self.command = command or (find_on_path(self.spec.command) if self.spec.command else None)
         self.bwrap: str | None = None
         self.help = ""  # what `<command> --help` said, once check() has run
+        self.no_effort = False  # its version can't be told an effort (OpenCode 2): runs think at its default
+        self.models: list[str] = []  # a local model server's models, once check() has run
         # Tasks that couldn't start (task id: its approval, and the login problem then): run_pending passes
         # them by until the approval or the login changes, so a worker doesn't retry one every few seconds
         self._waiting: dict[int, tuple[int, str | None]] = {}
@@ -676,6 +726,10 @@ class Worker:
                 self.shared, self.hidden = sandbox.shared_folders(self.share, project=self.root)
             except sandbox.ShareRefused as exc:
                 raise WorkerUnavailable(str(exc)) from exc
+        if self.spec.kind == "local":
+            self.check_login()
+            self._check_server()
+            return
         if not self.command:
             raise WorkerUnavailable(f"The `{self.spec.command}` command isn't on PATH, so the {self.spec.name} "
                                     "worker can't run.")
@@ -686,11 +740,70 @@ class Worker:
         except (OSError, subprocess.SubprocessError) as exc:
             raise WorkerUnavailable(f"Couldn't run `{self.spec.command} --help`: {exc}") from exc
         self.help = proc.stdout + proc.stderr
+        from handoff import adapters
+        if adapters.prompt_on_command_line(self.spec) and adapters.windows_shim(self.command):
+            raise WorkerUnavailable(f"{self.command} is a .cmd or .bat file, which runs through cmd.exe, and "
+                                    f"{self.spec.name} takes the task on its command line, where cmd.exe would read "
+                                    "it. Handoff won't run it that way on Windows.")
         missing = [flag for flag in self.spec.required_flags if flag not in self.help]
+        newer = self.spec.newer
+        if missing and newer and newer.help_args == self.spec.help_args \
+                and all(flag in self.help for flag in newer.required_flags):
+            self.no_effort = bool(self.spec.effort_levels) and not newer.effort_levels
+            self.spec, missing = newer, []
         if missing:
             raise WorkerUnavailable(f"This version of {self.spec.command} doesn't have {', '.join(missing)}, which "
                                     "the worker needs to keep the agent in its worktree. Update it and try again.")
         self.check_login()
+
+    def _enabled(self) -> bool:
+        from handoff import adapters
+        return adapters.enabled(self.spec.name)
+
+    def _server_key(self) -> str | None:
+        return os.environ.get(self.spec.key_env) if self.spec.key_env else None
+
+    def _check_server(self) -> None:
+        """A local model: its server answers, and has a model to run."""
+        from handoff import local_model
+        try:
+            models = local_model.list_models(self.spec.url, self._server_key())
+        except local_model.ServerError as exc:
+            start = {"ollama": " Start it (open Ollama, or run: ollama serve).",
+                     "lmstudio": " Start its server (in LM Studio, or run: lms server start)."}.get(self.spec.name, "")
+            raise WorkerUnavailable(f"{label(self.spec)} isn't answering at {self.spec.url}: {exc}.{start}") from None
+        if not models:
+            pull = " Get one with: ollama pull qwen3:4b-instruct" if self.spec.name == "ollama" else ""
+            raise WorkerUnavailable(f"{label(self.spec)} at {self.spec.url} has no models yet.{pull}")
+        self.models = models
+
+    def list_models(self) -> list[str]:
+        """The models this agent can run, as it lists them ([] where it can't say)."""
+        from handoff import local_model
+        if self.spec.kind == "local":
+            try:
+                return local_model.list_models(self.spec.url, self._server_key())
+            except local_model.ServerError:
+                return []
+        if not self.spec.models_args or not self.command:
+            return []
+        if self.spec.newer and not self.help:
+            try:
+                self.check()  # (which command line this version takes: OpenCode 2 lists them its own way)
+            except WorkerUnavailable:
+                pass
+        try:
+            proc = run_tree([self.command, *self.spec.models_args], "", self._env(), 30.0)
+        except (Stopped, OSError, subprocess.SubprocessError):
+            return []
+        names = [line.strip() for line in (proc.stdout or "").splitlines()]
+        return [n for n in names if n and approvals.check_models([n])][:300] if proc.returncode == 0 else []
+
+    def _env(self, worktree: Path | None = None) -> dict[str, str]:
+        env = agent_env(self.spec)
+        for name, value in self.spec.env:
+            env[name] = value.replace("{worktree}", str(worktree) if worktree else "")
+        return env
 
     def check_login(self) -> None:
         """A sandboxed agent gets a copy of its login: say so now if there's none, before anything starts."""
@@ -699,6 +812,10 @@ class Worker:
             raise WorkerUnavailable(problem)
 
     def _login_problem(self) -> str | None:
+        if self.spec.needs_ok and not self._enabled():  # (as a login is: its approval waits until you say so)
+            from handoff import adapters
+            return (f"{label(self.spec)} {adapters.ACCESS[self.spec.access]}, so it runs only once you've said so: "
+                    f"handoff agents enable {self.spec.name} (or switch it on in the Ixel app's Board).")
         if self.spec.sandboxed and self.spec.login is not None:
             return self.spec.login.missing(agent_env(self.spec))
         return None
@@ -708,6 +825,8 @@ class Worker:
         """The agent's command line, with its login's values in place of the placeholders (in one pass). `model`:
         the model to run on (the agent's default if None). `plan`: a chain's planner, with read-only tools.
         `effort`: how hard the model thinks, one of the agent's effort_levels (its default if None)."""
+        if self.spec.kind == "local":
+            raise WorkerUnavailable(f"{self.spec.name} is a model server, not a program to run.")
         command = os.path.realpath(self.command) if self.spec.sandboxed else str(self.command)
         values = values or {}
         pattern = re.compile("|".join(re.escape(k) for k in values)) if values else None
@@ -723,6 +842,11 @@ class Worker:
             at = len(args) - 1 if args and args[-1] == "-" else len(args)
             args[at:at] = self._effort_args(effort)
         return [command, *args]
+
+    def _effort(self, effort: str | None) -> str | None:
+        """The effort a run is told: none where this version of the agent can't be told one (its default), so an
+        effort approved for the agent's older command line doesn't stop the run."""
+        return None if self.no_effort else effort
 
     def _effort_args(self, effort: str) -> list[str]:
         levels, name = self.spec.effort_levels, self.spec.name
@@ -770,9 +894,11 @@ class Worker:
             self.check()  # may fall back to edit-only
         env = agent_env(self.spec)
         timeout = self.timeout if timeout is None else timeout
+        model = model or self.spec.default_model or None
+        if self.spec.kind == "local":
+            return self._run_local(worktree, prompt, model, timeout, effort), None
         if not self.spec.sandboxed:
-            return self.runner(self.argv(model=model, plan=plan, effort=effort), prompt, env, timeout,
-                               str(worktree.path)), None
+            return self._run_unsandboxed(worktree, prompt, model, plan, timeout, effort), None
         assert self.spec.login is not None and self.bwrap is not None
         home = Path.home()
         login = self.spec.login(env)
@@ -795,6 +921,50 @@ class Worker:
                 note = f"{self.spec.name} refreshed its login during the run, but copying it back failed ({exc})."
             login.cleanup()
         return proc, note
+
+    def _run_local(self, worktree: gitwork.Worktree, prompt: str, model: str | None, timeout: float,
+                   effort: str | None) -> "subprocess.CompletedProcess[str]":
+        from handoff import local_model
+        if effort and effort not in self.spec.effort_levels:
+            self._effort_args(effort)  # (raises, saying which levels it takes)
+        if model is None:
+            models = getattr(self, "models", None) or local_model.list_models(self.spec.url, self._server_key())
+            if not models:
+                raise WorkerUnavailable(f"{label(self.spec)} has no models to run.")
+            model = models[0]
+        elif not approvals.check_models([model]):
+            raise WorkerUnavailable(f"The {self.spec.name} worker can't be told to use {model}.")
+        return local_model.run(self.spec.url, model, prompt, str(worktree.path), timeout, effort or "none",
+                               self._server_key())
+
+    def _run_unsandboxed(self, worktree: gitwork.Worktree, prompt: str, model: str | None, plan: bool,
+                         timeout: float, effort: str | None) -> "subprocess.CompletedProcess[str]":
+        """An agent with no sandbox of Handoff's: Claude edit-only, or one of adapters.py's. The task goes in on
+        stdin, or, for an agent that only takes it on its command line, as the value it's given there (the brief
+        starts it, so it never reads as a flag), or in a file it reads."""
+        env = self._env(worktree.path)
+        argv = self.argv(model=model, plan=plan, effort=effort)
+        stdin = prompt
+        scratch = Path(tempfile.mkdtemp(prefix="handoff-run-"))  # 0700
+        try:
+            usage_file = scratch / "usage.json"
+            for n, arg in enumerate(argv):
+                if arg == "{prompt}":
+                    argv[n], stdin = prompt, ""
+                elif arg == "{prompt_file}":
+                    _write_private(scratch / "task.md", prompt.encode("utf-8"))
+                    argv[n], stdin = str(scratch / "task.md"), ""
+                elif arg == "{usage_file}":
+                    argv[n] = str(usage_file)
+            proc = self.runner(argv, stdin, env, timeout, str(worktree.path))
+            if self.spec.output == "hermes":
+                try:
+                    proc.usage_report = usage_file.read_text(encoding="utf-8")[:100_000]  # type: ignore[attr-defined]
+                except OSError:
+                    pass
+            return proc
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     def run(self, task: Task, approval: Event) -> RunResult:
         from handoff.asks import NOT_STARTED
@@ -864,7 +1034,7 @@ class Worker:
         if len(models) > 1:
             return self._chain(task, history, branch, return_to, target, worktree, models, efforts, fail)
         model = models[0] if models else None
-        effort = efforts.get(model or "")
+        effort = self._effort(efforts.get(model or ""))
         prompt = build_prompt(self.spec, task, history, branch, target)
         login_note, used, reply = None, None, ""
         try:
@@ -921,7 +1091,7 @@ class Worker:
             """Run one model; its reply, and what went wrong (None if nothing did)."""
             try:
                 proc, note = self._launch(worktree, prompt, model, plan=plan, timeout=left_time(),
-                                          effort=efforts.get(model))
+                                          effort=self._effort(efforts.get(model)))
             except subprocess.TimeoutExpired:
                 return "", f"{model} was stopped: the chain ran past its {duration(self.timeout)}."
             except (OSError, WorkerUnavailable) as exc:
@@ -992,9 +1162,23 @@ class Worker:
 
     def _read(self, proc: "subprocess.CompletedProcess[str]") -> tuple[str, dict | None, str | None]:
         """The agent's reply, what it used and what went wrong, from its output."""
-        if not self.spec.reports_usage:
-            return proc.stdout or "", None, None
-        return usage.parse_claude(proc.stdout or "")
+        if self.spec.reports_usage:
+            return usage.parse_claude(proc.stdout or "")
+        if self.spec.output == "opencode":
+            return usage.parse_opencode(proc.stdout or "", self._model_named(proc))
+        if self.spec.output == "hermes":
+            return usage.parse_hermes(proc.stdout or "", getattr(proc, "usage_report", None))
+        if self.spec.output == "local":
+            return usage.parse_local(proc.stdout or "")
+        return proc.stdout or "", None, None
+
+    def _model_named(self, proc: "subprocess.CompletedProcess[str]") -> str:
+        """The model on the agent's command line (what usage is recorded under), or the agent's name."""
+        args = list(proc.args) if isinstance(proc.args, (list, tuple)) else []
+        flag = self.spec.model_flag
+        if flag and flag in args and args.index(flag) + 1 < len(args):
+            return str(args[args.index(flag) + 1])
+        return self.spec.name
 
     def _commit(self, worktree: gitwork.Worktree, message: str) -> tuple[str | None, list[str]]:
         """Commit what the agent changed: the new commit (None if nothing changed) and the files holding only a JSON

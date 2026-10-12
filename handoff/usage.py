@@ -13,7 +13,7 @@ import json
 import math
 import re
 
-_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.:@/\-]{0,79}$")
+_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/\-]{0,79}$")
 _FIELDS = (("inputTokens", "in"), ("outputTokens", "out"), ("cacheReadInputTokens", "cache_read"),
            ("cacheCreationInputTokens", "cache_write"))
 MAX_MODELS = 8
@@ -38,6 +38,80 @@ def parse_claude(stdout: str) -> tuple[str, dict | None, str | None]:
     usage = check({"models": models}) if models else None
     error = (reply or "the agent reported an error") if data.get("is_error") else None
     return reply, usage, error
+
+
+def parse_opencode(stdout: str, model: str) -> tuple[str, dict | None, str | None]:
+    """`opencode run --format json`: one JSON event a line. The reply is the text of its last message; usage adds
+    up its steps' tokens and cost (OpenCode's own estimate; nothing for its free models)."""
+    texts: dict[str, list[str]] = {}
+    order: list[str] = []
+    totals = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "cost": 0.0}
+    steps, error = 0, None
+    for line in (stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        if event.get("type") == "text" and isinstance(part.get("text"), str):
+            message = str(part.get("messageID") or "")
+            if message not in texts:
+                texts[message] = []
+                order.append(message)
+            texts[message].append(part["text"])
+        elif event.get("type") == "step_finish":
+            steps += 1
+            counts = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+            cache = counts.get("cache") if isinstance(counts.get("cache"), dict) else {}
+            for ours, value in (("in", counts.get("input")), ("out", (_count(counts.get("output")) or 0)
+                                                               + (_count(counts.get("reasoning")) or 0)),
+                                ("cache_read", cache.get("read")), ("cache_write", cache.get("write"))):
+                totals[ours] += _count(value) or 0
+            totals["cost"] += _cost(part.get("cost")) or 0.0
+        elif event.get("type") == "error":
+            found = event.get("error") if isinstance(event.get("error"), dict) else {}
+            data = found.get("data") if isinstance(found.get("data"), dict) else {}
+            error = str(data.get("message") or found.get("message") or found.get("name")
+                        or "OpenCode reported an error")[:500]
+    reply = "".join(texts[order[-1]]) if order else ""
+    used = check({"models": {model: totals}}) if steps else None
+    return reply, used, error
+
+
+def parse_hermes(stdout: str, report: str | None) -> tuple[str, dict | None, str | None]:
+    """Hermes Agent's one-shot reply (stdout) and its --usage-file report."""
+    try:
+        data = json.loads(report) if report else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        return stdout or "", None, None
+    model = data.get("model") if isinstance(data.get("model"), str) else "hermes"
+    used = check({"models": {model: {"in": data.get("input_tokens"), "out": data.get("output_tokens"),
+                                     "cache_read": data.get("cache_read_tokens"),
+                                     "cache_write": data.get("cache_write_tokens"),
+                                     "cost": data.get("estimated_cost_usd")}}})
+    error = "Hermes Agent reported that the run failed." if data.get("failed") is True else None
+    return stdout or "", used, error
+
+
+def parse_local(stdout: str) -> tuple[str, dict | None, str | None]:
+    """A local model's run (local_model.run): its reply, its tokens (it costs nothing) and its error."""
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        return stdout, None, None
+    if not isinstance(data, dict):
+        return stdout, None, None
+    counts = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    model = data.get("model") if isinstance(data.get("model"), str) else ""
+    used = check({"models": {model: {"in": counts.get("in"), "out": counts.get("out"), "cost": 0}}}) \
+        if model else None
+    reply = data.get("reply") if isinstance(data.get("reply"), str) else ""
+    error = data.get("error") if isinstance(data.get("error"), str) else None
+    return reply, used, error
 
 
 def _count(value: object) -> int | None:
