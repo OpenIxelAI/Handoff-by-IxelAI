@@ -298,6 +298,7 @@ shell or network access of its own.
 | `tests/test_board_usage.py` | What the board list says each task's worker runs used, and every run's on the board in all, read in one query and checked again when read: a damaged or malformed usage row is skipped, and a task with no runs shows none |
 | `tests/test_dispatch.py` | How a request splits and which kind of run each part gets; nothing is added before a yes; the runs really happen at once; the kind is sealed, so a run can't be turned into an edit; only claude and codex edit; the files a run reads stay inside the project; pictures saved anywhere else are refused; one failing part blocks only its own task; the loop guard |
 | `tests/test_update.py` | Update never overwrites local changes, and runs the installer again until the latest is installed; git, bash and PowerShell never come from the folder it's run in |
+| `tests/test_proc.py` | On macOS, a timeout also stops what left the agent's process group but carries the run's mark: the environment is read as sysctl gives it (never Apple's own strings, a mark that only looks like it, or an argument); one that macOS won't show counts only when it was started under the agent; never another user's process, this one or its parent; checked on made-up processes everywhere and on real ones on a Mac |
 | `tests/test_code_hygiene.py` | Every text file is opened with an explicit encoding; the installers stay ASCII for Windows PowerShell 5.1; no program is started by a bare name, and taskkill comes from System32 |
 | `tests/test_cli.py`, `tests/test_cli_commands.py` | Every command and its messages: what's refused and what to type instead; nothing an agent wrote is read as markup; an agent Handoff started can't act as you; `clean` and `keep` list what goes and ask first, and changing `keep` never removes anything by the old setting |
 | `tests/test_project.py` | Which folder is the project, for a subfolder, a linked worktree, a submodule or an empty `.git`; paths too long for the system |
@@ -456,8 +457,9 @@ macOS has no live attack test yet. Findings from the reviews:
 - **Loop guard.** Everything the worker starts gets `HANDOFF_DEPTH` one higher, and a worker won't start
   with it set.
 - **Timeouts** (30 minutes by default) stop the agent and what it started. In the sandbox, that's everything
-  in it. Elsewhere it's the agent's process group, and on Linux also anything that left the group (with
-  `setsid`, say) but still has the run's `HANDOFF_RUN` variable. A run that fails or times out
+  in it. Elsewhere it's the agent's process group, and on Linux and macOS also anything of yours that left the
+  group (with `setsid`, say) but still has the run's `HANDOFF_RUN` variable (on macOS, one whose environment
+  can't be read counts if it was started under the agent). A run that fails or times out
   keeps what it changed, committed on its branch, and blocks the task with the reason.
 
 ### The other agents
