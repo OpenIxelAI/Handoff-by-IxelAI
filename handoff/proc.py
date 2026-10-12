@@ -71,10 +71,15 @@ def stop_all() -> int:
     return len(procs)
 
 
+def system32(name: str) -> str:
+    """One of Windows' own programs (icacls.exe, whoami.exe), from where Windows keeps it: by a bare name,
+    Windows would look in the current folder first, and that is often a project you cloned."""
+    return os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", name)
+
+
 def taskkill() -> str:
-    """Windows' taskkill, from where Windows keeps it: by a bare name, Windows would look in the current folder
-    first, and that is often a project you cloned."""
-    return os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "taskkill.exe")
+    """Windows' taskkill, by its full path (see system32)."""
+    return system32("taskkill.exe")
 
 
 # In the environment of everything one run starts: a process that leaves the run's process group keeps it
