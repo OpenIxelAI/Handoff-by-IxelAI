@@ -1690,6 +1690,7 @@ class Board:
                 raise BoardError(f"Couldn't record that {task.ref}'s approval was used ({exc}), so it didn't "
                                  "run.") from exc
             task = self._update(conn, task, status="in_progress", waiting_on=None)
+            self.forget_run_children(task.id)
             data = {"state": "started", "approval": approval_id, "pid": os.getpid(), **run}
             self._event(conn, task.id, worker, "worker", data=data)
             return task, history
@@ -1702,7 +1703,46 @@ class Board:
             event = self._last_state_event(conn, self._get(conn, task_id))
         if event is None or event.kind != "worker" or event.data.get("state") != "started":
             return None, None
-        return event, proc.pid_alive(event.data.get("pid"))
+        return event, self._run_alive(task_id, event.data.get("pid"))
+
+    def _run_children(self, task_id: int) -> Path:
+        """Where a run keeps the process ids of the programs it started (beside the board, not on it)."""
+        return self.path.parent / "runs" / f"{int(task_id)}.pids"
+
+    def note_run_child(self, task_id: int, pid: int) -> None:
+        """Keep a program a run started, so the run isn't taken for stopped while that program goes on."""
+        path = self._run_children(task_id)
+        try:  # (if it can't be kept, the run still goes on: reopen then goes by the worker's process alone)
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{int(pid)}\n")
+        except OSError:
+            pass
+
+    def forget_run_children(self, task_id: int) -> None:
+        """The run is over (or a new one starts): what it started no longer counts."""
+        try:
+            self._run_children(task_id).unlink()
+        except OSError:
+            pass
+
+    def _run_alive(self, task_id: int, pid: object) -> bool | None:
+        """Is the run still going: its worker's process, or any program it started that outlived a killed worker?
+        As proc.pid_alive: False only when all of them are known to be gone."""
+        alive = proc.pid_alive(pid)
+        if alive is not False:
+            return alive
+        try:
+            children = self._run_children(task_id).read_text(encoding="utf-8").split()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return None
+        for child in children:
+            state = proc.group_alive(int(child)) if child.isdigit() else None
+            if state is not False:
+                return state
+        return False
 
     def reopen_stopped_run(self, actor: str, task_id: int) -> Task:
         """Open a task again that a worker run left in progress when its process was stopped. Only the person
@@ -1717,10 +1757,11 @@ class Board:
             pid = None
             if event is not None and event.kind == "worker" and event.data.get("state") == "started":
                 pid = event.data.get("pid")
-            if task.status != "in_progress" or proc.pid_alive(pid) is not False:
+            if task.status != "in_progress" or self._run_alive(task.id, pid) is not False:
                 raise BoardError(f"{task.ref} isn't in progress under a worker run that has stopped, so it wasn't "
                                  f"reopened. To set it back to open anyway: handoff status {task.ref} open")
             task = self._update(conn, task, status="open", waiting_on=None)
+            self.forget_run_children(task.id)
             self._event(conn, task.id, actor, "status", f"Its worker run had stopped: process {pid} is gone.",
                         data={"from": "in_progress", "to": "open", "waiting_on": None})
             return task

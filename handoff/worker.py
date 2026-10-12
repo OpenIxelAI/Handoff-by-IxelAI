@@ -43,7 +43,7 @@ from handoff.board import HUMAN, Board, BoardError, Event, Task, run_efforts, ru
 from handoff.describe import describe
 from handoff.fence import Reply, numbered, quote_event
 from handoff.ixel import DEPTH_VAR, depth
-from handoff.proc import Stopped, find_on_path, run_tree, stopping
+from handoff.proc import Stopped, children_noted, find_on_path, run_tree, stopping
 from handoff.sanitize import clean_line, clean_text, find_secret
 from handoff.timefmt import stamp
 
@@ -948,15 +948,19 @@ class Worker:
             kind = run_kind(approval)
             if on_start:
                 on_start(task, kind)
-            if kind == "edit":
-                result = self.run(task, approval)
-                if result.waiting:
-                    self._waiting[task.id] = (approval.id, login)
-            elif kind in asks.VIA_IXEL:
-                result = asks.run(self.board, self.root, task, approval)
-            else:
-                result = RunResult(task, False, "This approval is for a kind of run this version of Handoff "
-                                                "doesn't know. Update Handoff (handoff update).")
+            try:  # (the programs the run starts, so a killed run isn't reopened while they go on)
+                with children_noted(lambda pid, task_id=task.id: self.board.note_run_child(task_id, pid)):
+                    if kind == "edit":
+                        result = self.run(task, approval)
+                        if result.waiting:
+                            self._waiting[task.id] = (approval.id, login)
+                    elif kind in asks.VIA_IXEL:
+                        result = asks.run(self.board, self.root, task, approval)
+                    else:
+                        result = RunResult(task, False, "This approval is for a kind of run this version of "
+                                                        "Handoff doesn't know. Update Handoff (handoff update).")
+            finally:
+                self.board.forget_run_children(task.id)
             results.append(result)
             if on_done:
                 on_done(result)
