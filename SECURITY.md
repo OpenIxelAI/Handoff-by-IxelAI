@@ -118,9 +118,9 @@ The rules above bind the MCP tools, which is how an app's agent works on the boa
 run commands as you (Claude Code's Bash tool, Codex's shell) can run the `handoff` CLI, and at the CLI it
 is you: it could approve a task, run it, or delete one. Handoff can't tell it apart from you at a terminal.
 
-- Anything Handoff started (`HANDOFF_DEPTH` is set) is refused the CLI's writes (add, assign, note, status,
-  review, approve, merge, delete, clean, keep and the like, plus `setup` when it would change an app's config or
-  hook, and `update` other than `--check`), `handoff api`'s writes, and `handoff run`, `dispatch` and
+- Anything Handoff started (`HANDOFF_DEPTH` is set) is refused the CLI's writes (add, assign, claim, note,
+  status, review, approve, merge, delete, clean, keep and the like, plus `setup` when it would change an app's
+  config or hook, and `update` other than `--check`), `handoff api`'s writes, and `handoff run`, `dispatch` and
   `worker`. It can still look. This is a guard against an agent doing it by accident, not a wall: a shell
   can unset the variable (`env -u HANDOFF_DEPTH`, or `HANDOFF_DEPTH=0`), and Handoff can't stop that.
 - So for every agent with a shell, deny those commands in its app's permission settings too. In Claude
@@ -299,7 +299,7 @@ shell or network access of its own.
 | `tests/test_dispatch.py` | How a request splits and which kind of run each part gets; nothing is added before a yes; the runs really happen at once; the kind is sealed, so a run can't be turned into an edit; only claude and codex edit; the files a run reads stay inside the project; pictures saved anywhere else are refused; one failing part blocks only its own task; the loop guard |
 | `tests/test_update.py` | Update never overwrites local changes, and runs the installer again until the latest is installed; git, bash and PowerShell never come from the folder it's run in |
 | `tests/test_code_hygiene.py` | Every text file is opened with an explicit encoding; the installers stay ASCII for Windows PowerShell 5.1; no program is started by a bare name, and taskkill comes from System32 |
-| `tests/test_cli.py`, `tests/test_cli_commands.py` | Every command and its messages: what's refused and what to type instead; nothing an agent wrote is read as markup; an agent Handoff started can't act as you; `clean` and `keep` list what goes and ask first, and changing `keep` never removes anything by the old setting |
+| `tests/test_cli.py`, `tests/test_cli_commands.py`, `tests/test_cli_claim.py` | Every command and its messages: what's refused and what to type instead; nothing an agent wrote is read as markup; an agent Handoff started can't act as you; `clean` and `keep` list what goes and ask first, and changing `keep` never removes anything by the old setting |
 | `tests/test_project.py` | Which folder is the project, for a subfolder, a linked worktree, a submodule or an empty `.git`; paths too long for the system |
 | `tests/test_docs.py` | The guide names every tool, command, status and done rule, and this page names every test file |
 
