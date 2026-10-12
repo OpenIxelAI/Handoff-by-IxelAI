@@ -185,7 +185,7 @@ def test_parse_grok_reads_the_reply_usage_and_error():
     ("[]", "wasn't a JSON object"),
     ('"end_turn"', "wasn't a JSON object"),
     ("null", "wasn't a JSON object"),
-    ("[" * 50_000, "wasn't its JSON result"),         # too deep to read
+    pytest.param("[" * 50_000, "wasn't its JSON result", id="too-deep"),  # (a short id: Windows caps an env var)
 ])
 def test_parse_grok_output_that_isnt_a_json_result_object_is_an_error(stdout, said):
     reply, used, error = usage.parse_grok(stdout)
@@ -497,7 +497,7 @@ def test_inspect_that_doesnt_answer_in_time_refuses_the_run(tmp_path, board, rep
     '{"plugins": [{"name": "p", "provides": {"hooks": 1}}], "hooks": [], "mcpServers": []}',  # no "enabled"
     '{"plugins": [{"name": "p", "enabled": true}], "hooks": [], "mcpServers": []}',  # no "provides"
     '{"plugins": [], "hooks": ["h"], "mcpServers": []}',  # a hook that isn't an object
-    "[" * 50_000,                          # too deep to read
+    pytest.param("[" * 50_000, id="too-deep"),  # too deep to read (a short id: Windows caps an env var)
 ])
 def test_an_inspect_answer_that_cant_be_read_refuses_the_run(tmp_path, board, repo, config, answer):  # noqa: F811
     message = run_refused(tmp_path, board, repo, config, inspect=answer)
