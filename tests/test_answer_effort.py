@@ -15,7 +15,7 @@ from handoff.board import HUMAN, Board, BoardError
 
 
 @pytest.mark.parametrize("kind", ["answer", "review"])
-def test_approve_an_answer_or_a_review_with_an_effort(repo, fake_ixel, run_cli, kind):
+def test_approve_an_answer_or_a_review_with_an_effort(repo, fake_ixel, run_cli, kind):  # noqa: F811
     assert run_cli("add", "Review the documentation in README.md")[0] == 0
     code, out, err = run_cli("approve", "T-1", "gemini", "--kind", kind, "--effort", "high", "--no-fallback", "--yes")
     assert code == 0, err
@@ -28,7 +28,7 @@ def test_approve_an_answer_or_a_review_with_an_effort(repo, fake_ixel, run_cli, 
     assert task.ref == "T-1" and event.data["efforts"] == {"": "high"}
 
 
-def test_answers_and_reviews_still_refuse_a_model_and_a_chain_and_pictures_an_effort(repo, fake_ixel, run_cli,
+def test_answers_and_reviews_refuse_a_model_and_a_chain_and_pictures_an_effort(repo, fake_ixel, run_cli,  # noqa: F811
                                                                                     capsys):
     assert run_cli("add", "Review the documentation in README.md")[0] == 0
     refused = (
@@ -45,7 +45,7 @@ def test_answers_and_reviews_still_refuse_a_model_and_a_chain_and_pictures_an_ef
 
 
 @pytest.mark.parametrize("kind", ["answer", "review"])
-def test_the_api_approves_an_answer_or_a_review_with_an_effort(repo, kind):
+def test_the_api_approves_an_answer_or_a_review_with_an_effort(repo, kind):  # noqa: F811
     task = Board.open(repo).create(HUMAN, "Review the documentation", "Check README.md")[0]
     api.op_approve({"project": str(repo), "args": {"task": task.ref, "agent": "gemini", "kind": kind,
                                                    "efforts": {"": "high"}}})
@@ -55,7 +55,7 @@ def test_the_api_approves_an_answer_or_a_review_with_an_effort(repo, kind):
     assert event.data["efforts"] == {"": "high"}
 
 
-def test_the_api_refuses_a_model_or_an_effort_that_does_not_fit_the_run(repo):
+def test_the_api_refuses_a_model_or_an_effort_that_does_not_fit_the_run(repo):  # noqa: F811
     task = Board.open(repo).create(HUMAN, "Review the documentation", "Check README.md")[0]
     refused = (
         {"agent": "gemini", "kind": "answer", "models": ["gemini-3"]},
@@ -78,7 +78,7 @@ def effort_of(argv):
 
 
 @pytest.mark.parametrize("kind", ["answer", "review"])
-def test_command_for_adds_the_effort_only_when_ixel_can_take_it(repo, kind):
+def test_command_for_adds_the_effort_only_when_ixel_can_take_it(repo, kind):  # noqa: F811
     task = Board.open(repo).create(HUMAN, "Review the documentation", "Check README.md")[0]
 
     def argv_for(agent, ixel_roster, effort):
@@ -99,7 +99,7 @@ def test_command_for_adds_the_effort_only_when_ixel_can_take_it(repo, kind):
     assert effort_of(argv_for("gemini", roster("effort"), None)) is None
 
 
-def test_run_passes_the_effort_to_ixel_when_it_can_take_it(repo, fake_ixel, run_cli, monkeypatch):
+def test_run_passes_the_effort_to_ixel_when_it_can_take_it(repo, fake_ixel, run_cli, monkeypatch):  # noqa: F811
     original = asks.roster_from_lists
 
     def with_effort(*args):  # an Ixel MAT that advertises "effort", as the one that takes it does
@@ -116,7 +116,7 @@ def test_run_passes_the_effort_to_ixel_when_it_can_take_it(repo, fake_ixel, run_
     assert call["argv"][call["argv"].index("--effort") + 1] == "high"
 
 
-def test_run_leaves_the_effort_out_when_ixel_cannot_take_it(repo, fake_ixel, run_cli):
+def test_run_leaves_the_effort_out_when_ixel_cannot_take_it(repo, fake_ixel, run_cli):  # noqa: F811
     assert run_cli("add", "List three databases for a small shop")[0] == 0
     code, _, err = run_cli("approve", "T-1", "gemini", "--kind", "answer", "--effort", "high", "--no-fallback", "--yes")
     assert code == 0, err
