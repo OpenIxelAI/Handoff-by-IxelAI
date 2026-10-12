@@ -8,10 +8,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from test_dispatch import fake_ixel, repo, run_cli  # noqa: F401
 
 from handoff import api, asks
 from handoff.board import HUMAN, Board, BoardError
-from test_dispatch import fake_ixel, repo, run_cli  # noqa: F401
 
 
 @pytest.mark.parametrize("kind", ["answer", "review"])
