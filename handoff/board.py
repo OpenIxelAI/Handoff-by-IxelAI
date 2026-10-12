@@ -1355,7 +1355,8 @@ class Board:
         refused with Changed, so what's sealed is what they saw. An edit can name its `models`
         (approvals.check_models): one model runs it, or a chain, biggest first, where the first plans and the
         others do the steps. Its `efforts` say how hard they think (approvals.check_efforts): a level for each
-        model it names, or for the agent's own model when it names none. Its `fallbacks` take over, in turn, when
+        model it names, or for the agent's own model when it names none. An answer or a review names no models,
+        so it can carry one level for its own: efforts {"": level}. Its `fallbacks` take over, in turn, when
         a model is out of usage (approvals.check_fallbacks; rankings.fallbacks works them out)."""
         actor = check_name(actor, "actor")
         self._require_human(actor, "approve tasks for the worker")
@@ -1381,8 +1382,8 @@ class Board:
                 raise BoardError(f"Models are 1 to {approvals.MAX_MODELS} model names, like claude-opus-5-5 or "
                                  "haiku, each named once.")
         if efforts is not None:
-            if kind not in approvals.MODEL_KINDS:
-                raise BoardError("Only a change can say how hard its models think.")
+            if kind not in approvals.EFFORT_KINDS:
+                raise BoardError("Only a change, an answer or a review can say how hard its model thinks.")
             efforts = approvals.check_efforts(efforts, models)
             if efforts is None:
                 raise BoardError("Each effort is one word, like high, for one of the models the run names (or for the "
