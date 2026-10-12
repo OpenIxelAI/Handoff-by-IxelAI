@@ -353,6 +353,9 @@ def test_an_edit_run_that_cant_start_says_why(project, monkeypatch, tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.setenv("PATH", str(empty))
+    # Where the sandbox can run (Linux with bwrap, macOS), its check starts a test run of its own: not this test's
+    from handoff import sandbox
+    monkeypatch.setattr(sandbox, "check", lambda needs=(): "sandbox")
     monkeypatch.setattr(api.subprocess, "Popen", lambda *a, **k: pytest.fail("started a run that can't start"))
     code, message = error("run.start", project, task="T-1")
     assert code == "invalid" and "`claude` command isn't on PATH" in message and "still approved" in message
