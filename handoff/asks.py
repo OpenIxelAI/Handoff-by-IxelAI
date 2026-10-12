@@ -14,7 +14,8 @@ Ixel MAT, which holds your API keys and talks to the models:
 Like the panel (ixel.py), the task's text only ever goes on stdin; the command line is fixed apart
 from names Handoff checked (an agent's board name, a provider, a branch, relative file paths), and
 Ixel is started in the project folder. Ixel's output is other models' words: the board keeps it
-sanitized and clipped, and the full answer goes to .handoff/outputs/T-N/answer.md.
+sanitized and clipped, and the full answer goes to .handoff/outputs/T-N/answer.md. What an answer or a
+review used, as Ixel reports it, is recorded with the run (a cost only for API billing: _ixel_usage).
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from handoff import approvals, gitwork
+from handoff import approvals, gitwork, usage
 from handoff.board import HUMAN, Board, BoardError, Event, Task, run_kind, safe_name
 from handoff.fence import numbered
 from handoff.ixel import child_env, find_ixel
@@ -450,8 +451,12 @@ def _started(board: Board, root: Path, task: Task, approval: Event, runner: Runn
                                      else _answer(data, root, outputs, reads))
     except RunProblem as exc:
         return fail(str(exc))
+    used = None
+    if kind in ("answer", "review"):  # (a picture run's usage isn't recorded)
+        used, spent = _ixel_usage(data)
+        left = f"{left} {spent}" if left else spent
     try:
-        finished = board.finish_run(agent, task.id, return_to, done, left, verify, files)
+        finished = board.finish_run(agent, task.id, return_to, done, left, verify, files, extra={"usage": used})
     except BoardError as exc:  # (it can't stay in progress: nobody is running it now)
         return fail(f"The board didn't take the result: {exc} The result is in {outputs.as_posix()}.")
     return RunResult(finished, True, f"handed to {return_to}")
@@ -524,6 +529,47 @@ def _answer(data: dict, root: Path, outputs: Path, reads: str) -> tuple[str, str
         swapped, reads, *notes,
         f"The full answer is in {path.as_posix()}." if cut else "") if n)
     return done, left, f"Read it here, or in {path.as_posix()}.", [path.as_posix()]
+
+
+def _ixel_usage(data: dict) -> tuple[dict | None, str]:
+    """What an answer's or a review's run used, from the one call record `ixel ask --json` may return as
+    "usage" (other models' words: all of it is checked). The usage to record (usage.check's shape, None when
+    there's none that's usable) and a sentence for the handback. A cost is kept for API billing only: a
+    subscription's or a local model's run costs nothing."""
+    raw = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    billing = raw.get("billing") if isinstance(raw.get("billing"), str) else ""
+    if billing not in ("plan", "api", "local", "unknown"):
+        billing = "unknown"
+    cost = usage._cost(raw.get("cost_usd")) if billing == "api" else None
+    used = None
+    for name in (raw.get("model"), raw.get("agent")):  # the model's name, else the agent's
+        if not isinstance(name, str) or find_secret(name):  # (a name like a key would be refused with the text)
+            continue
+        used = usage.check({"models": {name: {"in": raw.get("input_tokens"), "out": raw.get("output_tokens"),
+                                              "cache_read": raw.get("cache_read_tokens"),
+                                              "cache_write": raw.get("cache_write_tokens"), "cost": cost}}})
+        if used:
+            break
+    if used:
+        name, info = next(iter(used["models"].items()))  # (what's said comes from here, not from `raw`)
+        if cost is None and not (info["in"] or info["out"] or info["cache_read"] or info["cache_write"]):
+            used = None  # no tokens and no cost: nothing to record
+    if not used:
+        return None, ("Used: on your subscription, no usage reported." if billing == "plan"
+                      else "Used: no usage reported.")
+    cached = info["cache_read"] + info["cache_write"]
+    said = f"Used: {name}: {usage.tokens(info['in'])} in, {usage.tokens(info['out'])} out"
+    said += f", {usage.tokens(cached)} cached" if cached else ""
+    said += " (estimated)" if raw.get("estimated") is True else ""
+    if billing == "plan":
+        said += " · on your subscription"
+    elif billing == "local":
+        said += " · on your computer"
+    elif billing == "api" and cost is not None:
+        said += f" · ${info['cost']:.4f}"
+    else:
+        said += " · cost not reported"
+    return used, said + "."
 
 
 def _pictures(data: dict, root: Path, outputs: Path, reads: str) -> tuple[str, str, str, list[str]]:
