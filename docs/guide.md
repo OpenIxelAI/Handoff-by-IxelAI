@@ -268,6 +268,11 @@ costs tokens: the biggest model at max effort is the dearest part of a chain, so
 needs it. Claude Code's "ultracode" isn't an effort level (it's how a session runs several agents at once), so
 the worker doesn't take it.
 
+An answer or a review (`--kind answer` or `--kind review`) can take `--effort LEVEL` too: one level, with no
+`--model` or `--chain` (Ixel MAT picks the model). It is passed to Ixel MAT when Ixel MAT can take it. With
+fallbacks it applies to the first model only, on an Ixel MAT that supports that. Otherwise the run goes on at the
+model's own setting.
+
 The model, or the chain, and each model's effort are sealed into the approval with the rest, so a board can't
 move a run to a bigger, dearer model or turn one up. Codex takes `--model` too; a chain plans on claude.
 

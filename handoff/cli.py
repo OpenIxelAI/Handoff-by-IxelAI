@@ -1556,7 +1556,8 @@ def cmd_approve(argv: list[str]) -> int:
                         help="for an edit, how hard the model thinks, in the agent's own levels: claude takes low, "
                              "medium, high, xhigh or max; codex minimal, low, medium, high, xhigh, max or ultra; the "
                              "others, as handoff agents --json lists them (default: the model's own). With --chain, "
-                             "for each model that has no effort of its own")
+                             "for each model that has no effort of its own. For an answer or a review, one level, "
+                             "passed to Ixel MAT, which applies it when it can")
     parser.add_argument("--no-fallback", action="store_true",
                         help="stop the run when a model is out of usage, instead of going on with the next best "
                              "model you have (handoff rankings shows the order)")
@@ -1602,15 +1603,18 @@ def cmd_approve(argv: list[str]) -> int:
         raise CommandError(f"Only {names(AGENTS)} can change files through the worker. To have "
                            f"{agent} answer, review your changes or make pictures, add --kind answer, "
                            "review or image.")
-    if (models or efforts) and args.kind != "edit":
-        parser.fail("--model, --chain and --effort are for an edit; the models in Ixel MAT have their own (ixel "
-                    "model).")
+    if models and args.kind != "edit":
+        parser.fail("--model and --chain are for an edit; the models in Ixel MAT have their own (ixel model).")
+    if efforts and args.kind == "image":
+        parser.fail("--effort is for an edit, an answer or a review.")
     if models and len(models) > 1 and agent not in CHAIN_AGENTS:
         parser.fail(f"A chain of models runs on {' or '.join(CHAIN_AGENTS)}. For {agent}, name one with --model.")
     if models and len(models) > 1 and step_agent(models[0], agent)[0] != agent:
         parser.fail(f"A chain's first model plans, on {agent}; the models after it can run on other agents, like "
                     "ollama:qwen3:4b-instruct.")
-    if effort_problem(agent, efforts):
+    # (an answer's or a review's model is one of Ixel MAT's, whose levels Ixel MAT checks; the board only checks
+    # that the level is one word)
+    if args.kind == "edit" and effort_problem(agent, efforts):
         parser.fail(effort_problem(agent, efforts))
     if args.kind != "edit" and board_name(agent):  # (asks Ixel MAT who it has; no model is asked anything)
         from handoff import asks
@@ -1653,7 +1657,12 @@ def cmd_approve(argv: list[str]) -> int:
             console.print(f"\n  [{C['gold']}]⚠[/] The task changed while you were reading it; here it is again.",
                           soft_wrap=True)
     if args.kind != "edit":
-        _ok(f"Approved {task.ref} for {agent} to {KIND_VERBS[args.kind]}, once, through Ixel MAT.")
+        level = (efforts or {}).get("")
+        how_hard = f", at {level} effort" if level else ""
+        _ok(f"Approved {task.ref} for {agent} to {KIND_VERBS[args.kind]}{how_hard}, once, through Ixel MAT.")
+        if level:
+            _hint("Ixel MAT applies the effort only if it can; when it can't, the run goes on at the model's own "
+                  "setting." + (" With fallbacks, it applies to the first model only." if fallbacks else ""))
         if fallbacks:
             _hint(f"If {agent} hits its usage limit, {', then '.join(fallbacks)} take over, in turn.")
         _hint(f"Nothing in the project changes; the result goes to .handoff/outputs/{task.ref} and the task to "

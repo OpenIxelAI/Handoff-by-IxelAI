@@ -400,9 +400,10 @@ def _merge_into(root: Path, task: Task, events: list[Event]) -> str | None:
 # task's branch into their current branch (op merge: args.task, and optional args.shown as approve's).
 # any-worker: the worker runs more agents than claude and codex (a board's `workers`, each with its `label`,
 # `access`, `local` and `needs_ok`/`enabled`: adapters.py), op models lists the models one can run, and op
-# agents.enable lets one run, or stops it (args.agent, args.on).
+# agents.enable lets one run, or stops it (args.agent, args.on). ask-effort: an answer or a review can carry
+# approve's args.efforts {"": level}, which goes to Ixel MAT when it can take it.
 FEATURES = ("run-target", "approve-shown", "run-models", "run-usage", "run-effort", "run-merge", "any-worker",
-            "run-fallback")
+            "run-fallback", "ask-effort")
 
 
 def _workers() -> dict:
@@ -621,7 +622,9 @@ def op_approve(request: dict) -> dict:
     if efforts is not None and not isinstance(efforts, dict):
         raise ApiError("usage", 'args.efforts must be an object: a level for each model, like {"claude-opus-5-5": '
                                 '"high"}, or {"": "high"} for the agent\'s own model.')
-    if efforts and effort_problem(agent, efforts):
+    # (an answer or a review takes {"": level} for its Ixel MAT model, whose levels Ixel MAT checks; Board.approve
+    # refuses one for a model it names, and any for a picture)
+    if kind == "edit" and efforts and effort_problem(agent, efforts):
         raise BoardError(effort_problem(agent, efforts))
     fallbacks = args.get("fallbacks")  # (the ones `fallbacks` suggested and the window showed you)
     if fallbacks is not None and not isinstance(fallbacks, list):

@@ -82,7 +82,7 @@ class IxelRoster:
     agents: list[dict]       # `ixel ask --list`: name, label, model, ready, images
     providers: list[dict]    # `ixel image --list`: name, label, model, ready, why
     problem: str | None = None
-    features: tuple[str, ...] = ()  # what this Ixel's `ask` can do: "new-files"
+    features: tuple[str, ...] = ()  # what this Ixel's `ask` can do: "new-files", "head", "effort", "effort-first"
 
 
 def _json_out(runner: Runner, command: list[str], root: Path, timeout: float) -> dict | None:
@@ -297,17 +297,31 @@ def target_plan(target: dict, roster: IxelRoster | None) -> tuple[list[str], str
     return ["--base", target["base"], "--head", target["head"]], clean_line(target["label"])
 
 
+def _effort_flags(agent: str, effort: str | None, roster: IxelRoster | None) -> list[str]:
+    """`--effort LEVEL` for `ixel ask`, when the run has one and this Ixel can take it: it lists "effort"
+    among its features and, for several agents (`--agent a,b`, from fallbacks), "effort-first" too (the level
+    is the first agent's only; without it Ixel refuses --effort with several agents). [] otherwise: the run
+    goes on at the model's own setting."""
+    if not effort or roster is None or "effort" not in roster.features:
+        return []
+    if "," in agent and "effort-first" not in roster.features:
+        return []
+    return ["--effort", effort]
+
+
 def command_for(ixel: str, root: Path, task: Task, kind: str, agent: str, roster: IxelRoster | None,
-                outputs: Path, target: dict | None = None) -> tuple[list[str], str, str]:
+                outputs: Path, target: dict | None = None, effort: str | None = None) -> tuple[list[str], str, str]:
     """The ixel command line, what goes on stdin, and what the run reads (a sentence for the handback).
-    `target`: a review's two commits, sealed in its approval (approvals.check_target)."""
+    `target`: a review's two commits, sealed in its approval (approvals.check_target). `effort`: how hard an
+    answer's or a review's model thinks, sealed in its approval; it's left out when this Ixel can't take it
+    (_effort_flags)."""
     # The files the task names: in its title, or its body too unless the body is the whole request it was
     # split from (`handoff dispatch`), which names other agents' files
     own = task.title if DISPATCH_BODY in task.body.split("\n", 1)[0] else f"{task.title}\n{task.body}"
     if kind == "answer":
         files = named_files(own, root)
         stdin = f"{ANSWER_BRIEF}\n\n{_task_text(task)}"
-        argv = [ixel, "ask", "--agent", agent, "--json"]
+        argv = [ixel, "ask", "--agent", agent, "--json", *_effort_flags(agent, effort, roster)]
         for name in files:
             argv += ["-f", name]
         return argv + ["-"], stdin[:MAX_QUESTION_CHARS], (f"It read {', '.join(files)}." if files else "")
@@ -320,8 +334,8 @@ def command_for(ixel: str, root: Path, task: Task, kind: str, agent: str, roster
         else:
             flags, what = review_plan(root, roster)
         stdin = f"{(FILES_REVIEW_BRIEF if files else REVIEW_BRIEF).format(what=what)}\n\n{_task_text(task)}"
-        return ([ixel, "ask", "--agent", agent, "--json", *flags, "-"], stdin[:MAX_QUESTION_CHARS],
-                f"It reviewed {what}.")
+        return ([ixel, "ask", "--agent", agent, "--json", *_effort_flags(agent, effort, roster), *flags, "-"],
+                stdin[:MAX_QUESTION_CHARS], f"It reviewed {what}.")
     if kind == "image":
         provider = image_provider(agent, roster or IxelRoster([], []))
         if provider is None:
@@ -381,17 +395,18 @@ def _started(board: Board, root: Path, task: Task, approval: Event, runner: Runn
         target = approvals.check_target(approval.data["target"])
         if target is None:
             return fail("The commits this review was approved for aren't readable.")
-    from handoff.board import run_fallbacks
+    from handoff.board import run_efforts, run_fallbacks
     fallbacks = run_fallbacks(approval) if kind in ("answer", "review") else []
+    effort = run_efforts(approval).get("") if kind in ("answer", "review") else None
     try:
-        if (kind in ("image", "review") or fallbacks) and roster is None:
+        if (kind in ("image", "review") or fallbacks or effort) and roster is None:
             roster = ixel_roster(root, runner)
         asked = agent
         if fallbacks:  # Ixel asks the next of them when one is out of usage (`ixel ask --agent a,b`)
             ready = {safe_name(a.get("name")) for a in roster.agents if a.get("ready")} if roster else set()
             names = [agent] + [f.partition(":")[0] for f in fallbacks]
             asked = ",".join(dict.fromkeys(n for n in names if n == agent or n in ready))
-        command, stdin, reads = command_for(ixel, root, task, kind, asked, roster, outputs, target)
+        command, stdin, reads = command_for(ixel, root, task, kind, asked, roster, outputs, target, effort)
         output_folder(root, outputs)
     except RunProblem as exc:
         return fail(str(exc))
