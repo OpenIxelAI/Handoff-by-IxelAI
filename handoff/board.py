@@ -567,10 +567,16 @@ def _grantee() -> str | None:
     return "*" + account[1] if account else _env_account()
 
 
+# Accounts a new folder can have its own entries for (Python's mkdir with a mode gives SYSTEM, Administrators
+# and OWNER RIGHTS full control on Windows), by SID, since Windows names them in its own language
+_DEFAULT_GRANTEES = ("*S-1-5-18", "*S-1-5-32-544", "*S-1-3-4")
+
+
 def _acl_command(folder: Path, grantee: str) -> list[str]:
-    """icacls: no inheritance from the parent, and only this account with full control, which the files and
-    folders inside inherit."""
-    return [system32("icacls.exe"), str(folder), "/inheritance:r", "/grant:r", f"{grantee}:(OI)(CI)F"]
+    """icacls: no inheritance from the parent, no entries of its own for the accounts a new folder can come with,
+    and only this account with full control, which the files and folders inside inherit."""
+    removals = [word for sid in _DEFAULT_GRANTEES for word in ("/remove:g", sid)]
+    return [system32("icacls.exe"), str(folder), "/inheritance:r", *removals, "/grant:r", f"{grantee}:(OI)(CI)F"]
 
 
 def _one_line(text: str | None) -> str:

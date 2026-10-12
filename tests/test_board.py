@@ -792,7 +792,8 @@ def test_the_acl_command_is_icacls_with_inheritance_off_and_only_the_account(tmp
     folder = tmp_path / ".handoff"
     command = board_module._acl_command(folder, MY_GRANTEE)
     assert command[0].replace("\\", "/") == "D:/Windows/System32/icacls.exe"
-    assert command[1:] == [str(folder), "/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+    assert command[1:] == [str(folder), "/inheritance:r", "/remove:g", "*S-1-5-18", "/remove:g", "*S-1-5-32-544",
+        "/remove:g", "*S-1-3-4", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
 
 
 def test_a_folder_gets_one_quiet_icacls_command_and_a_file_in_it_none(tmp_path, windows, capsys):
@@ -807,7 +808,8 @@ def test_a_folder_gets_one_quiet_icacls_command_and_a_file_in_it_none(tmp_path, 
     assert whoami[1:] == ["/user", "/fo", "csv", "/nh"]
     for command in (whoami, argv):  # by full path, so a program in the project folder isn't what runs
         assert isinstance(command, list) and "/System32/" in command[0].replace("\\", "/")
-    assert argv[1:] == [str(folder), "/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+    assert argv[1:] == [str(folder), "/inheritance:r", "/remove:g", "*S-1-5-18", "/remove:g", "*S-1-5-32-544",
+        "/remove:g", "*S-1-3-4", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
     for _, options in windows.calls:
         assert not options.get("shell")
         assert options["creationflags"] == 0x08000000  # CREATE_NO_WINDOW
