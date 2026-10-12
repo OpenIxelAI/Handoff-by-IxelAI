@@ -270,8 +270,9 @@ the worker doesn't take it.
 
 An answer or a review (`--kind answer` or `--kind review`) can take `--effort LEVEL` too: one level, with no
 `--model` or `--chain` (Ixel MAT picks the model). It is passed to Ixel MAT when Ixel MAT can take it. With
-fallbacks it applies to the first model only, on an Ixel MAT that supports that. Otherwise the run goes on at the
-model's own setting.
+fallbacks it applies to the first model only, on an Ixel MAT that supports that. Otherwise the run still goes on, at
+the model's own setting, and the handback says why: update Ixel MAT (`ixel update`), or Handoff couldn't read Ixel
+MAT's list of models.
 
 The model, or the chain, and each model's effort are sealed into the approval with the rest, so a board can't
 move a run to a bigger, dearer model or turn one up. Codex takes `--model` too; a chain plans on claude.

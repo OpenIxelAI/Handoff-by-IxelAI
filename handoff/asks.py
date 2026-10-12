@@ -301,7 +301,7 @@ def _effort_flags(agent: str, effort: str | None, roster: IxelRoster | None) -> 
     """`--effort LEVEL` for `ixel ask`, when the run has one and this Ixel can take it: it lists "effort"
     among its features and, for several agents (`--agent a,b`, from fallbacks), "effort-first" too (the level
     is the first agent's only; without it Ixel refuses --effort with several agents). [] otherwise: the run
-    goes on at the model's own setting."""
+    goes on at the model's own setting, and the handback says so (_effort_note)."""
     if not effort or roster is None or "effort" not in roster.features:
         return []
     if "," in agent and "effort-first" not in roster.features:
@@ -309,12 +309,27 @@ def _effort_flags(agent: str, effort: str | None, roster: IxelRoster | None) -> 
     return ["--effort", effort]
 
 
+def _effort_note(agent: str, effort: str | None, roster: IxelRoster | None) -> str:
+    """A sentence for the handback when the run has an effort but _effort_flags leaves it out, and why (so the
+    run's own setting isn't a surprise). "" when there's no effort, or it is passed."""
+    if not effort or _effort_flags(agent, effort, roster):
+        return ""
+    level = clean_line(effort)[:20]
+    ran = f"It ran at the model's own effort, not {level}:"
+    if roster is None or roster.problem:  # the list of models couldn't be read, so there are no features
+        return (f"{ran} Handoff couldn't read Ixel MAT's list of models (`ixel ask --list`), so it didn't pass "
+                "--effort.")
+    if "effort" not in roster.features:
+        return f"{ran} this Ixel MAT can't take --effort (update it with: ixel update)."
+    return f"{ran} this Ixel MAT can't take --effort with fallbacks (update it with: ixel update)."
+
+
 def command_for(ixel: str, root: Path, task: Task, kind: str, agent: str, roster: IxelRoster | None,
                 outputs: Path, target: dict | None = None, effort: str | None = None) -> tuple[list[str], str, str]:
     """The ixel command line, what goes on stdin, and what the run reads (a sentence for the handback).
     `target`: a review's two commits, sealed in its approval (approvals.check_target). `effort`: how hard an
     answer's or a review's model thinks, sealed in its approval; it's left out when this Ixel can't take it
-    (_effort_flags)."""
+    (_effort_flags), and the handback then says so (_effort_note)."""
     # The files the task names: in its title, or its body too unless the body is the whole request it was
     # split from (`handoff dispatch`), which names other agents' files
     own = task.title if DISPATCH_BODY in task.body.split("\n", 1)[0] else f"{task.title}\n{task.body}"
@@ -407,6 +422,8 @@ def _started(board: Board, root: Path, task: Task, approval: Event, runner: Runn
             names = [agent] + [f.partition(":")[0] for f in fallbacks]
             asked = ",".join(dict.fromkeys(n for n in names if n == agent or n in ready))
         command, stdin, reads = command_for(ixel, root, task, kind, asked, roster, outputs, target, effort)
+        # An effort that couldn't be passed doesn't fail the run: it goes on at the model's own, and says so
+        reads = " ".join(s for s in (reads, _effort_note(asked, effort, roster)) if s)
         output_folder(root, outputs)
     except RunProblem as exc:
         return fail(str(exc))
