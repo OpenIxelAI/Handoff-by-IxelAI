@@ -16,6 +16,21 @@ in your project, and Handoff never listens on the network.
 **[ixelai.com/handoff](https://ixelai.com/handoff/)** · [Docs](https://ixelai.com/docs/handoff/) ·
 [Privacy](https://ixelai.com/docs/privacy/)
 
+## What it is, and what it isn't
+
+- No account, no telemetry and no server of ours. Handoff never listens on the network. An agent run sends its
+  task to that agent's company, a run on a local model talks to that model's server, and `handoff update` and
+  `handoff rankings update` reach GitHub.
+- It never pushes, and it never merges on its own. You merge a finished task yourself, with `handoff merge` or
+  the Merge button in the Ixel app, into the branch you have out.
+- An agent runs a task only after you approve it, and an approval is good for one run. Handoff doesn't pick up
+  work on its own.
+- It isn't a model or a hosted service, and it calls no model itself. It runs the agents, subscriptions, API
+  keys and local models you already have.
+- The sandbox that lets an agent run your tests and builds needs Linux with bubblewrap. On macOS and Windows,
+  Claude Code, OpenCode and local models only edit files for now. Kimi, Cline and OpenClaw run only once you
+  enable them, and then with their own permissions: commands as you, with the network.
+
 ## Install
 
 Windows, in a normal PowerShell window (not "Run as administrator"):
@@ -90,6 +105,13 @@ handoff approve T-7 claude --chain claude-opus-5-5,claude-sonnet-5-5,ollama:qwen
 **On macOS and Windows the worker is edit-only for now.** Claude Code, OpenCode and local models change files
 but run no commands, tests or builds, and Codex needs the sandbox. The sandbox that runs your tests and builds
 needs Linux with bubblewrap.
+
+### If a run fails
+
+- `handoff doctor` shows whether each worker is ready, and whether it found that agent's login.
+- `handoff show T-N` shows the task's history, including why a run failed.
+- A run that finds no login doesn't start, and the task stays approved: sign in, then `handoff run T-N`.
+- The guide's [Troubleshooting](docs/guide.md#troubleshooting) section has more.
 
 ## Privacy
 
