@@ -22,16 +22,18 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-UPDATED = "2026-10-12"
+UPDATED = "2026-10-19"
 SOURCES = (
-    ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Oct 10 2026", "https://benchlm.ai/coding"),
+    ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Oct 19 2026", "https://benchlm.ai/coding"),
     ("BenchLM SWE-bench Verified, open models included, Oct 10 2026",
      "https://benchlm.ai/benchmarks/swe-bench-verified"),
     ("Morph: best open-source LLMs (Terminal-Bench 2.1, GPQA, HLE), Oct 3 2026",
      "https://www.morphllm.com/best-open-source-llm"),
     ("Morph: best Ollama models, Sep 29 2026", "https://www.morphllm.com/best-ollama-models"),
     ("Vellum open LLM leaderboard, Jul 24 2026", "https://www.vellum.ai/open-llm-leaderboard"),
-    ("Arena (LMArena) text and webdev leaderboards", "https://arena.ai/leaderboard"),
+    ("Arena (LMArena) text and webdev leaderboards, text updated Oct 15 2026", "https://arena.ai/leaderboard"),
+    ("Gemini 4 Argon access: Gemini API (gemini-4-argon), Antigravity on AI Pro and Ultra, Oct 13-16 2026",
+     "https://smartscope.blog/en/blog/antigravity-gemini-4-argon-availability-paid-pro-requirements-2026/"),
     ("Artificial Analysis text-to-image arena", "https://artificialanalysis.ai/image/leaderboard/text-to-image"),
     ("Artificial Analysis text-to-video arena", "https://artificialanalysis.ai/video/leaderboard/text-to-video"),
     ("Handoff's own runs: Fable plans best, Haiku and qwen3:4b-instruct do small steps well (2026-10-11)", ""),
@@ -68,13 +70,15 @@ RANKS: dict[str, list[str]] = {
         "claude:claude-haiku-5-5", "ollama:deepseek-r1:14b",
     ],
     "review": [
-        "claude:claude-opus-5-5", "codex:gpt-6-astra", "claude:claude-fable-5-1", "gemini:gemini-3.1-pro-preview",
-        "kimi:kimi-k3", "grok:grok-4.7", "claude:claude-sonnet-5-5", "antigravity:gemini-3.1-pro-preview",
+        "claude:claude-opus-5-5", "codex:gpt-6-astra", "claude:claude-fable-5-1", "gemini:gemini-4-argon",
+        "gemini:gemini-3.1-pro-preview", "kimi:kimi-k3", "grok:grok-4.7", "claude:claude-sonnet-5-5",
+        "antigravity:gemini-4-argon", "antigravity:gemini-3.1-pro-preview",
         "ollama:gpt-oss:120b", "ollama:qwen3.6:27b", "local:",
     ],
     "writing": [
-        "claude:claude-opus-5-5", "claude:claude-fable-5-1", "codex:gpt-6-astra", "gemini:gemini-3.1-pro-preview",
-        "kimi:kimi-k3", "grok:grok-4.7", "claude:claude-sonnet-5-5", "antigravity:gemini-3.1-pro-preview",
+        "gemini:gemini-4-argon", "claude:claude-opus-5-5", "claude:claude-fable-5-1", "codex:gpt-6-astra",
+        "gemini:gemini-3.1-pro-preview", "kimi:kimi-k3", "grok:grok-4.7", "claude:claude-sonnet-5-5",
+        "antigravity:gemini-4-argon", "antigravity:gemini-3.1-pro-preview",
         "ollama:qwen3.6:27b", "ollama:gemma4:12b", "local:",
     ],
     "images": [
@@ -93,6 +97,9 @@ TIERS: dict[str, list[dict[str, str]]] = {
         {"model": "claude:claude-fable-5-1", "note": "the best planner; the dearest, so for hard tasks"},
         {"model": "claude:claude-opus-5-5", "note": "plans and reviews well at about 40% of Fable's price"},
         {"model": "codex:gpt-6-astra", "note": "on a ChatGPT plan"},
+        {"model": "antigravity:gemini-4-argon",
+         "note": "Google's newest, first on Arena's text board: AI Pro (its own weekly quota) or Ultra; for answers "
+                 "and reviews through Ixel MAT, not an edit worker here"},
         {"model": "antigravity:gemini-3.1-pro-preview",
          "note": "Google's; for answers and reviews through Ixel MAT, not an edit worker here"},
         {"model": "kimi:kimi-k3", "note": "open (about 2.8T, 104B active): the best open planner; Kimi's own "
@@ -143,7 +150,7 @@ ALIASES = {"claude": {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "s
 # COST is a price and TIERS is a role: a model can be top-tier and cheap (Gemini 3.1 Pro, $2, like Grok 4.7 and
 # Sol), so a price never says which tier a model is in; "the same or less" above means price only. GPT-6 Sol has no
 # price reported yet, so it isn't held back by one (and crew_auto treats it as on a plan). Add its price here
-# when there is one, as the same unit; don't guess it.
+# when there is one, as the same unit; don't guess it. Gemini 4 Argon (2026-10-19) has no price reported either.
 COST = {"claude-fable-5-1": 95, "claude-opus-5-5": 38, "claude-sonnet-5-5": 19, "claude-haiku-5-5": 1,
         "gpt-6-astra": 100, "grok-4.7": 20, "gemini-3.1-pro-preview": 20, "gpt-6.1-sol": 20, "gpt-6-luna": 1}
 # The model an agent runs when the approval names none
