@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-19",
+ "updated": "2026-10-26",
  "ranks": {
   "coding": [
    "claude:claude-sonnet-5-5",
@@ -98,7 +98,7 @@
    },
    {
     "model": "antigravity:gemini-4-argon",
-    "note": "Google's newest, first on Arena's text board: AI Pro (its own weekly quota) or Ultra; for answers and reviews through Ixel MAT, not an edit worker here"
+    "note": "Google's newest, first on Arena's text board and 6th on BenchLM coding: AI Pro (its own weekly quota) or Ultra; for answers and reviews through Ixel MAT, not an edit worker here"
    },
    {
     "model": "antigravity:gemini-3.1-pro-preview",
