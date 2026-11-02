@@ -22,9 +22,9 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-UPDATED = "2026-10-26"
+UPDATED = "2026-11-02"
 SOURCES = (
-    ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Oct 25 2026", "https://benchlm.ai/coding"),
+    ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Oct 29 2026", "https://benchlm.ai/coding"),
     ("BenchLM SWE-bench Verified, open models included, Oct 10 2026",
      "https://benchlm.ai/benchmarks/swe-bench-verified"),
     ("Morph: best open-source LLMs (Terminal-Bench 2.1, GPQA, HLE), Oct 3 2026",
@@ -34,8 +34,10 @@ SOURCES = (
     ("Arena (LMArena) text and webdev leaderboards, text updated Oct 15 2026", "https://arena.ai/leaderboard"),
     ("Gemini 4 Argon access: Gemini API (gemini-4-argon), Antigravity on AI Pro and Ultra, Oct 13-16 2026",
      "https://smartscope.blog/en/blog/antigravity-gemini-4-argon-availability-paid-pro-requirements-2026/"),
-    ("Gemini 4 Argon API price: $4 in, $20 out after a $2/$10 introductory offer, Oct 2026",
+    ("Gemini 4 Argon API price: $4 in, $20 out from Dec 1 2026, after a $2/$10 introductory offer",
      "https://www.eesel.ai/blog/gemini-4-argon-pricing"),
+    ("Gemini 4 Carbon (Oct 28 2026), 3rd on BenchLM coding: not out yet (no API id; cyber defenders first), so "
+     "not ranked", "https://nerdschalk.com/gemini-4-carbon-public-release-date-what-google-has-announced/"),
     ("Artificial Analysis text-to-image arena", "https://artificialanalysis.ai/image/leaderboard/text-to-image"),
     ("Artificial Analysis text-to-video arena", "https://artificialanalysis.ai/video/leaderboard/text-to-video"),
     ("Handoff's own runs: Fable plans best, Haiku and qwen3:4b-instruct do small steps well (2026-10-11)", ""),
@@ -154,7 +156,7 @@ ALIASES = {"claude": {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "s
 # Sol), so a price never says which tier a model is in; "the same or less" above means price only. GPT-6 Sol has no
 # price reported yet, so it isn't held back by one (and crew_auto treats it as on a plan). Add its price here
 # when there is one, as the same unit; don't guess it. Gemini 4 Argon: $4 in, $20 out (2026-10-26), its standard
-# price: Google's introductory $2/$10 has no end date, so it's left out.
+# price from Dec 1 2026 (the introductory $2/$10 ends Nov 30).
 COST = {"claude-fable-5-1": 95, "claude-opus-5-5": 38, "claude-sonnet-5-5": 19, "claude-haiku-5-5": 1,
         "gpt-6-astra": 100, "grok-4.7": 20, "gemini-3.1-pro-preview": 20, "gemini-4-argon": 40, "gpt-6.1-sol": 20,
         "gpt-6-luna": 1}
