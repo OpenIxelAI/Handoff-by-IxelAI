@@ -22,22 +22,24 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-UPDATED = "2026-11-02"
+UPDATED = "2026-11-09"
 SOURCES = (
-    ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Oct 29 2026", "https://benchlm.ai/coding"),
+    ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Nov 7 2026", "https://benchlm.ai/coding"),
     ("BenchLM SWE-bench Verified, open models included, Oct 10 2026",
      "https://benchlm.ai/benchmarks/swe-bench-verified"),
     ("Morph: best open-source LLMs (Terminal-Bench 2.1, GPQA, HLE), Oct 3 2026",
      "https://www.morphllm.com/best-open-source-llm"),
     ("Morph: best Ollama models, Sep 29 2026", "https://www.morphllm.com/best-ollama-models"),
     ("Vellum open LLM leaderboard, Jul 24 2026", "https://www.vellum.ai/open-llm-leaderboard"),
-    ("Arena (LMArena) text and webdev leaderboards, text updated Oct 15 2026", "https://arena.ai/leaderboard"),
+    ("Arena (LMArena) text and webdev leaderboards, Nov 6 2026 (via Developers Digest)", "https://arena.ai/leaderboard"),
     ("Gemini 4 Argon access: Gemini API (gemini-4-argon), Antigravity on AI Pro and Ultra, Oct 13-16 2026",
      "https://smartscope.blog/en/blog/antigravity-gemini-4-argon-availability-paid-pro-requirements-2026/"),
     ("Gemini 4 Argon API price: $4 in, $20 out from Dec 1 2026, after a $2/$10 introductory offer",
      "https://www.eesel.ai/blog/gemini-4-argon-pricing"),
-    ("Gemini 4 Carbon (Oct 28 2026), 3rd on BenchLM coding: not out yet (no API id; cyber defenders first), so "
-     "not ranked", "https://nerdschalk.com/gemini-4-carbon-public-release-date-what-google-has-announced/"),
+    ("Kimi K3.1 Pro (Oct 23 2026): 10th on Arena webdev (preliminary), above GPT-6 Sol; BenchLM's best open model",
+     "https://www.developersdigest.tech/benchmarks/lmarena"),
+    ("Gemini 4 Carbon (Oct 28 2026), 3rd on BenchLM coding and 1st on Arena text: not out yet (no API id; cyber "
+     "defenders first), so not ranked", "https://nerdschalk.com/gemini-4-carbon-public-release-date-what-google-has-announced/"),
     ("Artificial Analysis text-to-image arena", "https://artificialanalysis.ai/image/leaderboard/text-to-image"),
     ("Artificial Analysis text-to-video arena", "https://artificialanalysis.ai/video/leaderboard/text-to-video"),
     ("Handoff's own runs: Fable plans best, Haiku and qwen3:4b-instruct do small steps well (2026-10-11)", ""),
@@ -62,7 +64,7 @@ JOBS = {
 RANKS: dict[str, list[str]] = {
     "coding": [
         "claude:claude-sonnet-5-5", "claude:claude-opus-5-5", "claude:claude-fable-5-1", "codex:gpt-6-astra",
-        "codex:gpt-6.1-sol", "grok:grok-4.7", "codex:gpt-6-sol", "codex:gpt-5.5", "kimi:kimi-k3",
+        "codex:gpt-6.1-sol", "grok:grok-4.7", "codex:gpt-6-sol", "kimi:kimi-k3.1-pro", "codex:gpt-5.5", "kimi:kimi-k3",
         "cline:claude-sonnet-5-5", "ollama:qwen3.6:27b", "ollama:qwen3.6:35b", "opencode:opencode/step-5-preview-free",
         "claude:claude-haiku-5-5", "ollama:gpt-oss:120b", "ollama:qwen3-coder:30b", "codex:gpt-6-luna",
         "ollama:gpt-oss:20b", "ollama:granite4.2:8b", "ollama:qwen3.5:9b", "ollama:qwen2.5-coder:14b",
