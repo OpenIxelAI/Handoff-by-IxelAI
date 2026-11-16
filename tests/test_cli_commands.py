@@ -1281,6 +1281,6 @@ def test_approve_shows_who_takes_over_at_a_usage_limit_and_seals_it(project, cap
 
 def test_rankings(project, capsys):
     code, out, _ = run(capsys, "rankings", "--job", "coding")
-    assert code == 0 and "1. claude-sonnet-5-5" in out and "Making pictures" not in out
+    assert code == 0 and "1. claude-fable-5-2" in out and "Making pictures" not in out
     code, out, _ = run(capsys, "rankings", "--json")
     assert code == 0 and '"video"' in out and '"updated"' in out

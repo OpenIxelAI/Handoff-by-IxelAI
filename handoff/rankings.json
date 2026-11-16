@@ -1,13 +1,15 @@
 {
- "updated": "2026-11-09",
+ "updated": "2026-11-16",
  "ranks": {
   "coding": [
+   "claude:claude-fable-5-2",
    "claude:claude-sonnet-5-5",
    "claude:claude-opus-5-5",
-   "claude:claude-fable-5-1",
    "codex:gpt-6-astra",
+   "claude:claude-fable-5-1",
    "codex:gpt-6.1-sol",
    "grok:grok-4.7",
+   "codex:gpt-6.1-terra",
    "codex:gpt-6-sol",
    "kimi:kimi-k3.1-pro",
    "codex:gpt-5.5",
@@ -28,6 +30,7 @@
    "lmstudio:qwen3-4b-instruct-2507"
   ],
   "planning": [
+   "claude:claude-fable-5-2",
    "claude:claude-fable-5-1",
    "claude:claude-opus-5-5",
    "codex:gpt-6-astra",
@@ -42,6 +45,7 @@
   "review": [
    "claude:claude-opus-5-5",
    "codex:gpt-6-astra",
+   "claude:claude-fable-5-2",
    "claude:claude-fable-5-1",
    "gemini:gemini-4-argon",
    "gemini:gemini-3.1-pro-preview",
@@ -57,6 +61,7 @@
   "writing": [
    "gemini:gemini-4-argon",
    "claude:claude-opus-5-5",
+   "claude:claude-fable-5-2",
    "claude:claude-fable-5-1",
    "codex:gpt-6-astra",
    "gemini:gemini-3.1-pro-preview",
@@ -86,8 +91,12 @@
  "tiers": {
   "top": [
    {
+    "model": "claude:claude-fable-5-2",
+    "note": "the best planner, first on BenchLM coding; twice Opus's price, so for hard tasks"
+   },
+   {
     "model": "claude:claude-fable-5-1",
-    "note": "the best planner; the dearest, so for hard tasks"
+    "note": "Fable 5.2 does better for less; the dearest Claude"
    },
    {
     "model": "claude:claude-opus-5-5",
@@ -138,6 +147,14 @@
    {
     "model": "codex:gpt-6.1-sol",
     "note": "on a ChatGPT plan"
+   },
+   {
+    "model": "codex:gpt-6.1-terra",
+    "note": "on a ChatGPT plan; half Sol 6.1's price, a little behind it"
+   },
+   {
+    "model": "antigravity:gemini-4-hydrogen",
+    "note": "Google's fast, cheap one, 6th on BenchLM coding: AI Pro in Antigravity; for answers and reviews through Ixel MAT, not an edit worker here"
    },
    {
     "model": "ollama:qwen3.6:27b",
