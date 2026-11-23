@@ -131,9 +131,9 @@ def test_a_model_is_never_replaced_by_a_dearer_one():
     # Haiku goes only to what costs no more, or is free
     found = rankings.fallbacks("coding", "claude", HAIKU, None, rankings.RANKS)
     assert not any(m in f for f in found for m in (SONNET, OPUS, FABLE)) and any("ollama:" in f for f in found)
-    # Fable 5.1, the dearest, can go to the cheaper Claude models: Fable 5.2 (better and cheaper) first
-    assert rankings.fallbacks("coding", "claude", FABLE, None, rankings.RANKS)[:3] == [
-        "claude:claude-fable-5-2", f"claude:{SONNET}", f"claude:{OPUS}"]
+    # Fable 5.1, the dearest Claude, can go to the better, cheaper models ranked above it
+    assert rankings.fallbacks("coding", "claude", FABLE, None, rankings.RANKS)[:4] == [
+        "claude:claude-fable-5-2", "codex:gpt-6.2-astra", f"claude:{OPUS}", f"claude:{SONNET}"]
 
 
 def test_answer_fallbacks_name_agents_once():

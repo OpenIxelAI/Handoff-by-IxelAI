@@ -22,9 +22,9 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-UPDATED = "2026-11-16"
+UPDATED = "2026-11-23"
 SOURCES = (
-    ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Nov 16 2026", "https://benchlm.ai/coding"),
+    ("BenchLM coding ranking (SWE-bench Verified, LiveCodeBench), Nov 21 2026", "https://benchlm.ai/coding"),
     ("BenchLM SWE-bench Verified, open models included, Oct 10 2026",
      "https://benchlm.ai/benchmarks/swe-bench-verified"),
     ("Morph: best open-source LLMs (Terminal-Bench 2.1, GPQA, HLE), Oct 3 2026",
@@ -36,6 +36,10 @@ SOURCES = (
      "https://smartscope.blog/en/blog/antigravity-gemini-4-argon-availability-paid-pro-requirements-2026/"),
     ("Gemini 4 Argon API price: $4 in, $20 out from Dec 1 2026, after a $2/$10 introductory offer",
      "https://www.eesel.ai/blog/gemini-4-argon-pricing"),
+    ("GPT-6.2 Astra and Sol (Nov 17 2026): gpt-6.2-astra ($8 in, $40 out) and gpt-6.2-sol ($2 in, $10 out) in "
+     "Codex on Plus and Pro", "https://www.thedevdrift.com/blog/openai-gpt-6-2-astra-sol-pricing-chatgpt-codex-api"),
+    ("Gemini 4 Neon (Nov 18 2026): gemini-4-neon, $3 in, $15 out, first on BenchLM coding; Antigravity's default on "
+     "AI Pro and Ultra", "https://enjoy.dev/blog/gemini-4-neon/"),
     ("Claude Fable 5.2 (Nov 9 2026): claude-fable-5-2, $8 in, $40 out (20% below Fable 5.1, twice Opus 5.5); "
      "Claude Code's fable alias now runs it", "https://llm-stats.com/blog/research/claude-fable-5-2-launch"),
     ("Gemini 4 Hydrogen (Nov 12 2026): gemini-4-hydrogen, $1.50 in, $7.50 out; Antigravity on AI Pro and Ultra",
@@ -69,31 +73,31 @@ JOBS = {
 # server they're the same models.
 RANKS: dict[str, list[str]] = {
     "coding": [
-        "claude:claude-fable-5-2", "claude:claude-sonnet-5-5", "claude:claude-opus-5-5", "codex:gpt-6-astra",
-        "claude:claude-fable-5-1", "codex:gpt-6.1-sol", "grok:grok-4.7", "codex:gpt-6.1-terra", "codex:gpt-6-sol",
-        "kimi:kimi-k3.1-pro", "codex:gpt-5.5", "kimi:kimi-k3", "cline:claude-sonnet-5-5", "ollama:qwen3.6:27b",
-        "ollama:qwen3.6:35b", "opencode:opencode/step-5-preview-free", "claude:claude-haiku-5-5", "ollama:gpt-oss:120b",
-        "ollama:qwen3-coder:30b", "codex:gpt-6-luna", "ollama:gpt-oss:20b", "ollama:granite4.2:8b", "ollama:qwen3.5:9b",
-        "ollama:qwen2.5-coder:14b", "ollama:qwen3:4b-instruct", "lmstudio:qwen3-4b-instruct-2507",
+        "claude:claude-fable-5-2", "codex:gpt-6.2-astra", "claude:claude-opus-5-5", "claude:claude-sonnet-5-5",
+        "codex:gpt-6.2-sol", "codex:gpt-6-astra", "claude:claude-fable-5-1", "codex:gpt-6.1-sol", "codex:gpt-6.1-terra",
+        "codex:gpt-6-sol", "kimi:kimi-k3.1-pro", "grok:grok-4.7", "codex:gpt-5.5", "kimi:kimi-k3",
+        "cline:claude-sonnet-5-5", "ollama:qwen3.6:27b", "ollama:qwen3.6:35b", "opencode:opencode/step-5-preview-free",
+        "claude:claude-haiku-5-5", "ollama:gpt-oss:120b", "ollama:qwen3-coder:30b", "codex:gpt-6-luna",
+        "ollama:gpt-oss:20b", "ollama:granite4.2:8b", "ollama:qwen3.5:9b", "ollama:qwen2.5-coder:14b",
+        "ollama:qwen3:4b-instruct", "lmstudio:qwen3-4b-instruct-2507",
     ],
     "planning": [
-        "claude:claude-fable-5-2", "claude:claude-fable-5-1", "claude:claude-opus-5-5", "codex:gpt-6-astra",
-        "kimi:kimi-k3",
-        "claude:claude-sonnet-5-5", "codex:gpt-6.1-sol", "ollama:gpt-oss:120b", "ollama:qwen3.6:27b",
-        "claude:claude-haiku-5-5", "ollama:deepseek-r1:14b",
+        "claude:claude-fable-5-2", "codex:gpt-6.2-astra", "claude:claude-fable-5-1", "claude:claude-opus-5-5",
+        "codex:gpt-6-astra", "kimi:kimi-k3", "claude:claude-sonnet-5-5", "codex:gpt-6.2-sol", "codex:gpt-6.1-sol",
+        "ollama:gpt-oss:120b", "ollama:qwen3.6:27b", "claude:claude-haiku-5-5", "ollama:deepseek-r1:14b",
     ],
     "review": [
-        "claude:claude-opus-5-5", "codex:gpt-6-astra", "claude:claude-fable-5-2", "claude:claude-fable-5-1",
-        "gemini:gemini-4-argon",
+        "claude:claude-opus-5-5", "codex:gpt-6.2-astra", "codex:gpt-6-astra", "claude:claude-fable-5-2",
+        "claude:claude-fable-5-1", "gemini:gemini-4-argon", "gemini:gemini-4-neon",
         "gemini:gemini-3.1-pro-preview", "kimi:kimi-k3", "grok:grok-4.7", "claude:claude-sonnet-5-5",
-        "antigravity:gemini-4-argon", "antigravity:gemini-3.1-pro-preview",
+        "antigravity:gemini-4-argon", "antigravity:gemini-4-neon", "antigravity:gemini-3.1-pro-preview",
         "ollama:gpt-oss:120b", "ollama:qwen3.6:27b", "local:",
     ],
     "writing": [
-        "gemini:gemini-4-argon", "claude:claude-opus-5-5", "claude:claude-fable-5-2", "claude:claude-fable-5-1",
-        "codex:gpt-6-astra",
+        "gemini:gemini-4-argon", "gemini:gemini-4-neon", "claude:claude-opus-5-5", "claude:claude-fable-5-2",
+        "claude:claude-fable-5-1", "codex:gpt-6.2-astra", "codex:gpt-6-astra",
         "gemini:gemini-3.1-pro-preview", "kimi:kimi-k3", "grok:grok-4.7", "claude:claude-sonnet-5-5",
-        "antigravity:gemini-4-argon", "antigravity:gemini-3.1-pro-preview",
+        "antigravity:gemini-4-argon", "antigravity:gemini-4-neon", "antigravity:gemini-3.1-pro-preview",
         "ollama:qwen3.6:27b", "ollama:gemma4:12b", "local:",
     ],
     "images": [
@@ -113,7 +117,12 @@ TIERS: dict[str, list[dict[str, str]]] = {
                                                    "so for hard tasks"},
         {"model": "claude:claude-fable-5-1", "note": "Fable 5.2 does better for less; the dearest Claude"},
         {"model": "claude:claude-opus-5-5", "note": "plans and reviews well at about 40% of Fable's price"},
+        {"model": "codex:gpt-6.2-astra", "note": "on a ChatGPT plan: second on BenchLM coding, for less than GPT-6 "
+                                               "Astra"},
         {"model": "codex:gpt-6-astra", "note": "on a ChatGPT plan"},
+        {"model": "antigravity:gemini-4-neon",
+         "note": "Google's newest, first on BenchLM coding and Antigravity's default on AI Pro and Ultra; for answers "
+                 "and reviews through Ixel MAT, not an edit worker here"},
         {"model": "antigravity:gemini-4-argon",
          "note": "Google's newest, first on Arena's text board and 6th on BenchLM coding: AI Pro (its own "
                  "weekly quota) or Ultra; for answers "
@@ -130,6 +139,7 @@ TIERS: dict[str, list[dict[str, str]]] = {
         {"model": "claude:claude-sonnet-5-5", "note": "the best builder for its price"},
         {"model": "grok:grok-4.7", "note": "on SuperGrok through grok, edit-only: strong and cheap"},
         {"model": "codex:gpt-6-sol", "note": "on a ChatGPT plan"},
+        {"model": "codex:gpt-6.2-sol", "note": "on a ChatGPT plan: Sol 6.1's price, and better"},
         {"model": "codex:gpt-6.1-sol", "note": "on a ChatGPT plan"},
         {"model": "codex:gpt-6.1-terra", "note": "on a ChatGPT plan; half Sol 6.1's price, a little behind it"},
         {"model": "antigravity:gemini-4-hydrogen",
@@ -175,10 +185,12 @@ ALIASES = {"claude": {"fable": "claude-fable-5-2", "opus": "claude-opus-5-5", "s
 # when there is one, as the same unit; don't guess it. Gemini 4 Argon: $4 in, $20 out (2026-10-26), its standard
 # price from Dec 1 2026 (the introductory $2/$10 ends Nov 30). Fable 5.2 (2026-11-16): $8 in, 20% below Fable 5.1,
 # so 76 against 5.1's measured 95 (twice Opus, as Anthropic prices them). GPT-6.1 Terra: $1 in, $5 out. Gemini 4
-# Hydrogen: $1.50 in, $7.50 out.
+# Hydrogen: $1.50 in, $7.50 out. GPT-6.2 Astra (2026-11-23): $8 in, $40 out; GPT-6.2 Sol: $2 in, $10 out; Gemini 4
+# Neon: $3 in, $15 out.
 COST = {"claude-fable-5-2": 76, "claude-fable-5-1": 95, "claude-opus-5-5": 38, "claude-sonnet-5-5": 19,
-        "claude-haiku-5-5": 1, "gpt-6-astra": 100, "grok-4.7": 20, "gemini-3.1-pro-preview": 20, "gemini-4-argon": 40,
-        "gemini-4-hydrogen": 15, "gpt-6.1-sol": 20, "gpt-6.1-terra": 10, "gpt-6-luna": 1}
+        "claude-haiku-5-5": 1, "gpt-6.2-astra": 80, "gpt-6-astra": 100, "grok-4.7": 20, "gemini-3.1-pro-preview": 20,
+        "gemini-4-argon": 40, "gemini-4-hydrogen": 15, "gemini-4-neon": 30, "gpt-6.2-sol": 20, "gpt-6.1-sol": 20,
+        "gpt-6.1-terra": 10, "gpt-6-luna": 1}
 # The model an agent runs when the approval names none
 DEFAULT_MODEL = {"claude": "claude-opus-5-5"}
 # The kind of run → the job its fallbacks come from

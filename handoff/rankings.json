@@ -1,17 +1,19 @@
 {
- "updated": "2026-11-16",
+ "updated": "2026-11-23",
  "ranks": {
   "coding": [
    "claude:claude-fable-5-2",
-   "claude:claude-sonnet-5-5",
+   "codex:gpt-6.2-astra",
    "claude:claude-opus-5-5",
+   "claude:claude-sonnet-5-5",
+   "codex:gpt-6.2-sol",
    "codex:gpt-6-astra",
    "claude:claude-fable-5-1",
    "codex:gpt-6.1-sol",
-   "grok:grok-4.7",
    "codex:gpt-6.1-terra",
    "codex:gpt-6-sol",
    "kimi:kimi-k3.1-pro",
+   "grok:grok-4.7",
    "codex:gpt-5.5",
    "kimi:kimi-k3",
    "cline:claude-sonnet-5-5",
@@ -31,11 +33,13 @@
   ],
   "planning": [
    "claude:claude-fable-5-2",
+   "codex:gpt-6.2-astra",
    "claude:claude-fable-5-1",
    "claude:claude-opus-5-5",
    "codex:gpt-6-astra",
    "kimi:kimi-k3",
    "claude:claude-sonnet-5-5",
+   "codex:gpt-6.2-sol",
    "codex:gpt-6.1-sol",
    "ollama:gpt-oss:120b",
    "ollama:qwen3.6:27b",
@@ -44,15 +48,18 @@
   ],
   "review": [
    "claude:claude-opus-5-5",
+   "codex:gpt-6.2-astra",
    "codex:gpt-6-astra",
    "claude:claude-fable-5-2",
    "claude:claude-fable-5-1",
    "gemini:gemini-4-argon",
+   "gemini:gemini-4-neon",
    "gemini:gemini-3.1-pro-preview",
    "kimi:kimi-k3",
    "grok:grok-4.7",
    "claude:claude-sonnet-5-5",
    "antigravity:gemini-4-argon",
+   "antigravity:gemini-4-neon",
    "antigravity:gemini-3.1-pro-preview",
    "ollama:gpt-oss:120b",
    "ollama:qwen3.6:27b",
@@ -60,15 +67,18 @@
   ],
   "writing": [
    "gemini:gemini-4-argon",
+   "gemini:gemini-4-neon",
    "claude:claude-opus-5-5",
    "claude:claude-fable-5-2",
    "claude:claude-fable-5-1",
+   "codex:gpt-6.2-astra",
    "codex:gpt-6-astra",
    "gemini:gemini-3.1-pro-preview",
    "kimi:kimi-k3",
    "grok:grok-4.7",
    "claude:claude-sonnet-5-5",
    "antigravity:gemini-4-argon",
+   "antigravity:gemini-4-neon",
    "antigravity:gemini-3.1-pro-preview",
    "ollama:qwen3.6:27b",
    "ollama:gemma4:12b",
@@ -103,8 +113,16 @@
     "note": "plans and reviews well at about 40% of Fable's price"
    },
    {
+    "model": "codex:gpt-6.2-astra",
+    "note": "on a ChatGPT plan: second on BenchLM coding, for less than GPT-6 Astra"
+   },
+   {
     "model": "codex:gpt-6-astra",
     "note": "on a ChatGPT plan"
+   },
+   {
+    "model": "antigravity:gemini-4-neon",
+    "note": "Google's newest, first on BenchLM coding and Antigravity's default on AI Pro and Ultra; for answers and reviews through Ixel MAT, not an edit worker here"
    },
    {
     "model": "antigravity:gemini-4-argon",
@@ -143,6 +161,10 @@
    {
     "model": "codex:gpt-6-sol",
     "note": "on a ChatGPT plan"
+   },
+   {
+    "model": "codex:gpt-6.2-sol",
+    "note": "on a ChatGPT plan: Sol 6.1's price, and better"
    },
    {
     "model": "codex:gpt-6.1-sol",
